@@ -247,6 +247,31 @@ impl SymphonyIndex {
     pub fn memory_bytes(&self) -> usize {
         self.graph.memory_bytes()
     }
+
+    /// Run `queries.len()` independent searches and return their results in
+    /// the same order. Sequential by default; set `feature = "parallel"`
+    /// to dispatch via Rayon's work-stealing pool (one query per work item).
+    ///
+    /// Each query is independent (no shared mutable state in `&self`), so
+    /// the parallel speedup is essentially linear in physical cores up to
+    /// the point where memory bandwidth becomes the bottleneck (typically
+    /// 4-8x on a server, less on a Pi 5).
+    ///
+    /// **Bit-for-bit equivalence guarantee**: `search_batch` returns the
+    /// exact same `Vec<Vec<SearchResult>>` as a sequential loop calling
+    /// `self.search` once per query. Verified by
+    /// `tests::search_batch_matches_sequential`.
+    pub fn search_batch(&self, queries: &[&[f32]], k: usize, ef: usize) -> Vec<Vec<SearchResult>> {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            queries.par_iter().map(|q| self.search(q, k, ef)).collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            queries.iter().map(|q| self.search(q, k, ef)).collect()
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -491,6 +516,37 @@ mod tests {
             "result count {} must be ≤ ef=10",
             res.len()
         );
+    }
+
+    /// search_batch must produce the exact same Vec<Vec<SearchResult>>
+    /// as a sequential loop calling search() once per query. The test
+    /// runs in both `parallel` and non-parallel feature configurations
+    /// because the assertion is feature-agnostic.
+    #[test]
+    fn search_batch_matches_sequential() {
+        let n = 200;
+        let dim = 64;
+        let cfg = Config {
+            dim,
+            m_base: 8,
+            ef_construction: 50,
+            ..Config::default()
+        };
+        let vecs = gaussian_vecs(n, dim, 31);
+        let (_, _, sym) = build_all(&vecs, &cfg);
+
+        let probes: Vec<&[f32]> = (0..10).map(|i| vecs[i * 7 % n].as_slice()).collect();
+        let batched = sym.search_batch(&probes, 5, 30);
+        let sequential: Vec<Vec<SearchResult>> =
+            probes.iter().map(|q| sym.search(q, 5, 30)).collect();
+        assert_eq!(batched.len(), sequential.len());
+        for (b, s) in batched.iter().zip(sequential.iter()) {
+            assert_eq!(b.len(), s.len());
+            for (br, sr) in b.iter().zip(s.iter()) {
+                assert_eq!(br.idx, sr.idx, "search_batch != search at idx");
+                assert!((br.dist - sr.dist).abs() < 1e-6);
+            }
+        }
     }
 
     /// Out-of-corpus query (a fresh random vector, not from `vecs`):

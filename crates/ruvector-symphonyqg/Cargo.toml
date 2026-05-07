@@ -16,12 +16,20 @@ path = "src/main.rs"
 name = "symphony_bench"
 harness = false
 
+[features]
+default = []
+# Per-query data-parallel batch search via rayon. Each query is independent
+# so this scales linearly with cores. Enable for server workloads with
+# concurrent query streams. Adds rayon to the runtime dependency tree.
+parallel = ["dep:rayon"]
+
 [dependencies]
 rand        = { workspace = true }
 rand_distr  = { workspace = true }
 thiserror   = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
+rayon       = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
