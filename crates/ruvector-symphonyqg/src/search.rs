@@ -311,6 +311,7 @@ mod tests {
             ef_construction: 150,
             metric: Metric::Euclidean,
             seed: 7,
+            vamana: None,
         };
         let vecs = gaussian_vecs(n, dim, 7);
         let (_, _, symphony) = build_all(&vecs, &cfg);
@@ -352,6 +353,7 @@ mod tests {
             ef_construction: 150,
             metric: Metric::Euclidean,
             seed: 8,
+            vamana: None,
         };
         let vecs = gaussian_vecs(n, dim, 8);
         let (_, graph_exact, _) = build_all(&vecs, &cfg);

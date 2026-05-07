@@ -27,6 +27,16 @@ pub struct Config {
     pub ef_construction: usize,
     pub metric: Metric,
     pub seed: u64,
+    /// Optional Vamana α-pruning refinement (DiskANN, NeurIPS 2019).
+    /// Run after the initial sampled-greedy build to improve graph
+    /// quality at large `n`. `None` (the default) skips refinement;
+    /// `Some(VamanaConfig::default())` runs one α=1.2 pass with
+    /// beam_ef=200. See `vamana::VamanaConfig` for tuning knobs.
+    ///
+    /// Recommended: enable when `n ≥ 10_000`. At smaller corpora the
+    /// sampled-greedy graph is already near-optimal; refinement just
+    /// adds build-time cost without recall benefit.
+    pub vamana: Option<vamana::VamanaConfig>,
 }
 
 impl Default for Config {
@@ -37,6 +47,7 @@ impl Default for Config {
             ef_construction: 200,
             metric: Metric::Euclidean,
             seed: 42,
+            vamana: None,
         }
     }
 }
@@ -117,6 +128,14 @@ pub fn try_build_all(
     config.validate()?;
     let flat = FlatExactIndex::build(vecs, config);
     let graph = build::build(vecs, config);
+    // Optional Vamana α-pruning refinement (NeurIPS 2019). Both index
+    // variants benefit from the improved graph topology — keeping their
+    // adjacency identical preserves the apples-to-apples comparison.
+    let graph = if let Some(ref vcfg) = config.vamana {
+        vamana::refine(graph, config, vcfg)
+    } else {
+        graph
+    };
     let graph_clone = graph.clone();
     let graph_exact = GraphExactIndex::from_graph(graph, config.metric);
     let symphony = SymphonyIndex::from_graph(graph_clone, config.metric);

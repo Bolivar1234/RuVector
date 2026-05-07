@@ -300,6 +300,80 @@ mod tests {
         );
     }
 
+    /// Integration test for Config::vamana = Some(...) — validates the
+    /// end-to-end build_all path actually runs refinement and produces
+    /// a measurable recall improvement at the operating point where
+    /// sampled-greedy is known to underperform.
+    ///
+    /// Smaller scale than the n=50K example bench (3000 vecs vs 50000)
+    /// so the test runs in seconds, not minutes; recall delta is
+    /// proportionally smaller but still > 5pp at n=3000.
+    #[test]
+    fn config_vamana_integration_improves_recall() {
+        let n = 3000;
+        let dim = 128;
+        let k = 10;
+        let queries = 30;
+        let ef = 50;
+
+        // Same vectors for both runs — only the Config::vamana flag changes.
+        let mut s = 0xc0ffee_u32;
+        let vecs: Vec<Vec<f32>> = (0..n)
+            .map(|_| {
+                (0..dim)
+                    .map(|_| {
+                        s ^= s << 13;
+                        s ^= s >> 17;
+                        s ^= s << 5;
+                        (s as f32 / u32::MAX as f32) - 0.5
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let measure = |vamana: Option<VamanaConfig>| -> f64 {
+            let cfg = Config {
+                dim,
+                m_base: 16,
+                ef_construction: 100,
+                vamana,
+                ..Config::default()
+            };
+            let (_, _, sym) = build_all(&vecs, &cfg);
+            let mut hit = 0;
+            for q in 0..queries {
+                let query = &vecs[(q * 7 + 3) % n];
+                let res = sym.search(query, k, ef);
+                let mut gt: Vec<(f32, usize)> = vecs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| (dist_l2_sq(query, v), i))
+                    .collect();
+                gt.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                let gt_set: std::collections::HashSet<usize> =
+                    gt.iter().take(k).map(|&(_, i)| i).collect();
+                hit += res.iter().filter(|r| gt_set.contains(&r.idx)).count();
+            }
+            hit as f64 / (queries * k) as f64
+        };
+
+        let r_off = measure(None);
+        let r_on = measure(Some(VamanaConfig::default()));
+        eprintln!(
+            "config_vamana_integration: recall without={:.3} with={:.3} (Δ={:+.3})",
+            r_off,
+            r_on,
+            r_on - r_off
+        );
+        assert!(
+            r_on > r_off + 0.05,
+            "Vamana must improve recall by > 5pp at n={n}: got {:.3} → {:.3} (Δ={:+.3})",
+            r_off,
+            r_on,
+            r_on - r_off
+        );
+    }
+
     #[test]
     fn refine_preserves_or_improves_recall() {
         // Sanity check: one pass of Vamana refinement at n=300, dim=128
