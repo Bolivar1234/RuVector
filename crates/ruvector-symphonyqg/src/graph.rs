@@ -67,8 +67,26 @@ pub fn encode(v: &[f32], signs: &[f32], perm: &[usize]) -> Vec<u8> {
 ///
 ///   dist_est ≈ 2 · |{bit positions where q ≠ d}| / (code_bytes * 8)
 ///
-/// The rustc auto-vectoriser (and LLVM's loop vectoriser) will emit
-/// VPXOR+VPOPCNT on AVX-512BITALG targets without explicit intrinsics.
+/// **Implementation note** (perf-critical hot path): we read codes as u64
+/// chunks where possible (code_bytes ≥ 8) so the popcount runs on full
+/// 64-bit words instead of bytes. This matters because the byte-loop form
+/// the original implementation used:
+///   - Doesn't auto-vectorise to AVX-512 VPOPCNTDQ in our measured asm
+///     output (verified with `cargo asm --release` on x86_64-v4 host).
+///   - Issues 8× as many `popcnt` instructions as the u64 form, even on
+///     scalar targets that ship the SSE4.2 `popcnt` instruction.
+///
+/// On the common operating point (dim=128 → code_bytes=16) this collapses
+/// what was 16 byte-popcounts per neighbour into 2 u64 popcounts. We use
+/// raw pointer reads (`std::ptr::read_unaligned`) so the function works
+/// regardless of caller alignment — the codes section in `SymphonyGraph`
+/// happens to be 4-byte aligned (Vec<u32>-backed), but other callers may
+/// pass arbitrary `&[u8]`. Pure safe Rust would force a per-byte loop
+/// here through Miri-cleanliness; the unaligned read is the right
+/// trade-off (no UB, observable perf win).
+///
+/// Tail bytes (`code_bytes % 8`) are handled by a final per-byte loop
+/// so non-multiple-of-8 code widths (e.g. dim=72 → code_bytes=9) work.
 pub fn batch_hamming_dist(
     query_code: &[u8],
     neighbor_codes: &[u8],
@@ -76,14 +94,36 @@ pub fn batch_hamming_dist(
     code_bytes: usize,
 ) -> Vec<f32> {
     let dim_f = (code_bytes * 8) as f32;
+    let q_words = code_bytes / 8;
+    let q_tail = code_bytes % 8;
+    let q_tail_off = q_words * 8;
+
     (0..n)
         .map(|i| {
             let c = &neighbor_codes[i * code_bytes..(i + 1) * code_bytes];
-            let differing: u32 = query_code
-                .iter()
-                .zip(c)
-                .map(|(&q, &d)| (q ^ d).count_ones())
-                .sum();
+
+            // u64-word path: count_ones on 64 bits at a time. `read_unaligned`
+            // is sound for any pointer (no alignment requirement) and
+            // bit-identical to a byte-wise reconstruction.
+            let mut differing: u32 = 0;
+            // SAFETY: q_words * 8 ≤ code_bytes ≤ q.len() and ≤ c.len() by
+            // construction; both pointers point to readable byte slices.
+            // read_unaligned has no alignment requirement.
+            for w in 0..q_words {
+                let off = w * 8;
+                let q_word: u64 = unsafe {
+                    core::ptr::read_unaligned(query_code.as_ptr().add(off) as *const u64)
+                };
+                let d_word: u64 =
+                    unsafe { core::ptr::read_unaligned(c.as_ptr().add(off) as *const u64) };
+                differing += (q_word ^ d_word).count_ones();
+            }
+
+            // Tail (code_bytes not a multiple of 8) — at most 7 bytes.
+            for j in 0..q_tail {
+                differing += (query_code[q_tail_off + j] ^ c[q_tail_off + j]).count_ones();
+            }
+
             2.0 * differing as f32 / dim_f
         })
         .collect()
@@ -162,12 +202,7 @@ impl SymphonyGraph {
         // a valid u8 ptr. Length scales by 4. No mutation; lifetime tied to
         // self.blocks. This is the canonical pattern used by bytemuck::cast_slice
         // for non-overlapping primitive types of strictly weaker alignment.
-        unsafe {
-            core::slice::from_raw_parts(
-                codes_u32.as_ptr() as *const u8,
-                codes_u32.len() * 4,
-            )
-        }
+        unsafe { core::slice::from_raw_parts(codes_u32.as_ptr() as *const u8, codes_u32.len() * 4) }
     }
 
     /// Full-precision vector for vertex `v`.
@@ -201,8 +236,11 @@ impl SymphonyGraph {
     pub fn block_stride_u32_for(m: usize, code_bytes: usize) -> usize {
         // Codes section is m * code_bytes bytes; we know it's a multiple of 4
         // (m is multiple of BATCH_SIZE=32, code_bytes ≥ 1).
-        debug_assert_eq!((m * code_bytes) % 4, 0,
-            "m * code_bytes must be a multiple of 4 for u32 packing");
+        debug_assert_eq!(
+            (m * code_bytes) % 4,
+            0,
+            "m * code_bytes must be a multiple of 4 for u32 packing"
+        );
         m + (m * code_bytes) / 4
     }
 }
