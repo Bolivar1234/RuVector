@@ -95,12 +95,30 @@ pub fn batch_hamming_dist(
 ///
 /// ```text
 ///   vectors   : [n × dim]              f32  — full precision for re-ranking
-///   neighbors : [n × m]                u32  — adjacency (m = BATCH_SIZE multiple)
-///   nb_codes  : [n × m × code_bytes]   u8   — 1-bit codes inline with edges
-///   self_codes: [n × code_bytes]        u8   — vertex's own 1-bit code (for ep seed)
+///   self_codes: [n × code_bytes]        u8  — vertex's own 1-bit code (ep seed)
+///   blocks    : [n × block_stride_u32] u32 — packed per-vertex adjacency + codes
 ///   signs     : [dim]                  f32
 ///   perm      : [dim]                  usize
 /// ```
+///
+/// **Per-vertex block layout** (the SymphonyQG inline-codes-with-adjacency
+/// invariant — the central memory-layout claim of the SIGMOD 2025 paper):
+///
+/// ```text
+/// block[v]:
+///   [ id_0 id_1 ... id_{m-1} ]                       (m  × u32  =  4·m bytes)
+///   [ code_0 || code_1 || ... || code_{m-1} ]        (m  × code_bytes  bytes,
+///                                                     stored as u32 words for
+///                                                     natural alignment)
+/// ```
+///
+/// Both `neighbors_of(v)` and `nb_codes_of(v)` slice from the **same**
+/// per-vertex contiguous region of `blocks`, so the first cache-line touch
+/// on a vertex lookup brings in BOTH the IDs and the codes.
+///
+/// `m` is always a multiple of `BATCH_SIZE` (=32), and `code_bytes = dim/8`.
+/// Since `m * code_bytes = 32 · code_bytes` is always a multiple of 4 for any
+/// `dim ≥ 8`, the codes section is trivially u32-aligned without padding.
 #[derive(Clone)]
 pub struct SymphonyGraph {
     pub n: usize,
@@ -108,10 +126,14 @@ pub struct SymphonyGraph {
     pub code_bytes: usize,
     pub m: usize,
 
+    /// Per-vertex stride in u32 words: `m + m * code_bytes / 4`.
+    /// Cached so hot-path slice arithmetic is one mul + one add, not three.
+    pub block_stride_u32: usize,
+
     pub vectors: Vec<f32>,
-    pub neighbors: Vec<u32>,
-    /// Inline 1-bit codes: nb_codes[v*m*code_bytes .. (v+1)*m*code_bytes]
-    pub nb_codes: Vec<u8>,
+    /// Packed adjacency + inline codes — ONE allocation, perfect cache
+    /// co-location of a vertex's neighbour IDs and their 1-bit codes.
+    pub blocks: Vec<u32>,
     /// Self codes: self_codes[v*code_bytes .. (v+1)*code_bytes]
     pub self_codes: Vec<u8>,
 
@@ -121,17 +143,31 @@ pub struct SymphonyGraph {
 }
 
 impl SymphonyGraph {
-    /// Neighbor IDs for vertex `v`.
+    /// Neighbor IDs for vertex `v` — first `m` u32 words of its block.
     #[inline]
     pub fn neighbors_of(&self, v: usize) -> &[u32] {
-        &self.neighbors[v * self.m..(v + 1) * self.m]
+        let off = v * self.block_stride_u32;
+        &self.blocks[off..off + self.m]
     }
 
-    /// Inline 1-bit codes for vertex `v`'s neighbors.
+    /// Inline 1-bit codes for vertex `v`'s neighbors — the bytes immediately
+    /// following the IDs in the same per-vertex block. Cast `&[u32] → &[u8]`
+    /// is alignment-safe (u8 has weaker alignment than u32).
     #[inline]
     pub fn nb_codes_of(&self, v: usize) -> &[u8] {
-        let base = v * self.m * self.code_bytes;
-        &self.nb_codes[base..base + self.m * self.code_bytes]
+        let off = v * self.block_stride_u32 + self.m;
+        let codes_u32_len = (self.m * self.code_bytes) / 4;
+        let codes_u32 = &self.blocks[off..off + codes_u32_len];
+        // SAFETY: u8 has alignment 1, u32 has alignment 4 — every u32 ptr is
+        // a valid u8 ptr. Length scales by 4. No mutation; lifetime tied to
+        // self.blocks. This is the canonical pattern used by bytemuck::cast_slice
+        // for non-overlapping primitive types of strictly weaker alignment.
+        unsafe {
+            core::slice::from_raw_parts(
+                codes_u32.as_ptr() as *const u8,
+                codes_u32.len() * 4,
+            )
+        }
     }
 
     /// Full-precision vector for vertex `v`.
@@ -154,10 +190,19 @@ impl SymphonyGraph {
     /// Total heap-allocated bytes.
     pub fn memory_bytes(&self) -> usize {
         self.vectors.len() * 4
-            + self.neighbors.len() * 4
-            + self.nb_codes.len()
+            + self.blocks.len() * 4
             + self.self_codes.len()
             + self.signs.len() * 4
             + self.perm.len() * 8
+    }
+
+    /// Helper: per-vertex stride in u32 words. Inline so build.rs can use it.
+    #[inline]
+    pub fn block_stride_u32_for(m: usize, code_bytes: usize) -> usize {
+        // Codes section is m * code_bytes bytes; we know it's a multiple of 4
+        // (m is multiple of BATCH_SIZE=32, code_bytes ≥ 1).
+        debug_assert_eq!((m * code_bytes) % 4, 0,
+            "m * code_bytes must be a multiple of 4 for u32 packing");
+        m + (m * code_bytes) / 4
     }
 }
