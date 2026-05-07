@@ -51,7 +51,12 @@ impl FlatExactIndex {
             Metric::Euclidean => dist_l2_sq,
             Metric::Cosine => dist_cosine,
         };
-        Self { vectors, n, dim, dist_fn }
+        Self {
+            vectors,
+            n,
+            dim,
+            dist_fn,
+        }
     }
 
     pub fn search(&self, query: &[f32], k: usize) -> Vec<SearchResult> {
@@ -63,10 +68,12 @@ impl FlatExactIndex {
                 )
             })
             .collect();
-        dists.sort_unstable_by(|a, b| {
-            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        dists.iter().take(k).map(|&(d, i)| SearchResult { idx: i, dist: d }).collect()
+        dists.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        dists
+            .iter()
+            .take(k)
+            .map(|&(d, i)| SearchResult { idx: i, dist: d })
+            .collect()
     }
 
     pub fn memory_bytes(&self) -> usize {
@@ -130,7 +137,9 @@ impl GraphExactIndex {
             .map(|HeapEntry(d, i)| SearchResult { idx: i, dist: d })
             .collect();
         out.sort_unstable_by(|a, b| {
-            a.dist.partial_cmp(&b.dist).unwrap_or(std::cmp::Ordering::Equal)
+            a.dist
+                .partial_cmp(&b.dist)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         out.truncate(k);
         out
@@ -198,6 +207,11 @@ impl SymphonyIndex {
 
             for (j, &nb) in nbrs.iter().enumerate() {
                 let nb = nb as usize;
+                // Reject padding slots (graph::PADDING_SENTINEL = u32::MAX,
+                // which casts to a usize > any real g.n) and already-visited
+                // vertices in one branch. Padded slots ALSO have zero-filled
+                // code bytes so the SIMD popcount above produced a uniform,
+                // discardable score — never a real edge displacement.
                 if nb >= g.n || visited[nb] {
                     continue;
                 }
@@ -222,7 +236,9 @@ impl SymphonyIndex {
             })
             .collect();
         reranked.sort_unstable_by(|a, b| {
-            a.dist.partial_cmp(&b.dist).unwrap_or(std::cmp::Ordering::Equal)
+            a.dist
+                .partial_cmp(&b.dist)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         reranked.truncate(k);
         reranked
@@ -268,7 +284,12 @@ mod tests {
     fn flat_exact_finds_self() {
         let n = 200;
         let dim = 64;
-        let cfg = Config { dim, m_base: 8, ef_construction: 50, ..Config::default() };
+        let cfg = Config {
+            dim,
+            m_base: 8,
+            ef_construction: 50,
+            ..Config::default()
+        };
         let vecs = gaussian_vecs(n, dim, 42);
         let flat = FlatExactIndex::build(&vecs, &cfg);
         // Query is vecs[0] itself — must be result[0].
@@ -280,11 +301,17 @@ mod tests {
     /// SymphonyQG needs D ≥ 128 for 1-bit codes to have low estimation variance.
     /// At D=128, code_bytes=16, the estimator std ≈ 0.06 — tight enough for beam guidance.
     #[test]
-    fn symphony_recall_at_10_above_60pct() {
+    fn symphony_recall_at_10_above_70pct() {
         let n = 500;
         let dim = 128; // 1-bit estimation improves with higher D
         let k = 10;
-        let cfg = Config { dim, m_base: 16, ef_construction: 150, metric: Metric::Euclidean, seed: 7 };
+        let cfg = Config {
+            dim,
+            m_base: 16,
+            ef_construction: 150,
+            metric: Metric::Euclidean,
+            seed: 7,
+        };
         let vecs = gaussian_vecs(n, dim, 7);
         let (_, _, symphony) = build_all(&vecs, &cfg);
 
@@ -294,16 +321,23 @@ mod tests {
             let query = &vecs[(q * 7 + 3) % n];
             let gt = ground_truth(&vecs, query, k);
             // ef=300: SymphonyQG needs higher ef than GraphExact because 1-bit estimated
-        // distances are noisy (σ ≈ sin(θ)/√dim). Re-ranking recovers recall.
-        let res = symphony.search(query, k, 300);
-            let result_ids: std::collections::HashSet<usize> =
-                res.iter().map(|r| r.idx).collect();
+            // distances are noisy (σ ≈ sin(θ)/√dim). Re-ranking recovers recall.
+            let res = symphony.search(query, k, 300);
+            let result_ids: std::collections::HashSet<usize> = res.iter().map(|r| r.idx).collect();
             hit += gt.iter().filter(|&&g| result_ids.contains(&g)).count();
         }
         let recall = hit as f64 / (queries * k) as f64;
+        // Measured: 0.714 at dim=128, n=500, ef=300 after the padding-edges
+        // correctness fix (PR #428 review feedback). The PR body's headline
+        // 97.6% was measured at n=5000, ef=100 by `src/main.rs` and reflects
+        // a different operating point — the small-corpus test here gives
+        // the 1-bit estimator less signal.
+        // Floor set to 0.70 so this test catches regressions without
+        // pinning the exact value (which depends on the random seed).
         assert!(
-            recall >= 0.60,
-            "SymphonyQG recall@10 = {:.1}% < 60% floor (dim={dim}, ef=300)", recall * 100.0
+            recall >= 0.70,
+            "SymphonyQG recall@10 = {:.1}% < 70% floor (dim={dim}, ef=300)",
+            recall * 100.0
         );
     }
 
@@ -312,7 +346,13 @@ mod tests {
         let n = 500;
         let dim = 128;
         let k = 10;
-        let cfg = Config { dim, m_base: 16, ef_construction: 150, metric: Metric::Euclidean, seed: 8 };
+        let cfg = Config {
+            dim,
+            m_base: 16,
+            ef_construction: 150,
+            metric: Metric::Euclidean,
+            seed: 8,
+        };
         let vecs = gaussian_vecs(n, dim, 8);
         let (_, graph_exact, _) = build_all(&vecs, &cfg);
 
@@ -322,14 +362,14 @@ mod tests {
             let query = &vecs[(q * 7 + 3) % n];
             let gt = ground_truth(&vecs, query, k);
             let res = graph_exact.search(query, k, 150);
-            let result_ids: std::collections::HashSet<usize> =
-                res.iter().map(|r| r.idx).collect();
+            let result_ids: std::collections::HashSet<usize> = res.iter().map(|r| r.idx).collect();
             hit += gt.iter().filter(|&&g| result_ids.contains(&g)).count();
         }
         let recall = hit as f64 / (queries * k) as f64;
         assert!(
             recall >= 0.70,
-            "GraphExact recall@10 = {:.1}% < 70% floor (dim={dim})", recall * 100.0
+            "GraphExact recall@10 = {:.1}% < 70% floor (dim={dim})",
+            recall * 100.0
         );
     }
 
@@ -338,7 +378,12 @@ mod tests {
         let n = 200;
         let dim = 64;
         let k = 5;
-        let cfg = Config { dim, m_base: 8, ef_construction: 50, ..Config::default() };
+        let cfg = Config {
+            dim,
+            m_base: 8,
+            ef_construction: 50,
+            ..Config::default()
+        };
         let vecs = gaussian_vecs(n, dim, 99);
         let (flat, graph_exact, symphony) = build_all(&vecs, &cfg);
         let q = &vecs[10];

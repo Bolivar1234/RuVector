@@ -6,7 +6,6 @@
 ///   cargo run --release -p ruvector-symphonyqg -- [--fast]
 ///
 /// `--fast` limits to n=5K only (sub-5 s run).
-
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -17,7 +16,11 @@ use ruvector_symphonyqg::{build_all, Config, Metric};
 
 fn main() {
     let fast = std::env::args().any(|a| a == "--fast");
-    let ns: &[usize] = if fast { &[1_000, 5_000] } else { &[1_000, 5_000, 50_000] };
+    let ns: &[usize] = if fast {
+        &[1_000, 5_000]
+    } else {
+        &[1_000, 5_000, 50_000]
+    };
     let dim = 128usize;
     let n_queries = 500usize;
     let k = 10usize;
@@ -25,10 +28,12 @@ fn main() {
     let m_base = 16usize;
 
     println!("\n╔═══ ruvector-symphonyqg benchmark (SymphonyQG, SIGMOD 2025) ═══╗");
+    println!("  dim={dim}, queries={n_queries}, k={k}, m_base={m_base}, BATCH_SIZE=32");
     println!(
-        "  dim={dim}, queries={n_queries}, k={k}, m_base={m_base}, BATCH_SIZE=32"
+        "  Hardware: {} ({})",
+        std::env::consts::ARCH,
+        std::env::consts::OS
     );
-    println!("  Hardware: {} ({})", std::env::consts::ARCH, std::env::consts::OS);
     println!("  Rust release build with LLVM auto-vectorisation\n");
 
     let header = format!(
@@ -63,13 +68,19 @@ fn main() {
             let mem = fmt_bytes(flat.memory_bytes());
             println!(
                 "  {:<14} {:>6} {:>5} {:>9.1}% {:>14.0} {:>12}",
-                "FlatExact", n, "—", recall * 100.0, qps, mem
+                "FlatExact",
+                n,
+                "—",
+                recall * 100.0,
+                qps,
+                mem
             );
         }
 
         // ── GraphExact + SymphonyQG (sweep ef) ────────────────────────────
         for &ef in ef_values {
-            let (ge_recall, ge_qps) = bench_graph_exact(&graph_exact, &queries, &ground_truth, k, ef);
+            let (ge_recall, ge_qps) =
+                bench_graph_exact(&graph_exact, &queries, &ground_truth, k, ef);
             let (sq_recall, sq_qps) = bench_symphony(&symphony, &queries, &ground_truth, k, ef);
 
             let ge_mem = fmt_bytes(graph_exact.memory_bytes());
@@ -77,11 +88,21 @@ fn main() {
 
             println!(
                 "  {:<14} {:>6} {:>5} {:>9.1}% {:>14.0} {:>12}",
-                "GraphExact", n, ef, ge_recall * 100.0, ge_qps, ge_mem
+                "GraphExact",
+                n,
+                ef,
+                ge_recall * 100.0,
+                ge_qps,
+                ge_mem
             );
             println!(
                 "  {:<14} {:>6} {:>5} {:>9.1}% {:>14.0} {:>12}",
-                "SymphonyQG", n, ef, sq_recall * 100.0, sq_qps, sq_mem
+                "SymphonyQG",
+                n,
+                ef,
+                sq_recall * 100.0,
+                sq_qps,
+                sq_mem
             );
 
             if ge_qps > 0.0 {
@@ -134,7 +155,10 @@ fn bench_graph_exact(
         hits += gt[i].iter().filter(|&&g| found.contains(&g)).count();
     }
     let elapsed = t.elapsed().as_secs_f64();
-    (hits as f64 / (queries.len() * k) as f64, queries.len() as f64 / elapsed)
+    (
+        hits as f64 / (queries.len() * k) as f64,
+        queries.len() as f64 / elapsed,
+    )
 }
 
 fn bench_symphony(
@@ -153,7 +177,10 @@ fn bench_symphony(
         hits += gt[i].iter().filter(|&&g| found.contains(&g)).count();
     }
     let elapsed = t.elapsed().as_secs_f64();
-    (hits as f64 / (queries.len() * k) as f64, queries.len() as f64 / elapsed)
+    (
+        hits as f64 / (queries.len() * k) as f64,
+        queries.len() as f64 / elapsed,
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

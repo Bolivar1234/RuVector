@@ -1,14 +1,14 @@
 ---
-adr: 191
+adr: 193
 title: "Add SymphonyQG — co-designed 1-bit quantization + SIMD-batch-aligned graph for in-register ANN search"
 status: proposed
 date: 2026-05-07
-authors: [ruvenet, claude-flow]
-related: [ADR-185, ADR-186, ADR-187, ADR-188, ADR-189, ADR-190]
+authors: [ruvnet, claude-flow]
+related: [ADR-185, ADR-186, ADR-187, ADR-188, ADR-189, ADR-190, ADR-191, ADR-192]
 tags: [ann, vector-search, quantization, simd, graph, symphonyqg, rabitq, fastscan, nightly-research]
 ---
 
-# ADR-191 — SymphonyQG: Co-Designed 1-Bit Quantization + SIMD-Batch-Aligned Graph
+# ADR-193 — SymphonyQG: Co-Designed 1-Bit Quantization + SIMD-Batch-Aligned Graph
 
 ## Status
 

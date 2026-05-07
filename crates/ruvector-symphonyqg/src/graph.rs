@@ -7,8 +7,19 @@ pub const BATCH_SIZE: usize = 32;
 /// Round `m` up to the nearest multiple of BATCH_SIZE.
 #[inline]
 pub fn batch_pad(m: usize) -> usize {
-    ((m + BATCH_SIZE - 1) / BATCH_SIZE) * BATCH_SIZE
+    m.div_ceil(BATCH_SIZE) * BATCH_SIZE
 }
+
+/// Sentinel value stored in `neighbors` slots that are padding (not real
+/// edges). Search must skip these — they exist only to keep the per-vertex
+/// adjacency a multiple of `BATCH_SIZE` so the XNOR-popcount loop stays
+/// on full SIMD lanes. We use `u32::MAX` because (a) it can never collide
+/// with a real vertex id (`n` is bounded well below 2^32 in this crate's
+/// target regime), and (b) a single `nb == PADDING_SENTINEL` check is
+/// cheap and branch-predictor-friendly. The corresponding code bytes are
+/// zero-filled so a stray Hamming-distance read yields a deterministic,
+/// well-defined value rather than data from an unrelated vertex.
+pub const PADDING_SENTINEL: u32 = u32::MAX;
 
 /// Squared Euclidean distance (no sqrt — monotone for ranking).
 #[inline]

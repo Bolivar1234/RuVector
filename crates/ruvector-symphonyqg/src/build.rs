@@ -1,6 +1,7 @@
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
+use crate::graph;
 use crate::graph::{batch_pad, dist_cosine, dist_l2_sq, encode, SymphonyGraph};
 use crate::{Config, Metric};
 
@@ -18,7 +19,8 @@ pub fn build(vecs: &[Vec<f32>], config: &Config) -> SymphonyGraph {
     assert!(n > 1, "need at least 2 vectors");
     assert!(
         vecs.iter().all(|v| v.len() == config.dim),
-        "all vectors must have dim={}", config.dim
+        "all vectors must have dim={}",
+        config.dim
     );
 
     let dim = config.dim;
@@ -73,32 +75,29 @@ pub fn build(vecs: &[Vec<f32>], config: &Config) -> SymphonyGraph {
             .collect();
         dists.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Top m_base become primary neighbours; remaining fill padding slots.
+        // Take only real neighbours — at most `m` but typically fewer when
+        // the candidate pool was small. Padding slots are filled below with
+        // PADDING_SENTINEL so search.rs can skip them in O(1).
         adj[v] = dists.iter().map(|&(_, u)| u).take(m).collect();
-
-        // Pad to exactly m with random vertices if the sample was small.
-        if adj[v].len() < m {
-            let existing: std::collections::HashSet<usize> = adj[v].iter().copied().collect();
-            let mut filler: Vec<usize> =
-                (0..n).filter(|u| *u != v && !existing.contains(u)).collect();
-            filler.shuffle(&mut rng);
-            for &u in filler.iter().take(m - adj[v].len()) {
-                adj[v].push(u);
-            }
-        }
     }
 
     // ── Pack flat arrays ───────────────────────────────────────────────────
-    let mut neighbors = vec![0u32; n * m];
+    // Initialise the neighbours array to PADDING_SENTINEL so any slot that
+    // a vertex doesn't fill is skipped at search time. nb_codes is
+    // zero-filled by `vec![0u8; …]` — matches the SymphonyQG paper's
+    // "no spurious-edge contribution" requirement (every padded code byte
+    // has the same Hamming distance from any query, so its score is a
+    // constant that the sentinel skip discards before any heap insert).
+    let mut neighbors = vec![graph::PADDING_SENTINEL; n * m];
     let mut nb_codes = vec![0u8; n * m * code_bytes];
     let mut self_codes = vec![0u8; n * code_bytes];
 
     for v in 0..n {
         // Self code.
-        self_codes[v * code_bytes..(v + 1) * code_bytes]
-            .copy_from_slice(&all_codes[v]);
+        self_codes[v * code_bytes..(v + 1) * code_bytes].copy_from_slice(&all_codes[v]);
 
-        // Neighbor IDs + inline codes.
+        // Real neighbour IDs + inline codes; remaining slots stay as
+        // PADDING_SENTINEL + zero-bytes from the initial fill above.
         for (j, &nb) in adj[v].iter().enumerate() {
             neighbors[v * m + j] = nb as u32;
             let dst = (v * m + j) * code_bytes;
@@ -136,7 +135,12 @@ mod tests {
 
     #[test]
     fn build_basic() {
-        let cfg = Config { dim: 64, m_base: 8, ef_construction: 50, ..Config::default() };
+        let cfg = Config {
+            dim: 64,
+            m_base: 8,
+            ef_construction: 50,
+            ..Config::default()
+        };
         let vecs = make_vecs(200, 64, 1);
         let g = build(&vecs, &cfg);
         assert_eq!(g.n, 200);
@@ -146,7 +150,12 @@ mod tests {
 
     #[test]
     fn neighbors_all_valid() {
-        let cfg = Config { dim: 64, m_base: 8, ef_construction: 50, ..Config::default() };
+        let cfg = Config {
+            dim: 64,
+            m_base: 8,
+            ef_construction: 50,
+            ..Config::default()
+        };
         let vecs = make_vecs(200, 64, 2);
         let g = build(&vecs, &cfg);
         for v in 0..g.n {
@@ -158,7 +167,10 @@ mod tests {
 
     #[test]
     fn encode_deterministic() {
-        let cfg = Config { dim: 128, ..Config::default() };
+        let cfg = Config {
+            dim: 128,
+            ..Config::default()
+        };
         let vecs = make_vecs(10, 128, 3);
         let g = build(&vecs, &cfg);
         let c1 = g.encode_query(&vecs[0]);
