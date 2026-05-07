@@ -55,6 +55,13 @@ fn main() {
             ef_construction: 200.min(n - 1),
             metric: Metric::Euclidean,
             seed: 42,
+            // Default benchmark omits Vamana for backward-compatible
+            // numbers; the `--vamana` flag below opts into refinement.
+            vamana: if std::env::args().any(|a| a == "--vamana") {
+                Some(ruvector_symphonyqg::vamana::VamanaConfig::default())
+            } else {
+                None
+            },
         };
 
         // ── Build ──────────────────────────────────────────────────────────

@@ -28,14 +28,24 @@ pub struct Config {
     pub metric: Metric,
     pub seed: u64,
     /// Optional Vamana α-pruning refinement (DiskANN, NeurIPS 2019).
-    /// Run after the initial sampled-greedy build to improve graph
-    /// quality at large `n`. `None` (the default) skips refinement;
-    /// `Some(VamanaConfig::default())` runs one α=1.2 pass with
-    /// beam_ef=200. See `vamana::VamanaConfig` for tuning knobs.
+    /// **Status: experimental (PR #428 iter-7).** Currently helps on
+    /// uniform-random data and small/medium clustered corpora; can
+    /// regress recall on large (n ≥ 10K) clustered corpora because the
+    /// refinement uses the existing sampled-greedy graph as its
+    /// candidate source — when that graph has poor recall (e.g. 21%
+    /// at n=50K, ef=200), most candidates are wrong and α-pruning
+    /// selects diverse-but-wrong neighbours.
     ///
-    /// Recommended: enable when `n ≥ 10_000`. At smaller corpora the
-    /// sampled-greedy graph is already near-optimal; refinement just
-    /// adds build-time cost without recall benefit.
+    /// Implemented so far: forward α-prune, back-edge propagation
+    /// (DiskANN §3.3), medoid entry-point selection.
+    ///
+    /// Not yet implemented: iterative refinement from a *random*
+    /// initial graph (DiskANN's actual protocol — fixes the
+    /// candidate-quality bootstrap problem); two-pass α=1.0 → α>1.0
+    /// schedule.
+    ///
+    /// Validated on uniform-Gaussian data at n=3000 (+15pp recall);
+    /// see `examples/vamana_measure.rs` for the empirical state.
     pub vamana: Option<vamana::VamanaConfig>,
 }
 

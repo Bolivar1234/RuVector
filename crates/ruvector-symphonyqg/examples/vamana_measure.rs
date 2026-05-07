@@ -57,11 +57,16 @@ fn main() {
     println!("Building corpus ...");
     let vecs = gaussian_vecs(n, dim, 42);
 
+    // Generate OUT-OF-CORPUS queries (different seed from corpus). Self-queries
+    // (where `query ∈ vecs`) trivially benefit from any improved local
+    // connectivity; out-of-corpus queries are the production-relevant test.
+    let probe_vecs = gaussian_vecs(queries, dim, 99); // separate seed → not in `vecs`
+
     println!(
-        "{:>16} | {:>9} | {:>11} | {:>9}",
-        "config", "build_ms", "recall@10", "search_ms"
+        "{:>16} | {:>9} | {:>11} | {:>11} | {:>9}",
+        "config", "build_ms", "recall@10", "self-recall", "search_ms"
     );
-    println!("{}", "-".repeat(56));
+    println!("{}", "-".repeat(72));
 
     for vamana in [None, Some(VamanaConfig::default())] {
         let label = if vamana.is_some() {
@@ -81,20 +86,36 @@ fn main() {
         let (_, _, symphony) = build_all(&vecs, &cfg);
         let build_ms = t0.elapsed().as_millis();
 
-        let mut hit = 0;
+        // Out-of-corpus recall (production-relevant)
+        let mut hit_oop = 0;
         let t0 = Instant::now();
+        for q in 0..queries {
+            let res = symphony.search(&probe_vecs[q], k, ef);
+            let gt = ground_truth(&vecs, &probe_vecs[q], k);
+            let res_set: std::collections::HashSet<usize> = res.iter().map(|r| r.idx).collect();
+            hit_oop += gt.iter().filter(|&&g| res_set.contains(&g)).count();
+        }
+        let search_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let recall_oop = hit_oop as f64 / (queries * k) as f64;
+
+        // Self-recall (queries IN corpus — easier; included to show
+        // why earlier Vamana measurements looked optimistic).
+        let mut hit_self = 0;
         for q in 0..queries {
             let query = &vecs[(q * 7 + 3) % n];
             let res = symphony.search(query, k, ef);
             let gt = ground_truth(&vecs, query, k);
             let res_set: std::collections::HashSet<usize> = res.iter().map(|r| r.idx).collect();
-            hit += gt.iter().filter(|&&g| res_set.contains(&g)).count();
+            hit_self += gt.iter().filter(|&&g| res_set.contains(&g)).count();
         }
-        let search_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let recall = hit as f64 / (queries * k) as f64;
+        let recall_self = hit_self as f64 / (queries * k) as f64;
+
         println!(
-            "{:>16} | {:>9} | {:>11.3} | {:>9.0}",
-            label, build_ms, recall, search_ms
+            "{:>16} | {:>9} | {:>11.3} | {:>11.3} | {:>9.0}",
+            label, build_ms, recall_oop, recall_self, search_ms
         );
     }
+    println!();
+    println!("recall@10  = OUT-OF-CORPUS queries (production-relevant test)");
+    println!("self-recall = queries sampled FROM corpus (easier — not the right benchmark)");
 }
