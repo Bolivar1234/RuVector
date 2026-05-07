@@ -120,10 +120,7 @@ pub fn build(vecs: &[Vec<f32>], config: &Config) -> SymphonyGraph {
         // `m` is a multiple of BATCH_SIZE=32. Casting `&mut [u32] → &mut [u8]`
         // is alignment-safe (u8 < u32 alignment) and length-safe (4× len).
         let codes_bytes: &mut [u8] = unsafe {
-            core::slice::from_raw_parts_mut(
-                codes_u32.as_mut_ptr() as *mut u8,
-                codes_u32.len() * 4,
-            )
+            core::slice::from_raw_parts_mut(codes_u32.as_mut_ptr() as *mut u8, codes_u32.len() * 4)
         };
         for (j, &nb) in adj[v].iter().enumerate() {
             let dst = j * code_bytes;
