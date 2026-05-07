@@ -391,4 +391,133 @@ mod tests {
         assert_eq!(graph_exact.search(q, k, 50).len(), k);
         assert_eq!(symphony.search(q, k, 50).len(), k);
     }
+
+    // ── Edge-case tests (PR #428 review feedback) ────────────────────────
+
+    /// `n < BATCH_SIZE`: the most padding-heavy regime — every per-vertex
+    /// block is mostly PADDING_SENTINEL slots. Pre-fix this would have
+    /// produced wildly wrong results because random padded edges dominated
+    /// the candidate beam. Post-fix the sentinel skip discards them.
+    #[test]
+    fn small_n_below_batch_size_does_not_panic_or_corrupt() {
+        // n = 8, BATCH_SIZE = 32 → every block has 8 real edges + 24
+        // PADDING_SENTINEL slots. A self-query must return the vertex itself.
+        let n = 8;
+        let dim = 64;
+        let cfg = Config {
+            dim,
+            m_base: 4, // m will be padded to 32 (BATCH_SIZE)
+            ef_construction: 7,
+            ..Config::default()
+        };
+        let vecs = gaussian_vecs(n, dim, 11);
+        let (_, graph_exact, symphony) = build_all(&vecs, &cfg);
+
+        // Self-query: vertex 0 must rank itself in the top-1.
+        let res = symphony.search(&vecs[0], 1, 32);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].idx, 0, "self-query at n<BATCH_SIZE must find itself");
+
+        // GraphExact must agree.
+        let res_g = graph_exact.search(&vecs[0], 1, 32);
+        assert_eq!(res_g[0].idx, 0);
+    }
+
+    /// `dim` not a multiple of 32: stresses the new packed-block stride math.
+    /// `m * code_bytes` must still be a multiple of 4 for the &[u32]→&[u8]
+    /// cast in graph::nb_codes_of to be sound. m = 32, dim = 72 → code_bytes = 9
+    /// → m * code_bytes = 288 (multiple of 4). ✓
+    #[test]
+    fn dim_72_non_multiple_of_32_packs_cleanly() {
+        let n = 64;
+        let dim = 72;
+        let cfg = Config {
+            dim,
+            m_base: 8,
+            ef_construction: 32,
+            ..Config::default()
+        };
+        let vecs = gaussian_vecs(n, dim, 13);
+        let (_, _, symphony) = build_all(&vecs, &cfg);
+
+        // Build did not panic. Search produces a result of the right shape.
+        let res = symphony.search(&vecs[5], 3, 16);
+        assert_eq!(res.len(), 3);
+        for r in &res {
+            assert!(r.idx < n);
+            assert!(r.dist.is_finite());
+        }
+    }
+
+    /// `ef > n`: degenerate — ef-set can never fill. Should still return
+    /// correct results without panicking on heap underflow.
+    #[test]
+    fn ef_larger_than_corpus_returns_valid_results() {
+        let n = 16;
+        let dim = 64;
+        let cfg = Config {
+            dim,
+            m_base: 4,
+            ef_construction: 8,
+            ..Config::default()
+        };
+        let vecs = gaussian_vecs(n, dim, 17);
+        let (_, _, symphony) = build_all(&vecs, &cfg);
+
+        let res = symphony.search(&vecs[3], 5, 1000); // ef=1000 >> n=16
+        assert!(res.len() <= 5);
+        assert!(res.len() <= n);
+    }
+
+    /// `k > ef`: result truncation must respect both bounds.
+    #[test]
+    fn k_larger_than_ef_truncates_to_ef() {
+        let n = 200;
+        let dim = 64;
+        let cfg = Config {
+            dim,
+            m_base: 8,
+            ef_construction: 50,
+            ..Config::default()
+        };
+        let vecs = gaussian_vecs(n, dim, 19);
+        let (_, _, symphony) = build_all(&vecs, &cfg);
+
+        let res = symphony.search(&vecs[1], 50, 10); // k=50 > ef=10
+        assert!(
+            res.len() <= 10,
+            "result count {} must be ≤ ef=10",
+            res.len()
+        );
+    }
+
+    /// Out-of-corpus query (a fresh random vector, not from `vecs`):
+    /// search must not panic and must produce monotone-distance results.
+    #[test]
+    fn out_of_corpus_query_returns_sorted_distances() {
+        let n = 200;
+        let dim = 64;
+        let cfg = Config {
+            dim,
+            m_base: 8,
+            ef_construction: 50,
+            ..Config::default()
+        };
+        let vecs = gaussian_vecs(n, dim, 23);
+        let (_, _, symphony) = build_all(&vecs, &cfg);
+
+        // Query is index 999 from a different seed — definitely not in vecs.
+        let novel: Vec<f32> = gaussian_vecs(1, dim, 9999).into_iter().next().unwrap();
+
+        let res = symphony.search(&novel, 5, 50);
+        assert_eq!(res.len(), 5);
+        for w in res.windows(2) {
+            assert!(
+                w[0].dist <= w[1].dist,
+                "results must be sorted ascending: {} <= {}",
+                w[0].dist,
+                w[1].dist
+            );
+        }
+    }
 }
