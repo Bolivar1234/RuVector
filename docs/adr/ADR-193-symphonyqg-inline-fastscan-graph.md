@@ -88,7 +88,7 @@ Key choices:
 - **D < 128 limitation**: 1-bit estimation noise σ ≈ sin(θ)/√D is too high for D=64. Crate validates `dim % 8 == 0` but not `dim ≥ 128`; a production guard and doc warning are needed.
 - **High-ef crossover at small n**: at ef=200 and n=1K, SymphonyQG is 24% slower than GraphExact (re-ranking 200 vectors exceeds beam-computation savings on a 1K corpus). Users must calibrate ef to the corpus size.
 - **No serialisation**: `SymphonyGraph` is not yet serde/rkyv-serialisable. Graph must be rebuilt on every process start.
-- **Single-threaded search**: no Rayon parallelism in this PoC. GraphExact and FlatExact are also single-threaded, so comparisons are fair.
+- **Per-query parallelism added in iter-8** via the optional `parallel` Cargo feature and `SymphonyIndex::search_batch` (commit `33f314819`). Measured 13.83× wall-clock speedup at 1000 queries on a 16-thread x86_64 host (`examples/parallel_search.rs`). The single-query path is still serial, which is the right call: graph hops are inherently sequential and intra-query parallelism would compete with the per-query work-stealing pool. Both GraphExact and FlatExact remain single-threaded so per-query comparisons are still fair; the new method is intentionally only on `SymphonyIndex` because it's the path consumers will actually use under load.
 - **No WASM port**: the main crate has a `cfg(not(target_arch = "wasm32"))` rayon exclusion pattern; a `ruvector-symphonyqg-wasm` crate is pending.
 
 ### Neutral
