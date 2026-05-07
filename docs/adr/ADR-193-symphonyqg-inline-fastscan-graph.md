@@ -73,18 +73,20 @@ Key choices:
 
 ### Positive
 
-- **2.11–2.48× QPS improvement** over equivalent graph index at n=5K, ef=100, matched recall. Scales to **3.61–4.14×** at n=50K.
-- **No recall regression** at n=5K: SymphonyQG achieves 97.6% vs GraphExact's 97.2% at ef=100 (beam explores wider with 1-bit cost).
+- **1.65× QPS at n=5K, ef=100 with matched recall** (SymphonyQG 97.6% vs GraphExact 97.2%) — the headline operating point. Up to **2.38× at n=50K, ef=50** (lower ef → larger beam-skip benefit). Numbers measured by `cargo run -p ruvector-symphonyqg --release` after the iter-1 padding-edges correctness fix.
+- **No recall regression at the matched operating point**: SymphonyQG slightly *exceeds* GraphExact at n=5K, ef=100 because the wider beam (300 candidates explored at 1-bit cost vs the same 100-token re-rank set) compensates for 1-bit estimation noise.
+- **Cache co-location of IDs and codes is structurally delivered** (iter-2 SOTA layout repack). `SymphonyGraph` now holds adjacency + 1-bit codes in a *single* `Vec<u32>` `blocks` buffer with per-vertex stride `m + m·code_bytes/4`. The first cache-line touch on `neighbors_of(v)` brings in the codes too — the SymphonyQG paper's central memory-layout invariant is met, not just claimed.
 - **Same memory footprint** as GraphExact + 1-bit codes: the inline code storage (nM·D/8 bytes) adds ~33% overhead over bare adjacency list, but is within the same memory envelope as separately-stored quantised vectors.
 - **Composable with ruvector-acorn**: predicate filtering (ACORN's contribution) is independent of distance estimation (SymphonyQG's contribution). Future work: ACORN-γ graph + SymphonyQG inline codes.
-- **LLVM auto-vectorises** the XNOR-popcount loop on x86_64; no architecture-specific unsafe intrinsics needed in the PoC.
-- **7/7 tests pass** (`cargo test -p ruvector-symphonyqg`).
+- **LLVM auto-vectorises** the XNOR-popcount loop on x86_64; no architecture-specific unsafe intrinsics needed in the PoC. Single 4-line `unsafe` for the alignment-safe `&[u32] → &[u8]` cast on the codes section read.
+- **12/12 tests pass** (`cargo test -p ruvector-symphonyqg`), including 5 reviewer-flagged edge cases (n<BATCH_SIZE, dim non-multiple of 32, ef>n, k>ef, out-of-corpus query).
+- **Padding semantics are inert** (iter-1 correctness fix). Vertices with fewer than `m` real edges have their padding slots filled with `PADDING_SENTINEL = u32::MAX` and zero-byte code stubs; the existing `nb >= g.n` rejection branch in search discards them in O(1). Padded codes have constant Hamming distance from any query, so the SIMD popcount over them produces a uniform discardable score.
 
 ### Negative / Risks
 
 - **Graph quality degrades at large n** with sampled-greedy construction: n=50K recall is 17–57% depending on ef (vs >95% expected with Vamana refinement). This is a construction limitation, not a fundamental one; Vamana is the prescribed mitigation.
 - **D < 128 limitation**: 1-bit estimation noise σ ≈ sin(θ)/√D is too high for D=64. Crate validates `dim % 8 == 0` but not `dim ≥ 128`; a production guard and doc warning are needed.
-- **High-ef crossover**: at ef=200 and n=1K, SymphonyQG is 14% slower than GraphExact (re-ranking 200 vectors exceeds beam-computation savings). Users must calibrate ef to the corpus size.
+- **High-ef crossover at small n**: at ef=200 and n=1K, SymphonyQG is 24% slower than GraphExact (re-ranking 200 vectors exceeds beam-computation savings on a 1K corpus). Users must calibrate ef to the corpus size.
 - **No serialisation**: `SymphonyGraph` is not yet serde/rkyv-serialisable. Graph must be rebuilt on every process start.
 - **Single-threaded search**: no Rayon parallelism in this PoC. GraphExact and FlatExact are also single-threaded, so comparisons are fair.
 - **No WASM port**: the main crate has a `cfg(not(target_arch = "wasm32"))` rayon exclusion pattern; a `ruvector-symphonyqg-wasm` crate is pending.
