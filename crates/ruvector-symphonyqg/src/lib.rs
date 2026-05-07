@@ -2,6 +2,7 @@ pub mod build;
 pub mod error;
 pub mod graph;
 pub mod search;
+pub mod vamana;
 
 pub use error::{Result, SymphonyError};
 pub use search::{FlatExactIndex, GraphExactIndex, SearchResult, SymphonyIndex};
