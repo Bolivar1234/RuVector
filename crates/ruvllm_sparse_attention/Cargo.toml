@@ -3,7 +3,15 @@ name = "ruvllm_sparse_attention"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Subquadratic sparse attention kernel for ruvllm style inference"
+description = "Subquadratic O(N log N) sparse attention kernel for Rust LLM inference on edge devices, with optional FastGRNN salience gating for near-linear O(N) scaling"
+authors = ["ruvnet <ruv@ruv.net>"]
+repository = "https://github.com/ruvnet/RuVector"
+documentation = "https://docs.rs/ruvllm_sparse_attention"
+homepage = "https://github.com/ruvnet/RuVector/tree/main/crates/ruvllm_sparse_attention"
+readme = "README.md"
+keywords = ["llm", "attention", "transformer", "inference", "edge"]
+categories = ["algorithms", "science", "mathematics"]
+rust-version = "1.77"
 
 [features]
 default = []
