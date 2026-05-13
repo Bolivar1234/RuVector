@@ -38,7 +38,7 @@ jobs:
       - name: Build ruvector package
         working-directory: npm/packages/ruvector
         run: |
-          npm install --no-audit --no-fund --ignore-scripts
+          npm install --no-audit --no-fund --ignore-scripts --legacy-peer-deps
           npm run build
       - name: Check published-tarball integrity
         run: node scripts/ci/check-npm-package-integrity.mjs
@@ -57,12 +57,17 @@ jobs:
         with:
           node-version: '20'
       - working-directory: npm/packages/ruvector
-        run: npm install --no-audit --no-fund --ignore-scripts
+        run: npm install --no-audit --no-fund --ignore-scripts --legacy-peer-deps
+      - name: Build ruvector dist
+        working-directory: npm/packages/ruvector
+        run: npm run build
       - name: node --check bin/*.js
         working-directory: npm/packages/ruvector
         run: |
           node --check bin/mcp-server.js
           node --check bin/cli.js
+      - name: IntelligenceEngine invariants (#315, #316)
+        run: node scripts/ci/check-intelligence-engine-invariants.mjs
       - name: hooks_route_enhanced does not shell out to npx (#422)
         working-directory: npm/packages/ruvector
         run: |
@@ -101,14 +106,50 @@ jobs:
         run: cargo +stable check -p ruvector-core
       - name: cargo +stable check ruvector-router-core (default features)
         run: cargo +stable check -p ruvector-router-core
-      - name: no unconditional avx512f target_feature in ruvector-core (#438)
+      - name: avx512 target_feature attrs are cfg-gated behind simd-avx512 (#438)
         run: |
-          if grep -RInE '#\[target_feature\(enable\s*=\s*"avx512' crates/ruvector-core/src \
-             | grep -vE 'cfg\(|feature\s*=\s*"simd-avx512"' ; then
-            echo "::error::ruvector-core uses avx512 target_feature without a #[cfg(feature=\"simd-avx512\")] gate — this forces nightly on all dependents (#438)."
+          # For every `#[target_feature(enable = "avx512…")]` line, scan the
+          # preceding 3 lines for a `#[cfg(... feature = "simd-avx512" ...)]`
+          # attribute. If none is present, that nightly-only intrinsic is in
+          # the default build path and forces nightly on every consumer.
+          python3 - <<'PY'
+          import re, sys
+          from pathlib import Path
+          BAD = []
+          for p in Path('crates/ruvector-core/src').rglob('*.rs'):
+              lines = p.read_text().splitlines()
+              for i, line in enumerate(lines):
+                  if re.search(r'#\[target_feature\(enable\s*=\s*"avx512', line):
+                      window = '\n'.join(lines[max(0, i-3):i])
+                      if 'simd-avx512' not in window:
+                          BAD.append(f"{p}:{i+1}: {line.strip()}")
+          if BAD:
+              print('::error::avx512 target_feature attrs are not gated behind `feature = "simd-avx512"` (#438):')
+              for b in BAD: print('  ' + b)
+              sys.exit(1)
+          print('OK: every avx512 target_feature is preceded by a simd-avx512 cfg gate')
+          PY
+
+  # ---------------------------------------------------------------------------
+  # Windows-friendly checkout — guards #458 (case-insensitive filesystems can't
+  # check out two tracked files whose paths differ only by case). Run the check
+  # on Linux (where the FS *is* case-sensitive, so both files are present and
+  # we can detect them via `git ls-files`).
+  # ---------------------------------------------------------------------------
+  no-case-collisions:
+    name: no case-insensitive path collisions (#458)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect colliding paths
+        run: |
+          DUPES=$(git ls-files | awk '{ lo = tolower($0); files[lo] = files[lo] "\n  " $0; count[lo]++ } END { for (k in count) if (count[k] > 1) print "COLLISION (lowercase: " k ")" files[k] "\n" }')
+          if [ -n "$DUPES" ]; then
+            echo "::error::Tracked paths collide on case-insensitive filesystems — Windows clones lose one of each pair (#458):"
+            printf '%s\n' "$DUPES"
             exit 1
           fi
-          echo "OK: avx512 paths are feature-gated"
+          echo "OK: no case-insensitive path collisions"
 
   # ---------------------------------------------------------------------------
   # postgres extension toolchain mismatch — guards #331 (pgrx pinned to 0.12 but
