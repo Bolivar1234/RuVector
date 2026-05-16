@@ -188,14 +188,32 @@ Not a substitute for SIFT1M but reproducible with zero external data.
 
 ### Full-mode results (N ∈ {1k, 10k, 50k}, K=64, D=128, M=8, 100 queries)
 
-*(Run `cargo run --release -p ruvector-residual-vq --bin rvq-demo` to reproduce.)*
+*(Run `cargo run --release -p ruvector-residual-vq --bin rvq-demo` to reproduce.
+Hardware: 4-core x86_64, release build.)*
 
-**N = 1 000** — same as fast-mode above.
+**N = 1 000**
 
-**N = 10 000** — Greedy ~0.28 recall, Rerank ~0.80+ recall at ~7K QPS.
+| Variant          | Build (ms) | Enc (μs/vec) | Search QPS | Recall@10 | Mem (MB) | Compress |
+|------------------|-----------|-------------|-----------|----------|---------|---------|
+| RVQ-Greedy  (A)  | 1 137     | 62.9        | 13 872    | 71.2%    | 0.301   | 64×     |
+| RVQ-Beam4   (B)  | 1 339     | 261.7       | 13 810    | 71.0%    | 0.301   | 64×     |
+| RVQ-Rerank×5 (C) | 1 149     | 60.4        | 11 574    | 99.8%    | 0.813   | 64×     |
 
-**N = 50 000** — Greedy ~0.15 recall, Rerank ~0.65 recall; demonstrates the recall
-cliff that motivates larger K (256→512) or IVF+RVQ combination (see roadmap).
+**N = 10 000**
+
+| Variant          | Build (ms) | Enc (μs/vec) | Search QPS | Recall@10 | Mem (MB) | Compress |
+|------------------|-----------|-------------|-----------|----------|---------|---------|
+| RVQ-Greedy  (A)  | 11 316    | 61.4        |  7 561    | 31.4%    | 0.625   | 64×     |
+| RVQ-Beam4   (B)  | 13 246    | 255.2       |  7 299    | 32.2%    | 0.625   | 64×     |
+| RVQ-Rerank×5 (C) | 11 397    | 61.5        |  5 665    | 76.7%    | 5.745   | 64×     |
+
+**N = 50 000**
+
+| Variant          | Build (ms) | Enc (μs/vec) | Search QPS | Recall@10 | Mem (MB)  | Compress |
+|------------------|-----------|-------------|-----------|----------|---------|---------|
+| RVQ-Greedy  (A)  | 38 087    | 63.3        |  2 300    | 14.0%    |  2.065  | 64×     |
+| RVQ-Beam4   (B)  | 48 693    | 252.9       |  2 281    | 14.3%    |  2.065  | 64×     |
+| RVQ-Rerank×5 (C) | 37 960    | 61.4        |  2 185    | 40.4%    | 27.665  | 64×     |
 
 ### Key Takeaways
 
