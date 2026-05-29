@@ -39,8 +39,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: npm/packages/ruvector/package-lock.json
 
       - name: Install (isolated from workspace)
         run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
@@ -85,8 +83,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: npm/packages/ruvector/package-lock.json
 
       - name: Install
         run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
@@ -125,8 +121,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: npm/packages/ruvector/package-lock.json
 
       - name: Install
         run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
@@ -224,8 +218,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: npm/packages/ruvector/package-lock.json
 
       - name: Install
         run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
@@ -341,8 +333,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: npm/packages/ruvector/package-lock.json
 
       - name: Install
         run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
@@ -451,8 +441,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: npm/packages/ruvector/package-lock.json
 
       - name: Install
         run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
@@ -570,8 +558,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: npm/packages/ruvector/package-lock.json
 
       - name: Install
         run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
