@@ -179,22 +179,16 @@ jobs:
           node bin/cli.js stats "$DB"
 
           # Search with a random query — must return results
+          # CLI accepts: ruvector search <db> --vector <json> --top-k <n>
           node - "$DB" <<'JSEOF'
             const { execSync } = require('child_process');
-            const fs = require('fs');
-            const os = require('os');
-            const path = require('path');
             const db = process.argv[2];
             const dim = 64;
-            const query = { vector: Array.from({ length: dim }, () => Math.random() * 2 - 1), k: 10 };
-            const tmpQ = path.join(os.tmpdir(), 'smoke-query.json');
-            fs.writeFileSync(tmpQ, JSON.stringify(query));
-            const out = execSync(`node bin/cli.js search ${db} --query-file ${tmpQ} --k 10`, {
-              encoding: 'utf8',
-              cwd: process.cwd(),
-              env: { ...process.env, NO_COLOR: '1' },
-            });
-            fs.unlinkSync(tmpQ);
+            const vec = JSON.stringify(Array.from({ length: dim }, () => Math.random() * 2 - 1));
+            const out = execSync(
+              `node bin/cli.js search ${db} --vector '${vec}' --top-k 10`,
+              { encoding: 'utf8', cwd: process.cwd(), env: { ...process.env, NO_COLOR: '1' } }
+            );
             console.log(out);
             if (!/result|score|id/i.test(out)) {
               console.error('::error::search output missing expected fields (id/score/result)');
