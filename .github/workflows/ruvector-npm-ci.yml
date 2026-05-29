@@ -92,6 +92,12 @@ jobs:
       - name: SIGTERM cleanup test
         run: node test/sigterm-cleanup.js
 
+      - name: VectorDB standalone test (insert / search / delete / stats)
+        run: node test/standalone-test.js
+
+      - name: Optimizer test (task-type routing / profiles)
+        run: node test/optimizer.test.js
+
   # ──────────────────────────────────────────────────────────────────────────
   # 3. FUNCTIONAL SMOKE — npx-style CLI works end-to-end
   # ──────────────────────────────────────────────────────────────────────────
