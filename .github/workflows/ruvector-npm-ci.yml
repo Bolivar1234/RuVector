@@ -20,9 +20,6 @@ defaults:
     working-directory: npm/packages/ruvector
 
 env:
-  # Isolate every job from the parent workspace so optional cross-platform
-  # native binaries (router-darwin-arm64 etc.) don't trip EBADPLATFORM.
-  NPM_CONFIG_WORKSPACES: 'false'
   NO_COLOR: '1'
   FORCE_COLOR: '0'
 
