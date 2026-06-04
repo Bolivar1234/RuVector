@@ -1,0 +1,37 @@
+[package]
+name = "ruvector-hybrid-search"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hybrid sparse-dense vector search: BM25 inverted index + dense ANN fused via RRF and cascade reranking"
+
+[[bin]]
+name = "benchmark"
+path = "src/main.rs"
+
+[features]
+default = []
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", priority = -1 }
+unused_imports = "allow"
+dead_code = "allow"
+unused_variables = "allow"
+unused_mut = "allow"
+
+[lints.clippy]
+pedantic = { level = "allow", priority = -2 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
