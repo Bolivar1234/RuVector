@@ -326,6 +326,11 @@ impl ModelInitializer {
             ModelArchitecture::Phi3 => TensorNameMap::phi3(),
             ModelArchitecture::Gemma | ModelArchitecture::Gemma2 => TensorNameMap::gemma(),
             ModelArchitecture::Qwen => TensorNameMap::qwen(),
+            // TODO(ADR-199): placeholder — HRM-Text GGUF export (with
+            // hrm.h_cycles/hrm.l_cycles/hrm.half_layers metadata) is Phase D
+            // item 4 and not yet defined; treat as a generic Llama-style
+            // tensor layout until the converter lands.
+            ModelArchitecture::HrmText => TensorNameMap::llama(),
         };
 
         Ok(Self {

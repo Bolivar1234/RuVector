@@ -10770,6 +10770,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruvllm-hrm"
+version = "2.2.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ruvllm-wasm"
 version = "2.0.2"
 dependencies = [

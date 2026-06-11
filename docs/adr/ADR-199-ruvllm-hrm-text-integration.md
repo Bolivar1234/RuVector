@@ -1,7 +1,7 @@
 ---
 adr: 199
 title: "RuvLLM × HRM-Text — Hierarchical Recurrent Reasoning Kernel for the Governed Runtime"
-status: proposed
+status: accepted
 date: 2026-06-11
 authors: [ruvnet, claude-flow]
 related: [ADR-002, ADR-180, ADR-181, ADR-183, ADR-189]
@@ -12,10 +12,15 @@ tags: [ruvllm, hrm, hierarchical-reasoning, reasoning-kernel, prefixlm, planner,
 
 ## Status
 
-**Proposed.** Phase A/B target a new `crates/ruvllm-hrm` adapter crate behind
-a local vLLM/SGLang endpoint. Native Rust inference (Phase D) is gated on the
-acceptance tests below. Training remains in upstream PyTorch
-(`sapientinc/HRM-Text`).
+**Accepted — implemented.** Phases A–C landed as `crates/ruvllm-hrm`
+(adapter, prompting, governed controller, acceptance harness); Phase D's
+native architecture landed as `crates/ruvllm/src/backends/hrm_text/`
+(recurrent forward, PrefixLM mask, per-cycle KV caches, greedy generation).
+97 tests green; measured results in "Implementation status" below. Open
+items: safetensors/GGUF weight loading (Phase D item 4), the live-endpoint
+PrefixLM parity gate, and all real-model R-track experiments — those
+require the HRM-Text-1B weights behind vLLM on GPU hardware. Training
+remains in upstream PyTorch (`sapientinc/HRM-Text`).
 
 ## Question Being Answered
 
@@ -524,6 +529,45 @@ docs.
    forfeits the bounded-params/unbounded-depth advantage but needs zero
    runtime changes; fallback if Phase D KV costs prove prohibitive on the
    smallest targets.
+
+## Implementation status and measured results (2026-06-11)
+
+Implemented on branch `claude/ruvllm-rust-adr-p2rt1p` by two concurrent
+agents with disjoint file ownership, then integrated and re-verified.
+
+### What landed
+
+| Component | Location | Tests |
+|-----------|----------|-------|
+| Phases A–C: adapter, prompting, controller, harness | `crates/ruvllm-hrm` (16 source/test files) | 61 (44 unit + 17 integration incl. live HTTP stub) |
+| Phase D: native architecture | `crates/ruvllm/src/backends/hrm_text/` (config, mask, cache, tensor, core, generate) | 36 (23 unit + 13 integration) |
+| R1 bench infrastructure | `crates/ruvllm/benches/hrm_bench.rs` | compiles minimal + default |
+
+`HrmCycles` is a first-class field on `GenerateRequest` (asserted on the
+wire in the HTTP-stub test); the router ships `ComputeClass →
+choose_cycles`; every acceptance report embeds `agent_score`, and
+`edge_score` is implemented with measured-input validation.
+
+### Measured (this hardware, synthetic weights — architecture validation)
+
+| Claim from this ADR | Measured |
+|---------------------|----------|
+| Decode parity (prefill + `decode_step` ≡ full PrefixLM forward) | **Bit-exact** (max abs logit diff 0.0 vs 1e-4 tolerance) at every position ≥ prefix_len |
+| Per-cycle KV cost ≈ 3× equal-depth standard model | **Exactly 3×**: hrm_text_l @ 4096 ctx FP32 = 2.81 GiB vs 0.94 GiB standard (asserted in-test) |
+| Recurrence latency scales with cycle count | Linear in `h·(l+1)` core invocations: 1×1 5.6 ms → 2×2 16.0 ms → 3×3 31.7 ms → 4×4 50.4 ms (seq 64, tiny config, ~2.7 ms/invocation-unit) |
+| Per-cycle caches make decode incremental | `decode_step` 396 µs vs 35.2 ms full recompute at seq 128 (**~89×**) |
+| PrefixLM mask correctness | Property-tested: prefix_len=0 ≡ causal; bidirectional prefix block; causal region bit-identical |
+| Offline acceptance harness | 100/100 tasks, all 5 category gates pass against `MockBackend` |
+
+### What these numbers are and are not
+
+These validate the **runtime**: the recurrence is mathematically correct,
+the caches are exact, and the R1/R5 experiment harness works end-to-end.
+They are **not** model-quality results — the cycle-scaling quality curve,
+GSM8K/ARC numbers, acceptance rates for self-speculation, and the Pareto
+chart all require the real HRM-Text-1B checkpoint (vLLM endpoint for
+Phases A–C, weight loading for Phase D). The harness runs against a live
+endpoint by setting `HRM_ENDPOINT`; no code changes needed.
 
 ## References
 

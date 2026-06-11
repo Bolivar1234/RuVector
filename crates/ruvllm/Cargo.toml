@@ -252,6 +252,10 @@ name = "turbo_quant_bench"
 harness = false
 required-features = ["quantize"]
 
+[[bench]]
+name = "hrm_bench"
+harness = false
+
 # Test configurations
 [[test]]
 name = "real_model_test"

@@ -88,11 +88,16 @@ pub use hybrid_pipeline::{
 
 // Model architecture implementations
 pub mod gemma2;
+pub mod hrm_text;
 pub mod phi3;
 
 pub use gemma2::{
     logit_soft_cap, Gemma2Attention, Gemma2Config, Gemma2DecoderLayer, Gemma2MLP, Gemma2Model,
     ATTENTION_SOFTCAP, FINAL_LOGIT_SOFTCAP,
+};
+pub use hrm_text::{
+    AttentionMaskMode, HrmDecoderLayer, HrmKvCaches, HrmRecurrentCore, HrmTextConfig,
+    HrmTextModel, KvLayerCache, NormPosition,
 };
 pub use phi3::{Phi3Attention, Phi3Config, Phi3DecoderLayer, Phi3MLP, Phi3Model};
 
@@ -153,6 +158,9 @@ pub enum ModelArchitecture {
     Gemma,
     /// Gemma-2 architecture (soft-capping, alternating local/global attention)
     Gemma2,
+    /// HRM-Text hierarchical recurrent architecture (H/L dual-timescale
+    /// recurrence, PrefixLM masking, per-cycle KV caches — ADR-199)
+    HrmText,
 }
 
 impl Default for ModelArchitecture {
@@ -172,13 +180,16 @@ impl ModelArchitecture {
             Self::Qwen => "qwen2",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
+            Self::HrmText => "hrm_text",
         }
     }
 
     /// Detect architecture from model ID string
     pub fn detect_from_model_id(model_id: &str) -> Option<Self> {
         let lower = model_id.to_lowercase();
-        if lower.contains("phi-3") || lower.contains("phi3") {
+        if lower.contains("hrm-text") || lower.contains("hrm_text") || lower.contains("hrm") {
+            Some(Self::HrmText)
+        } else if lower.contains("phi-3") || lower.contains("phi3") {
             Some(Self::Phi3)
         } else if lower.contains("phi") {
             Some(Self::Phi)
