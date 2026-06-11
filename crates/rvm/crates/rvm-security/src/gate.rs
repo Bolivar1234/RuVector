@@ -368,6 +368,102 @@ impl<'a, const N: usize, S: rvm_witness::WitnessSigner> SignedSecurityGate<'a, N
     }
 }
 
+// ---------------------------------------------------------------------------
+// v2 security gate (ADR-134 v2)
+// ---------------------------------------------------------------------------
+
+/// Security gate backed by the v2 witness log.
+///
+/// Same P1/P2/P3 pipeline as [`SecurityGate`], but each emission costs
+/// exactly **one** keyed BLAKE3 compression (the v2 chain MAC) instead
+/// of the v1 path's two SHA-256 hashes plus optional per-record HMAC.
+/// Exportable tamper evidence comes from sealing Merkle segments via
+/// [`rvm_witness::WitnessLogV2::seal_segment`], off the syscall path.
+pub struct SecurityGateV2<'a, const N: usize, const SEG: usize> {
+    witness_log: &'a rvm_witness::WitnessLogV2<N, SEG>,
+}
+
+impl<'a, const N: usize, const SEG: usize> SecurityGateV2<'a, N, SEG> {
+    /// Create a new v2 security gate backed by the given witness log.
+    #[must_use]
+    pub const fn new(witness_log: &'a rvm_witness::WitnessLogV2<N, SEG>) -> Self {
+        Self { witness_log }
+    }
+
+    /// Run a request through the full security pipeline.
+    ///
+    /// Identical decision logic to [`SecurityGate::check_and_execute`];
+    /// only the witness emission differs (v2 records, one keyed
+    /// compression each).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecurityError`] if any pipeline stage fails.
+    pub fn check_and_execute(&self, request: &GateRequest) -> Result<GateResponse, SecurityError> {
+        if request.token.cap_type() != request.required_type {
+            self.emit_rejection(request);
+            return Err(SecurityError::CapabilityTypeMismatch);
+        }
+
+        if !request.token.has_rights(request.required_rights) {
+            self.emit_rejection(request);
+            return Err(SecurityError::InsufficientRights);
+        }
+
+        let mut proof_tier = if let Some(commitment) = &request.proof_commitment {
+            if commitment.is_zero() {
+                self.emit_rejection(request);
+                return Err(SecurityError::PolicyViolation);
+            }
+            2
+        } else {
+            1
+        };
+
+        if request.require_p3 {
+            let chain_ok = match &request.p3_witness_data {
+                Some(chain) => verify_p3_chain(chain),
+                None => false,
+            };
+            if !chain_ok {
+                self.emit_rejection(request);
+                return Err(SecurityError::DerivationChainBroken);
+            }
+            proof_tier = 3;
+        }
+
+        let seq = self.emit_allowed(request, proof_tier);
+
+        Ok(GateResponse {
+            witness_sequence: seq,
+            proof_tier,
+        })
+    }
+
+    /// Emit a v2 witness record for an allowed operation.
+    fn emit_allowed(&self, request: &GateRequest, proof_tier: u8) -> u64 {
+        let mut record = rvm_types::WitnessRecordV2::zeroed();
+        record.action_kind = request.action as u8;
+        record.proof_tier = proof_tier;
+        record.actor_partition_id = 0; // caller context not tracked here
+        record.target_object_id = request.target_object_id;
+        record.capability_hash = request.token.truncated_hash();
+        record.timestamp_ns = request.timestamp_ns;
+        self.witness_log.append(record)
+    }
+
+    /// Emit a v2 `ProofRejected` witness record for a denied operation.
+    fn emit_rejection(&self, request: &GateRequest) {
+        let mut record = rvm_types::WitnessRecordV2::zeroed();
+        record.action_kind = ActionKind::ProofRejected as u8;
+        record.actor_partition_id = 0;
+        record.target_object_id = request.target_object_id;
+        record.capability_hash = request.token.truncated_hash();
+        record.timestamp_ns = request.timestamp_ns;
+        self.witness_log.append(record);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,5 +913,88 @@ mod tests {
         let record = log.get(0).unwrap();
         assert_ne!(record.aux, [0u8; 8]);
         assert!(signer.verify(&record));
+    }
+
+    // -- v2 gate tests (ADR-134 v2) -----------------------------------------
+
+    #[test]
+    fn test_gate_v2_allows_and_chains() {
+        let log = rvm_witness::WitnessLogV2::<16, 8>::new();
+        let gate = SecurityGateV2::new(&log);
+
+        let request = GateRequest {
+            token: make_token(CapType::Partition, CapRights::READ | CapRights::WRITE),
+            required_type: CapType::Partition,
+            required_rights: CapRights::READ,
+            proof_commitment: None,
+            require_p3: false,
+            p3_chain_valid: false,
+            p3_witness_data: None,
+            action: ActionKind::PartitionCreate,
+            target_object_id: 42,
+            timestamp_ns: 1000,
+        };
+
+        let response = gate.check_and_execute(&request).unwrap();
+        assert_eq!(response.proof_tier, 1);
+        assert_eq!(log.total_emitted(), 1);
+
+        let record = log.get(0).unwrap();
+        assert_eq!(record.version, 2);
+        assert_eq!(record.action_kind, ActionKind::PartitionCreate as u8);
+        assert_eq!(record.target_object_id, 42);
+        assert_ne!(record.chain_mac, [0u8; 16]);
+    }
+
+    #[test]
+    fn test_gate_v2_denial_emits_rejection() {
+        let log = rvm_witness::WitnessLogV2::<16, 8>::new();
+        let gate = SecurityGateV2::new(&log);
+
+        let request = GateRequest {
+            token: make_token(CapType::Region, CapRights::READ),
+            required_type: CapType::Partition, // mismatch
+            required_rights: CapRights::READ,
+            proof_commitment: None,
+            require_p3: false,
+            p3_chain_valid: false,
+            p3_witness_data: None,
+            action: ActionKind::PartitionCreate,
+            target_object_id: 42,
+            timestamp_ns: 1000,
+        };
+
+        let err = gate.check_and_execute(&request).unwrap_err();
+        assert_eq!(err, SecurityError::CapabilityTypeMismatch);
+        assert_eq!(log.total_emitted(), 1);
+        let record = log.get(0).unwrap();
+        assert_eq!(record.action_kind, ActionKind::ProofRejected as u8);
+    }
+
+    #[test]
+    fn test_gate_v2_emissions_verify_as_chain() {
+        let log = rvm_witness::WitnessLogV2::<16, 8>::new();
+        let gate = SecurityGateV2::new(&log);
+
+        for i in 0..3u64 {
+            let request = GateRequest {
+                token: make_token(CapType::Partition, CapRights::READ),
+                required_type: CapType::Partition,
+                required_rights: CapRights::READ,
+                proof_commitment: None,
+                require_p3: false,
+                p3_chain_valid: false,
+                p3_witness_data: None,
+                action: ActionKind::PartitionCreate,
+                target_object_id: i,
+                timestamp_ns: i * 100,
+            };
+            gate.check_and_execute(&request).unwrap();
+        }
+
+        let mut records = [rvm_types::WitnessRecordV2::zeroed(); 3];
+        assert_eq!(log.snapshot(&mut records), 3);
+        let key = log.chain_key();
+        assert_eq!(rvm_witness::verify_chain_v2(&records, &key), Ok(3));
     }
 }
