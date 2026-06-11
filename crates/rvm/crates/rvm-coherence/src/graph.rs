@@ -581,6 +581,33 @@ impl<const MAX_NODES: usize, const MAX_EDGES: usize> CoherenceGraph<MAX_NODES, M
         pruned
     }
 
+    /// Remove **all** directed edges from `from` to `to`, returning the
+    /// total weight removed.
+    ///
+    /// Used by the split executor to re-home a neighbor's edges across
+    /// a mincut boundary (remove from the source partition, re-add to
+    /// the child). O(MAX_EDGES) — epoch/split path only, not hot path.
+    pub fn remove_directed_edges(
+        &mut self,
+        from: PartitionId,
+        to: PartitionId,
+    ) -> Result<u64, GraphError> {
+        let from_idx = self.find_node(from).ok_or(GraphError::NodeNotFound)?;
+        let to_idx = self.find_node(to).ok_or(GraphError::NodeNotFound)?;
+
+        let mut total = 0u64;
+        for i in 0..MAX_EDGES {
+            if self.edges[i].active
+                && self.edges[i].from == from_idx
+                && self.edges[i].to == to_idx
+            {
+                total = total.saturating_add(self.edges[i].weight);
+                self.remove_edge_by_index(i as EdgeIdx);
+            }
+        }
+        Ok(total)
+    }
+
     /// Allocate a free edge slot.
     fn alloc_edge(&self) -> Result<EdgeIdx, GraphError> {
         for (i, e) in self.edges.iter().enumerate() {
@@ -917,6 +944,43 @@ mod tests {
         assert!(found[g.find_node(pid(2)).unwrap() as usize]);
         assert!(found[g.find_node(pid(3)).unwrap() as usize]);
         assert!(!found[root as usize]);
+    }
+
+    #[test]
+    fn remove_directed_edges_returns_total_weight() {
+        let mut g = CoherenceGraph::<8, 16>::new();
+        g.add_node(pid(1)).unwrap();
+        g.add_node(pid(2)).unwrap();
+        // Two parallel directed edges 1->2, plus a reverse edge 2->1.
+        g.add_edge(pid(1), pid(2), 100).unwrap();
+        g.add_edge(pid(1), pid(2), 50).unwrap();
+        g.add_edge(pid(2), pid(1), 30).unwrap();
+
+        let removed = g.remove_directed_edges(pid(1), pid(2)).unwrap();
+        assert_eq!(removed, 150);
+        // Only the reverse edge remains.
+        assert_eq!(g.edge_count(), 1);
+        assert_eq!(g.edge_weight_between(pid(1), pid(2)), 30);
+        assert_eq!(g.total_weight(pid(1)), 30);
+        assert_eq!(g.total_weight(pid(2)), 30);
+    }
+
+    #[test]
+    fn remove_directed_edges_missing_node_fails() {
+        let mut g = CoherenceGraph::<8, 16>::new();
+        g.add_node(pid(1)).unwrap();
+        assert_eq!(
+            g.remove_directed_edges(pid(1), pid(99)),
+            Err(GraphError::NodeNotFound)
+        );
+    }
+
+    #[test]
+    fn remove_directed_edges_none_present_is_zero() {
+        let mut g = CoherenceGraph::<8, 16>::new();
+        g.add_node(pid(1)).unwrap();
+        g.add_node(pid(2)).unwrap();
+        assert_eq!(g.remove_directed_edges(pid(1), pid(2)), Ok(0));
     }
 
     #[test]

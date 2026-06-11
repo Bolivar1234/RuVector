@@ -242,14 +242,14 @@ make run      # boots at 0x4000_0000, PL011 UART output
 
 ---
 
-## Benchmarks (All ADR Targets Exceeded)
+## Benchmarks
 
 | Operation | ADR Target | Measured | Ratio |
 |-----------|-----------|---------|-------|
 | Witness emit | < 500 ns | **~17 ns** | 29x faster |
 | P1 capability verify | < 1 µs | **< 1 ns** | >1000x faster |
 | P2 proof pipeline | < 100 µs | **~996 ns** | 100x faster |
-| Partition switch (stub) | < 10 µs | **~6 ns** | 1600x faster |
+| Partition switch | < 10 µs | **not validated** | hardware hot path unimplemented (`HARDWARE_SWITCH_IMPLEMENTED == false`); host benches measure only run-queue selection and register-file copy, which are lower bounds |
 | MinCut 16-node | < 50 µs | **~331 ns** | 150x faster |
 | Coherence score (16-node) | budgeted | **~84 ns** | — |
 | Buddy alloc/free cycle | fast | **~184 ns** | — |
