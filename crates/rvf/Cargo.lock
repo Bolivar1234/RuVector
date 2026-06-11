@@ -1909,6 +1909,8 @@ version = "0.1.0"
 dependencies = [
  "crc32c",
  "rvf-types",
+ "sha3",
+ "subtle",
  "tempfile",
  "xxhash-rust",
 ]
