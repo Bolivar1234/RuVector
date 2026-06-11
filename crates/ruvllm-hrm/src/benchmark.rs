@@ -113,8 +113,12 @@ pub struct AcceptanceReport {
     /// Latency budget used as the offline 2x-vs-7B proxy.
     pub latency_budget_ms: u64,
     /// ADR-199 composite governance score:
-    /// `0.40*task_success + 0.20*verifier_accuracy + 0.15*json_validity
-    ///  + 0.15*latency_score + 0.10*memory_score`.
+    ///
+    /// ```text
+    /// 0.40*task_success + 0.20*verifier_accuracy + 0.15*json_validity
+    ///   + 0.15*latency_score + 0.10*memory_score
+    /// ```
+    ///
     /// Quality and cost are always published together — never accuracy alone.
     pub agent_score: f64,
 }

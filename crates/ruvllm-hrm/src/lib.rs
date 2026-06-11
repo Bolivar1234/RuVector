@@ -44,6 +44,7 @@ pub mod backend;
 pub mod benchmark;
 mod benchmark_tasks;
 pub mod controller;
+pub mod edge;
 pub mod mock;
 pub mod parse;
 pub mod prompt;
@@ -61,6 +62,11 @@ pub use benchmark::{
     TaskCategory, DEFAULT_CYCLE_GRID,
 };
 pub use controller::{Controller, ControllerResult, RetrievalFn};
+pub use edge::pareto::{pareto_csv, pareto_frontier, ParetoPoint, PARETO_CSV_HEADER};
+pub use edge::{
+    default_edge_tasks, under_memory_gate, EdgeCheck, EdgeLoopBenchmark, EdgeLoopReport,
+    EdgePowerProfile, EdgeTask, EdgeTaskRecord, MemorySampler, EDGE_MEMORY_GATE_GB,
+};
 pub use mock::MockBackend;
 pub use parse::{extract_json_with_retry, parse_strict_json, parse_verdict};
 pub use prompt::{build_hrm_prompt, FewShot, GenerateParams, HrmMode, PromptBuilder};
