@@ -57,9 +57,14 @@ pub struct WitnessRecord {
     /// - `PartitionSplit`: `new_id_a` in bytes \[0..4\], `new_id_b` in bytes \[4..8\].
     /// - `RegionTransfer`: `from_partition` in bytes \[0..4\], `to_partition` in bytes \[4..8\].
     pub payload: [u8; 8],
-    /// FNV-1a hash of the previous record (chain link for tamper evidence).
+    /// Folded hash of the previous record's chain value (chain link for
+    /// tamper evidence). The chain value binds the previous record's
+    /// content hash, sequence, and its own predecessor.
     pub prev_hash: u32,
-    /// FNV-1a hash of bytes \[0..44\] of this record (self-integrity).
+    /// Folded hash of bytes \[0..44\] of this record (self-integrity).
+    /// Covers all content fields: `sequence`, `timestamp_ns`,
+    /// `action_kind`, `proof_tier`, `flags`, `actor_partition_id`,
+    /// `target_object_id`, `capability_hash`, and `payload`.
     pub record_hash: u32,
     /// Secondary payload or TEE signature fragment.
     pub aux: [u8; 8],
@@ -73,6 +78,47 @@ const _: () = {
 };
 
 impl WitnessRecord {
+    /// Number of leading bytes of the serialized record that constitute
+    /// the record *content* (everything before `prev_hash`): `sequence`,
+    /// `timestamp_ns`, `action_kind`, `proof_tier`, `flags`, reserved,
+    /// `actor_partition_id`, `target_object_id`, `capability_hash`,
+    /// and `payload`. The self-integrity `record_hash` is computed over
+    /// exactly these bytes.
+    pub const CONTENT_LEN: usize = 44;
+
+    /// Number of leading bytes of the serialized record covered by a
+    /// signature (everything before `aux` and padding): the content
+    /// bytes plus `prev_hash` and `record_hash`.
+    pub const SIGNED_LEN: usize = 52;
+
+    /// Serialize the record's fields to a 64-byte little-endian array
+    /// in layout order.
+    ///
+    /// This is the canonical serialization used for both the
+    /// self-integrity `record_hash` (over `[..CONTENT_LEN]`) and witness
+    /// signatures (over `[..SIGNED_LEN]`). Fields are serialized
+    /// manually rather than via `repr(C)` transmutation to avoid
+    /// depending on padding semantics across platforms.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; 64] {
+        let mut buf = [0u8; 64];
+        buf[0..8].copy_from_slice(&self.sequence.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.timestamp_ns.to_le_bytes());
+        buf[16] = self.action_kind;
+        buf[17] = self.proof_tier;
+        buf[18] = self.flags;
+        buf[19] = self.reserved;
+        buf[20..24].copy_from_slice(&self.actor_partition_id.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.target_object_id.to_le_bytes());
+        buf[32..36].copy_from_slice(&self.capability_hash.to_le_bytes());
+        buf[36..44].copy_from_slice(&self.payload);
+        buf[44..48].copy_from_slice(&self.prev_hash.to_le_bytes());
+        buf[48..52].copy_from_slice(&self.record_hash.to_le_bytes());
+        buf[52..60].copy_from_slice(&self.aux);
+        // buf[60..64] is pad, stays zero.
+        buf
+    }
+
     /// Create a zeroed witness record (genesis / placeholder).
     #[must_use]
     pub const fn zeroed() -> Self {

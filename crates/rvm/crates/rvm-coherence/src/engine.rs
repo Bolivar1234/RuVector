@@ -95,6 +95,14 @@ pub struct CoherenceEngine<MCB: MinCutBackend, CB: CoherenceBackend> {
     entries: [PartitionEntry; ENGINE_MAX_NODES],
     /// Epoch counter (incremented on each `tick`).
     epoch: u64,
+    /// Decision computed on the last recompute (or after the last graph
+    /// mutation). Returned on skip ticks instead of re-running the O(n^2)
+    /// recommendation pass over stale data.
+    cached_decision: CoherenceDecision,
+    /// Whether `cached_decision` is still valid. Invalidated by graph
+    /// mutations (`record_communication`, `add_partition`,
+    /// `remove_partition`).
+    cache_valid: bool,
 }
 
 // -----------------------------------------------------------------------
@@ -156,6 +164,8 @@ impl<MCB: MinCutBackend, CB: CoherenceBackend> CoherenceEngine<MCB, CB> {
             coherence_backend,
             entries: [PartitionEntry::EMPTY; ENGINE_MAX_NODES],
             epoch: 0,
+            cached_decision: CoherenceDecision::NoAction,
+            cache_valid: false,
         }
     }
 
@@ -173,6 +183,7 @@ impl<MCB: MinCutBackend, CB: CoherenceBackend> CoherenceEngine<MCB, CB> {
 
     /// Register a new partition in the coherence graph.
     pub fn add_partition(&mut self, id: PartitionId) -> Result<(), RvmError> {
+        self.cache_valid = false;
         self.graph
             .add_node(id)
             .map_err(|e| match e {
@@ -198,6 +209,7 @@ impl<MCB: MinCutBackend, CB: CoherenceBackend> CoherenceEngine<MCB, CB> {
 
     /// Remove a partition from the coherence graph.
     pub fn remove_partition(&mut self, id: PartitionId) -> Result<(), RvmError> {
+        self.cache_valid = false;
         self.graph
             .remove_node(id)
             .map_err(|_| RvmError::PartitionNotFound)?;
@@ -226,10 +238,14 @@ impl<MCB: MinCutBackend, CB: CoherenceBackend> CoherenceEngine<MCB, CB> {
         to: PartitionId,
         weight: u64,
     ) -> Result<(), RvmError> {
+        self.cache_valid = false;
         match self.graph.find_directed_edge(from, to) {
             Some(eidx) => {
+                // Clamp to i64::MAX: a plain `as i64` cast would turn
+                // weights >= 2^63 into negative deltas (weight decrease).
+                let delta = weight.min(i64::MAX as u64) as i64;
                 self.graph
-                    .update_weight(eidx, weight as i64)
+                    .update_weight(eidx, delta)
                     .map_err(|_| RvmError::InternalError)?;
             }
             None => {
@@ -266,7 +282,14 @@ impl<MCB: MinCutBackend, CB: CoherenceBackend> CoherenceEngine<MCB, CB> {
 
         let should_recompute = self.adaptive.tick(cpu_load_percent);
         if !should_recompute {
-            return self.recommend();
+            // Skip tick: avoid the O(n^2) recommendation pass over stale
+            // data. Reuse the cached decision unless the graph mutated
+            // since it was computed.
+            if !self.cache_valid {
+                self.cached_decision = self.recommend();
+                self.cache_valid = true;
+            }
+            return self.cached_decision;
         }
 
         // Recompute scores and pressures for all active partitions
@@ -281,7 +304,10 @@ impl<MCB: MinCutBackend, CB: CoherenceBackend> CoherenceEngine<MCB, CB> {
         }
 
         self.adaptive.record_computation();
-        self.recommend()
+        let decision = self.recommend();
+        self.cached_decision = decision;
+        self.cache_valid = true;
+        decision
     }
 
     /// Get the current coherence score for a partition.
@@ -356,6 +382,13 @@ impl<MCB: MinCutBackend, CB: CoherenceBackend> CoherenceEngine<MCB, CB> {
                     Some(id) => id,
                     None => continue,
                 };
+                // Non-adjacent pairs can never merge: with zero connecting
+                // weight, `evaluate_merge` always yields mutual_bp == 0,
+                // which is below the merge threshold. Skip them via the
+                // O(1) adjacency-matrix lookup.
+                if self.graph.edge_weight_between(a, b) == 0 {
+                    continue;
+                }
                 let signal = pressure::evaluate_merge(a, b, &self.graph);
                 if signal.should_merge {
                     match best_merge {
@@ -594,6 +627,67 @@ mod tests {
         let _ = engine.tick(90);
         let _ = engine.tick(90);
         assert_eq!(engine.epoch(), 4);
+    }
+
+    #[test]
+    fn skip_tick_returns_cached_decision() {
+        let mut engine = DefaultCoherenceEngine::with_defaults(100);
+        engine.add_partition(pid(1)).unwrap();
+        engine.add_partition(pid(2)).unwrap();
+        engine.record_communication(pid(1), pid(2), 1000).unwrap();
+
+        // First tick at high load always computes (split expected).
+        let first = engine.tick(90);
+        assert!(matches!(
+            first,
+            CoherenceDecision::SplitRecommended { .. }
+        ));
+
+        // Subsequent skip ticks (interval = 4 at >80% load) must return
+        // the same cached decision without recomputation.
+        assert_eq!(engine.tick(90), first);
+        assert_eq!(engine.tick(90), first);
+    }
+
+    #[test]
+    fn graph_mutation_invalidates_decision_cache() {
+        let mut engine = DefaultCoherenceEngine::with_defaults(100);
+        engine.add_partition(pid(1)).unwrap();
+        engine.add_partition(pid(2)).unwrap();
+
+        // First tick at high load computes: no edges => NoAction.
+        assert_eq!(engine.tick(90), CoherenceDecision::NoAction);
+
+        // Mutate the graph with heavy mutual traffic; the next skip tick
+        // must not return the stale cached NoAction.
+        engine.record_communication(pid(1), pid(2), 8000).unwrap();
+        engine.record_communication(pid(2), pid(1), 8000).unwrap();
+
+        let decision = engine.tick(90); // skip tick, cache invalidated
+        assert!(matches!(
+            decision,
+            CoherenceDecision::MergeRecommended { .. }
+        ));
+    }
+
+    #[test]
+    fn record_communication_huge_weight_does_not_decrease_edge() {
+        let mut engine = DefaultCoherenceEngine::with_defaults(100);
+        engine.add_partition(pid(1)).unwrap();
+        engine.add_partition(pid(2)).unwrap();
+
+        // Create the edge, then record a weight >= 2^63 on the update
+        // path. A naive `as i64` cast would make the delta negative and
+        // shrink the edge weight.
+        engine.record_communication(pid(1), pid(2), 100).unwrap();
+        engine
+            .record_communication(pid(1), pid(2), u64::MAX)
+            .unwrap();
+
+        let w = engine.graph().edge_weight_between(pid(1), pid(2));
+        // Clamped delta: 100 + i64::MAX.
+        assert_eq!(w, 100u64 + i64::MAX as u64);
+        assert!(w > 100);
     }
 
     #[cfg(feature = "ruvector")]
