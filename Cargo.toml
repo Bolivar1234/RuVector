@@ -96,6 +96,7 @@ members = [
     "crates/mcp-brain-server",
     "crates/ruQu",
     "crates/ruvllm",
+    "crates/ruvllm-hrm",
     "crates/ruvllm-cli",
     "crates/ruvllm-wasm",
     "crates/prime-radiant",

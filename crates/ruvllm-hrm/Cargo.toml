@@ -1,0 +1,53 @@
+[package]
+name = "ruvllm-hrm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "HRM-Text reasoning-kernel adapter for the ruvllm governed runtime (ADR-199): vLLM/SGLang endpoint backend, PrefixLM-aware prompting, governed plan/route/execute/verify controller, and acceptance benchmarks"
+keywords = ["llm", "hrm", "reasoning", "prefixlm", "vllm"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling and diagnostics
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+# Async runtime. Workspace features: rt-multi-thread, sync, macros.
+# `time` is needed for the retry backoff sleeps in the HTTP backend.
+tokio = { workspace = true, features = ["time"] }
+
+# Async traits for the LlmBackend transport abstraction (ADR-199 Layer 1)
+async-trait = "0.1"
+
+# OpenAI-compatible /v1/completions client. Feature set matches the existing
+# graph (mcp-brain, ruvector-kalshi use reqwest 0.12 + rustls).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+# Integration tests spin a minimal TCP HTTP stub to exercise the real
+# reqwest path without external network.
+tokio = { workspace = true, features = ["net", "io-util", "time"] }
+
+[lib]
+crate-type = ["rlib"]
+
+[[example]]
+name = "plan"
+path = "examples/plan.rs"
+
+[[example]]
+name = "verify"
+path = "examples/verify.rs"
+
+[[example]]
+name = "extract_json"
+path = "examples/extract_json.rs"
