@@ -590,7 +590,11 @@ mod tests {
             .zip(neg_signal.gradient_estimate.iter())
             .map(|(a, b)| a * b)
             .sum();
-        assert!(dot < 0.0, "Negative reward should flip gradient, dot={}", dot);
+        assert!(
+            dot < 0.0,
+            "Negative reward should flip gradient, dot={}",
+            dot
+        );
     }
 
     #[test]
@@ -598,8 +602,18 @@ mod tests {
         // The baselined REINFORCE path must remain in effect when step
         // rewards vary (non-degenerate case).
         let mut trajectory = QueryTrajectory::new(1, vec![0.1; 4]);
-        trajectory.add_step(TrajectoryStep::new(vec![1.0, 0.0, 0.0, 0.0], vec![], 0.2, 0));
-        trajectory.add_step(TrajectoryStep::new(vec![0.0, 1.0, 0.0, 0.0], vec![], 0.8, 1));
+        trajectory.add_step(TrajectoryStep::new(
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![],
+            0.2,
+            0,
+        ));
+        trajectory.add_step(TrajectoryStep::new(
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![],
+            0.8,
+            1,
+        ));
         trajectory.finalize(0.8, 1000);
 
         let signal = LearningSignal::from_trajectory(&trajectory);
