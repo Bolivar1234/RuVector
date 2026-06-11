@@ -56,6 +56,18 @@ impl SegmentWriter {
         payload.extend_from_slice(&vector_count.to_le_bytes());
         for (vec_data, &vec_id) in vectors.iter().zip(ids.iter()) {
             payload.extend_from_slice(&vec_id.to_le_bytes());
+            // On little-endian targets the in-memory f32 representation is
+            // already the wire format, so append the whole vector in one copy.
+            #[cfg(target_endian = "little")]
+            {
+                // SAFETY: f32 has no padding and any 4-byte pattern is a valid
+                // byte view; the slice covers exactly vec_data's allocation.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(vec_data.as_ptr() as *const u8, vec_data.len() * 4)
+                };
+                payload.extend_from_slice(bytes);
+            }
+            #[cfg(target_endian = "big")]
             for &val in *vec_data {
                 payload.extend_from_slice(&val.to_le_bytes());
             }
@@ -467,20 +479,10 @@ fn content_hash(data: &[u8]) -> [u8; 16] {
     hash
 }
 
-/// Simple CRC32 computation.
+/// IEEE CRC32 (poly 0xEDB88320, init 0xFFFFFFFF, final XOR) via crc32fast.
+/// Produces values identical to the previous per-bit implementation.
 fn crc32_slice(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFFFFFF;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
+    crc32fast::hash(data)
 }
 
 #[cfg(test)]
@@ -513,6 +515,39 @@ mod tests {
 
         // Check seg_type.
         assert_eq!(data[5], SegmentType::Vec as u8);
+    }
+
+    #[test]
+    fn crc32_matches_reference_bitwise_implementation() {
+        // Reference: the original per-bit IEEE CRC32 (poly 0xEDB88320,
+        // init 0xFFFFFFFF, final XOR) that crc32_slice replaced.
+        fn crc32_reference(data: &[u8]) -> u32 {
+            let mut crc: u32 = 0xFFFF_FFFF;
+            for &byte in data {
+                crc ^= byte as u32;
+                for _ in 0..8 {
+                    if crc & 1 != 0 {
+                        crc = (crc >> 1) ^ 0xEDB8_8320;
+                    } else {
+                        crc >>= 1;
+                    }
+                }
+            }
+            !crc
+        }
+
+        let inputs: [&[u8]; 5] = [
+            b"",
+            b"a",
+            b"123456789",
+            b"hello rvf segment payload",
+            &[0xFFu8; 1024],
+        ];
+        for input in inputs {
+            assert_eq!(crc32_slice(input), crc32_reference(input));
+        }
+        // Standard IEEE CRC32 check value.
+        assert_eq!(crc32_slice(b"123456789"), 0xCBF4_3926);
     }
 
     #[test]

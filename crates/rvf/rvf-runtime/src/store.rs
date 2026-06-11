@@ -349,6 +349,19 @@ impl RvfStore {
         // When a closer vector is found, evict the farthest.
         let mut heap: BinaryHeap<(OrderedFloat, u64)> = BinaryHeap::new();
 
+        // Precompute the query's squared norm once for the cosine metric
+        // instead of recomputing it for every stored vector in the scan.
+        let query_norm_sq = match self.options.metric {
+            DistanceMetric::Cosine => {
+                let mut norm = 0.0f32;
+                for x in vector {
+                    norm += x * x;
+                }
+                norm
+            }
+            _ => 0.0,
+        };
+
         for &vec_id in self.vectors.ids() {
             if self.deletion_bitmap.is_deleted(vec_id) {
                 continue;
@@ -359,7 +372,8 @@ impl RvfStore {
                 }
             }
             if let Some(stored_vec) = self.vectors.get(vec_id) {
-                let dist = compute_distance(vector, stored_vec, &self.options.metric);
+                let dist =
+                    compute_distance(vector, stored_vec, &self.options.metric, query_norm_sq);
                 if heap.len() < k {
                     heap.push((OrderedFloat(dist), vec_id));
                 } else if let Some(&(OrderedFloat(worst), worst_id)) = heap.peek() {
@@ -1873,7 +1887,11 @@ impl RvfStore {
     }
 }
 
-fn compute_distance(a: &[f32], b: &[f32], metric: &DistanceMetric) -> f32 {
+/// Compute the distance between query `a` and stored vector `b`.
+///
+/// `a_norm_sq` is the precomputed squared norm of `a`, used only by the
+/// cosine metric so the query norm is not recomputed per stored vector.
+fn compute_distance(a: &[f32], b: &[f32], metric: &DistanceMetric, a_norm_sq: f32) -> f32 {
     match metric {
         DistanceMetric::L2 => a
             .iter()
@@ -1889,14 +1907,12 @@ fn compute_distance(a: &[f32], b: &[f32], metric: &DistanceMetric) -> f32 {
         }
         DistanceMetric::Cosine => {
             let mut dot = 0.0f32;
-            let mut norm_a = 0.0f32;
             let mut norm_b = 0.0f32;
             for (x, y) in a.iter().zip(b.iter()) {
                 dot += x * y;
-                norm_a += x * x;
                 norm_b += y * y;
             }
-            let denom = (norm_a * norm_b).sqrt();
+            let denom = (a_norm_sq * norm_b).sqrt();
             if denom < f32::EPSILON {
                 1.0
             } else {
@@ -2143,6 +2159,71 @@ mod tests {
             assert_eq!(results.len(), 2);
             assert_eq!(results[0].id, 10);
             assert!(results[0].distance < f32::EPSILON);
+            store.close().unwrap();
+        }
+    }
+
+    #[test]
+    fn reopen_with_manifest_beyond_64kb_tail_window() {
+        // Regression test: find_latest_manifest used to scan only the final
+        // 64 KB of the file. A manifest larger than that (here, via a large
+        // deletion bitmap; the same happens after ~870 ingest batches as the
+        // segment directory grows) pushed the manifest header beyond the
+        // window and made the store unreadable on reopen.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("big_manifest.rvf");
+
+        let options = RvfOptions {
+            dimension: 4,
+            metric: DistanceMetric::L2,
+            ..Default::default()
+        };
+
+        {
+            let mut store = RvfStore::create(&path, options).unwrap();
+
+            let vecs: Vec<Vec<f32>> = (0..10_000).map(|i| random_vector(4, i)).collect();
+            let vec_refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+            let ids: Vec<u64> = (0..10_000).collect();
+            store.ingest_batch(&vec_refs, &ids, None).unwrap();
+
+            // Deleting 9,000 vectors puts 72,000 bytes of deleted IDs into
+            // every subsequent manifest, so the latest manifest header sits
+            // more than 64 KB before EOF.
+            let del_ids: Vec<u64> = (0..9_000).collect();
+            let del_result = store.delete(&del_ids).unwrap();
+            assert_eq!(del_result.deleted, 9_000);
+
+            // One more small ingest so the file ends with a fresh large manifest.
+            let extra = random_vector(4, 99_999);
+            store
+                .ingest_batch(&[extra.as_slice()], &[20_000], None)
+                .unwrap();
+
+            store.close().unwrap();
+        }
+
+        // Sanity-check the premise: no manifest header exists within the
+        // final 64 KB of the file, so the old fixed-window scan would fail.
+        {
+            let data = std::fs::read(&path).unwrap();
+            assert!(data.len() > 65_536);
+            let tail = &data[data.len() - 65_536..];
+            let magic = SEGMENT_MAGIC.to_le_bytes();
+            let found = tail.windows(6).any(|w| {
+                w[0..4] == magic && w[5] == SegmentType::Manifest as u8
+            });
+            assert!(!found, "manifest header unexpectedly within 64 KB tail");
+        }
+
+        {
+            let store = RvfStore::open(&path).unwrap();
+            assert_eq!(store.status().total_vectors, 1_001);
+
+            let query = random_vector(4, 9_500);
+            let results = store.query(&query, 1, &QueryOptions::default()).unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].id, 9_500);
             store.close().unwrap();
         }
     }

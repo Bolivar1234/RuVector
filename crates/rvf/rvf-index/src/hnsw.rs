@@ -7,11 +7,66 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 
 use crate::traits::VectorStore;
+
+/// `f32` wrapper with a total ordering (via `f32::total_cmp`) so that
+/// distances can be stored in heaps with deterministic ordering.
+#[derive(Clone, Copy, PartialEq)]
+struct OrderedF32(f32);
+
+impl Eq for OrderedF32 {}
+
+impl PartialOrd for OrderedF32 {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedF32 {
+    #[inline]
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+#[cfg(not(feature = "std"))]
+type SparseVisited = alloc::collections::BTreeSet<u64>;
+#[cfg(feature = "std")]
+type SparseVisited = std::collections::HashSet<u64>;
+
+/// Visited-node tracker for graph traversal.
+///
+/// Builder-produced graphs use dense IDs (`0..n`), where a bitmap is much
+/// faster than a hashed set; a set is used as fallback for sparse ID spaces.
+enum VisitedSet {
+    /// Bitmap indexed by node ID.
+    Dense(Vec<bool>),
+    /// Fallback for sparse ID spaces.
+    Sparse(SparseVisited),
+}
+
+impl VisitedSet {
+    /// Mark `id` as visited. Returns `true` if it was not visited before.
+    #[inline]
+    fn insert(&mut self, id: u64) -> bool {
+        match self {
+            Self::Dense(bits) => {
+                let idx = id as usize;
+                if idx >= bits.len() {
+                    bits.resize(idx + 1, false);
+                }
+                !core::mem::replace(&mut bits[idx], true)
+            }
+            Self::Sparse(set) => set.insert(id),
+        }
+    }
+}
 
 /// Configuration for HNSW graph construction.
 #[derive(Clone, Debug)]
@@ -249,39 +304,44 @@ impl HnswGraph {
         vectors: &dyn VectorStore,
         distance_fn: &dyn Fn(&[f32], &[f32]) -> f32,
     ) -> Vec<(u64, f32)> {
-        #[cfg(not(feature = "std"))]
-        use alloc::collections::BTreeSet as HashSet;
-        #[cfg(feature = "std")]
-        use std::collections::HashSet;
+        // Builder-produced graphs have dense node IDs (0..n), so prefer a
+        // bitmap sized by the max ID; fall back to a set when IDs are sparse.
+        let max_id = self
+            .layers
+            .first()
+            .and_then(|l| l.adjacency.keys().next_back())
+            .copied();
+        let node_count = self.node_count() as u64;
+        let mut visited = match max_id {
+            Some(max) if max < node_count.saturating_mul(4).max(1024) => {
+                VisitedSet::Dense(vec![false; (max + 1) as usize])
+            }
+            _ => VisitedSet::Sparse(SparseVisited::new()),
+        };
 
-        let mut visited = HashSet::new();
-        // candidates sorted by (distance, id) — acts as a min-heap.
-        let mut candidates: Vec<(u64, f32)> = Vec::new();
-        let mut results: Vec<(u64, f32)> = Vec::new();
+        // Min-heap of candidates: closest first.
+        let mut candidates: BinaryHeap<Reverse<(OrderedF32, u64)>> = BinaryHeap::new();
+        // Bounded max-heap of results: the worst (farthest) entry on top.
+        let mut results: BinaryHeap<(OrderedF32, u64)> = BinaryHeap::new();
 
         for &ep in entry_points {
             if visited.insert(ep) {
                 if let Some(v) = vectors.get_vector(ep) {
                     let d = distance_fn(query, v);
-                    candidates.push((ep, d));
-                    results.push((ep, d));
+                    candidates.push(Reverse((OrderedF32(d), ep)));
+                    results.push((OrderedF32(d), ep));
                 }
             }
         }
+        while results.len() > ef {
+            results.pop();
+        }
 
-        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
-
-        let mut candidate_idx = 0;
-
-        while candidate_idx < candidates.len() {
-            let (cid, cdist) = candidates[candidate_idx];
-            candidate_idx += 1;
-
+        while let Some(Reverse((OrderedF32(cdist), cid))) = candidates.pop() {
             // If the closest candidate is farther than the worst result and
             // we already have `ef` results, stop.
             if results.len() >= ef {
-                let worst_dist = results.last().map_or(f32::MAX, |r| r.1);
+                let worst_dist = results.peek().map_or(f32::MAX, |&(OrderedF32(d), _)| d);
                 if cdist > worst_dist {
                     break;
                 }
@@ -295,33 +355,14 @@ impl HnswGraph {
                 if let Some(nv) = vectors.get_vector(nid) {
                     let d = distance_fn(query, nv);
                     let worst_dist = if results.len() >= ef {
-                        results.last().map_or(f32::MAX, |r| r.1)
+                        results.peek().map_or(f32::MAX, |&(OrderedF32(w), _)| w)
                     } else {
                         f32::MAX
                     };
 
                     if d < worst_dist || results.len() < ef {
-                        // Insert into candidates (sorted).
-                        let pos = candidates[candidate_idx..]
-                            .binary_search_by(|probe| {
-                                probe
-                                    .1
-                                    .partial_cmp(&d)
-                                    .unwrap_or(core::cmp::Ordering::Equal)
-                            })
-                            .unwrap_or_else(|e| e);
-                        candidates.insert(candidate_idx + pos, (nid, d));
-
-                        // Insert into results (sorted).
-                        let rpos = results
-                            .binary_search_by(|probe| {
-                                probe
-                                    .1
-                                    .partial_cmp(&d)
-                                    .unwrap_or(core::cmp::Ordering::Equal)
-                            })
-                            .unwrap_or_else(|e| e);
-                        results.insert(rpos, (nid, d));
+                        candidates.push(Reverse((OrderedF32(d), nid)));
+                        results.push((OrderedF32(d), nid));
 
                         if results.len() > ef {
                             results.pop();
@@ -331,7 +372,13 @@ impl HnswGraph {
             }
         }
 
-        results
+        // Drain results sorted by (distance, id) ascending.
+        let mut out: Vec<(u64, f32)> = results
+            .into_iter()
+            .map(|(OrderedF32(d), id)| (id, d))
+            .collect();
+        out.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        out
     }
 
     /// Prune neighbors of a node to keep only the closest `max_neighbors`.

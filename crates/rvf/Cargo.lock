@@ -1849,6 +1849,7 @@ dependencies = [
 name = "rvf-runtime"
 version = "0.2.0"
 dependencies = [
+ "crc32fast",
  "rand",
  "rvf-types",
  "tempfile",

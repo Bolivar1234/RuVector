@@ -81,9 +81,32 @@ pub(crate) fn find_latest_manifest<R: Read + Seek>(
         return Ok(None);
     }
 
-    // Read up to 64 KB from the tail of the file into memory for scanning.
-    // The manifest is typically ~4 KB, so 64 KB gives 16x headroom.
-    let scan_size = std::cmp::min(file_size, 65_536) as usize;
+    // The manifest grows with segment count, so it can extend arbitrarily far
+    // back from EOF. Progressively widen the backward scan window (64 KB ->
+    // 1 MB -> 16 MB -> whole file) until a valid manifest is found or the
+    // file start is reached.
+    const SCAN_WINDOWS: [u64; 4] = [64 << 10, 1 << 20, 16 << 20, u64::MAX];
+    let mut prev_scan_size = 0u64;
+    for window in SCAN_WINDOWS {
+        let scan_size = window.min(file_size);
+        if scan_size == prev_scan_size {
+            break; // Already scanned the whole file.
+        }
+        if let Some(manifest) = scan_tail_for_manifest(reader, file_size, scan_size as usize)? {
+            return Ok(Some(manifest));
+        }
+        prev_scan_size = scan_size;
+    }
+
+    Ok(None)
+}
+
+/// Scan the final `scan_size` bytes of the file for the latest valid manifest.
+fn scan_tail_for_manifest<R: Read + Seek>(
+    reader: &mut R,
+    file_size: u64,
+    scan_size: usize,
+) -> io::Result<Option<ParsedManifest>> {
     let scan_start = file_size - scan_size as u64;
     reader.seek(SeekFrom::Start(scan_start))?;
     let mut buf = vec![0u8; scan_size];
@@ -466,20 +489,9 @@ fn compute_content_hash(data: &[u8]) -> [u8; 16] {
     hash
 }
 
-/// Simple CRC32 computation (matches write_path::crc32_slice).
+/// IEEE CRC32 computation (matches write_path::crc32_slice).
 fn crc32_for_verify(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
+    crc32fast::hash(data)
 }
 
 #[cfg(test)]
