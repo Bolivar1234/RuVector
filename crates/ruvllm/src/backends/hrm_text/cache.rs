@@ -89,6 +89,17 @@ impl KvLayerCache {
         self.v = Vec::new();
         self.cached_len = 0;
     }
+
+    /// Truncate to the first `len` cached positions. No-op if `len` is at or
+    /// beyond the current length. Used for speculative-decoding rollback
+    /// (ADR-199 R2): rejected draft positions are dropped from the cache.
+    pub fn truncate(&mut self, len: usize) {
+        if len < self.cached_len {
+            self.k.truncate(len * self.kv_dim);
+            self.v.truncate(len * self.kv_dim);
+            self.cached_len = len;
+        }
+    }
 }
 
 /// All KV caches for one HRM-Text sequence, indexed by (level, cycle, layer).
@@ -171,6 +182,16 @@ impl HrmKvCaches {
     pub fn projected_memory_bytes(config: &HrmTextConfig, seq_len: usize) -> usize {
         let slots = (config.h_cycles * config.l_cycles + config.h_cycles) * config.half_layers;
         slots * 2 * seq_len * config.kv_dim() * std::mem::size_of::<f32>()
+    }
+
+    /// Truncate every slot to the first `len` positions (speculative-decoding
+    /// rollback, ADR-199 R2). Slots already at or below `len` are untouched.
+    pub fn truncate(&mut self, len: usize) {
+        for slot in self.l_slots.iter_mut().chain(self.h_slots.iter_mut()) {
+            for cache in slot.iter_mut() {
+                cache.truncate(len);
+            }
+        }
     }
 
     /// Clear every slot.
@@ -279,6 +300,27 @@ mod tests {
         let big = HrmKvCaches::projected_memory_bytes(&config, 64);
         // slots scale as h * (l + 1): 2*(2+1)=6 -> 4*(4+1)=20
         assert_eq!(big * 6, base * 20);
+    }
+
+    #[test]
+    fn test_truncate_rolls_back_positions() {
+        let config = HrmTextConfig::tiny_test();
+        let mut cache = KvLayerCache::new(config.kv_dim());
+        let k = vec![0.5f32; 4 * config.kv_dim()];
+        let v = vec![0.25f32; 4 * config.kv_dim()];
+        cache.append(&k, &v).unwrap();
+        assert_eq!(cache.len(), 4);
+        cache.truncate(6); // beyond length: no-op
+        assert_eq!(cache.len(), 4);
+        cache.truncate(2);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.keys().len(), 2 * config.kv_dim());
+        assert_eq!(cache.values().len(), 2 * config.kv_dim());
+        // Appending after truncation continues from the new length.
+        cache
+            .append(&k[..config.kv_dim()], &v[..config.kv_dim()])
+            .unwrap();
+        assert_eq!(cache.len(), 3);
     }
 
     #[test]

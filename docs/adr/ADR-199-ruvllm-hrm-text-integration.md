@@ -16,11 +16,14 @@ tags: [ruvllm, hrm, hierarchical-reasoning, reasoning-kernel, prefixlm, planner,
 (adapter, prompting, governed controller, acceptance harness); Phase D's
 native architecture landed as `crates/ruvllm/src/backends/hrm_text/`
 (recurrent forward, PrefixLM mask, per-cycle KV caches, greedy generation).
-97 tests green; measured results in "Implementation status" below. Open
-items: safetensors/GGUF weight loading (Phase D item 4), the live-endpoint
-PrefixLM parity gate, and all real-model R-track experiments — those
-require the HRM-Text-1B weights behind vLLM on GPU hardware. Training
-remains in upstream PyTorch (`sapientinc/HRM-Text`).
+133 tests green; measured results in "Implementation status" below.
+Phase 2 additions: safetensors weight I/O (bitwise round-trip), the R2
+self-speculative decoder (output-identity invariant proven), R3 state
+snapshot/warm-start, and the R4 edge-loop Pareto benchmark. Open items:
+GGUF export, the live-endpoint PrefixLM parity gate, and all real-model
+R-track experiments — those require the HRM-Text-1B weights behind vLLM
+on GPU hardware. Training remains in upstream PyTorch
+(`sapientinc/HRM-Text`).
 
 ## Question Being Answered
 
@@ -541,9 +544,13 @@ agents with disjoint file ownership, then integrated and re-verified.
 
 | Component | Location | Tests |
 |-----------|----------|-------|
-| Phases A–C: adapter, prompting, controller, harness | `crates/ruvllm-hrm` (16 source/test files) | 61 (44 unit + 17 integration incl. live HTTP stub) |
-| Phase D: native architecture | `crates/ruvllm/src/backends/hrm_text/` (config, mask, cache, tensor, core, generate) | 36 (23 unit + 13 integration) |
-| R1 bench infrastructure | `crates/ruvllm/benches/hrm_bench.rs` | compiles minimal + default |
+| Phases A–C: adapter, prompting, controller, harness | `crates/ruvllm-hrm` | 71 (54 unit + 17 integration incl. live HTTP stub) |
+| Phase D: native architecture | `crates/ruvllm/src/backends/hrm_text/` (config, mask, cache, tensor, core, generate) | 46 (33 unit + 13 integration) |
+| Phase D item 4: safetensors weight I/O (hand-rolled v0.x, F32, HF alias table, shape validation) | `hrm_text/io.rs` | round-trip bitwise-exact |
+| R2: self-speculative decoder (cycle-asymmetric draft/verify, cache rollback) | `hrm_text/speculative.rs` | 14 phase-2 integration tests |
+| R3: state snapshot / embed_state / warm-start (fingerprint-guarded) | `hrm_text/state.rs` | covered in phase-2 tests |
+| R4: edge-loop Pareto benchmark (governed loop under 2 GB gate, pareto_csv + frontier) | `ruvllm-hrm/src/edge/` | 2 edge integration tests |
+| R1/R2 bench infrastructure | `crates/ruvllm/benches/hrm_bench.rs` | compiles minimal + default |
 
 `HrmCycles` is a first-class field on `GenerateRequest` (asserted on the
 wire in the HTTP-stub test); the router ships `ComputeClass →
@@ -582,10 +589,10 @@ The headline result is therefore not "HRM beats SOTA." It is:
 | Runtime correctness | **Closed** | Native recurrence is mathematically tested |
 | Cache correctness | **Closed** | Decode path is safe to optimize |
 | Cycle latency | **Closed** | R1 compute axis is measurable |
-| Edge cost model | Partially closed | Memory and latency quantified; watts pending hardware |
+| Edge cost model | Partially closed | Memory + latency quantified, benchmark + Pareto pipeline built; watts pending hardware |
 | Real model quality | Open | Requires HRM-Text-1B checkpoint on GPU |
-| Self-speculation | Open | Needs acceptance-rate data |
-| Latent memory | Open | Needs native state export + retrieval tests |
+| Self-speculation | Mechanism closed | Decoder proven output-identical to full-cycle greedy; the >50 % acceptance gate is a real-weights question (synthetic weights measure 7 %, as expected for random logits) |
+| Latent memory | Export closed | capture_state/embed_state/prefill_warm implemented, fingerprint-guarded; cross-prompt transfer gains untested |
 
 ### Claims-to-evidence map
 
@@ -600,9 +607,14 @@ claimable until its evidence exists.
 | Cycle cost scales linearly | Criterion bench, `h·(l+1)` invocations | **Proven** |
 | Cycle depth is API-routable | Wire-level assertion in HTTP-stub test; `ComputeClass` schedule | **Proven** |
 | Governed loop exists and gates on verification | Controller tests + 100-task offline acceptance suite | **Proven** |
+| Weight save/load is exact | safetensors round-trip, bitwise-identical logits (`f32::to_bits`) under Causal and PrefixLM | **Proven** |
+| Self-speculation never changes output | Identity invariant vs full-cycle greedy across draft settings × K ∈ {1,2,4,8} | **Proven** |
+| Latent state export/warm-start works mechanically | snapshot/fingerprint/embed/warm-start tests | **Proven** |
+| Edge loop runs under the 2 GB gate with auditable cost | EdgeLoopBenchmark offline run: 20/20, stable, 0.007 GB RSS, pareto_csv emitted | **Proven** (offline; HW watts pending) |
 | HRM quality improves with cycles | GPU eval (R1 sweep) | Not proven |
-| Self-speculation speeds decode | Acceptance-rate measurement | Not proven |
-| Edge Pareto frontier | Hardware benchmark + the one chart | Not proven |
+| Self-speculation speeds decode (>50 % acceptance) | Real-weights acceptance measurement | Not proven |
+| Warm-start improves repeated tasks | R3 transfer experiment | Not proven |
+| Edge Pareto frontier vs baselines | Hardware benchmark + the one chart | Not proven |
 
 ### Next milestone — R-Track Live Checkpoint Evaluation
 

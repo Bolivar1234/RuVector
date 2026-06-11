@@ -96,7 +96,7 @@ impl HrmTextModel {
         Ok(())
     }
 
-    fn check_cache_shape(&self, caches: &HrmKvCaches) -> Result<()> {
+    pub(super) fn check_cache_shape(&self, caches: &HrmKvCaches) -> Result<()> {
         if caches.h_cycles() != self.config.h_cycles
             || caches.l_cycles() != self.config.l_cycles
             || caches.half_layers() != self.config.half_layers
@@ -120,7 +120,8 @@ impl HrmTextModel {
     }
 
     /// The nested H/L recurrence. `z_h0` is `[seq, hidden]` (embeddings);
-    /// returns the final `z_H`.
+    /// returns the final `z_H`. `z_L` starts from the learned init buffer
+    /// broadcast over positions.
     fn run_cycles(
         &self,
         z_h0: Vec<f32>,
@@ -129,12 +130,34 @@ impl HrmTextModel {
         caches: &mut HrmKvCaches,
     ) -> Result<Vec<f32>> {
         let seq = positions.len();
-        let mut z_h = z_h0;
-        // z_L starts from the learned init buffer broadcast over positions.
         let mut z_l = Vec::with_capacity(seq * self.config.hidden_size);
         for _ in 0..seq {
             z_l.extend_from_slice(&self.z_l_init);
         }
+        self.run_cycles_from(z_h0, z_l, positions, mask, caches)
+    }
+
+    /// The nested H/L recurrence with an explicit initial `z_L`
+    /// (`[seq, hidden]`). [`run_cycles`](Self::run_cycles) is the standard
+    /// learned-buffer entry point; this variant is the ADR-199 R3 warm-start
+    /// hook used by `prefill_warm` in [`super::state`].
+    pub(super) fn run_cycles_from(
+        &self,
+        z_h0: Vec<f32>,
+        z_l0: Vec<f32>,
+        positions: &[usize],
+        mask: AttentionMaskMode,
+        caches: &mut HrmKvCaches,
+    ) -> Result<Vec<f32>> {
+        if z_l0.len() != z_h0.len() {
+            return Err(RuvLLMError::InvalidOperation(format!(
+                "z_L init length {} != z_H length {}",
+                z_l0.len(),
+                z_h0.len()
+            )));
+        }
+        let mut z_h = z_h0;
+        let mut z_l = z_l0;
         for i in 0..self.config.h_cycles {
             for k in 0..self.config.l_cycles {
                 let slot = caches.l_cycle(i, k)?;
@@ -147,9 +170,18 @@ impl HrmTextModel {
     }
 
     /// Logits from a final hidden state, `[n, hidden]` -> `[n, vocab]`.
-    fn project_logits(&self, mut z_h: Vec<f32>) -> Result<Vec<f32>> {
+    pub(super) fn project_logits(&self, mut z_h: Vec<f32>) -> Result<Vec<f32>> {
         self.final_norm.apply_rows(&mut z_h)?;
         self.lm_head.forward(&z_h)
+    }
+
+    /// Embed a token sequence, `[seq] -> [seq, hidden]` row-major.
+    pub(super) fn embed_sequence(&self, input_ids: &[u32]) -> Result<Vec<f32>> {
+        let mut z = Vec::with_capacity(input_ids.len() * self.config.hidden_size);
+        for &token in input_ids {
+            z.extend_from_slice(self.embed_tokens.lookup(token)?);
+        }
+        Ok(z)
     }
 
     /// Full-sequence forward pass. Clears `caches` and refills them (full
@@ -161,6 +193,22 @@ impl HrmTextModel {
         mask_mode: AttentionMaskMode,
         caches: &mut HrmKvCaches,
     ) -> Result<Vec<f32>> {
+        self.forward_with_state(input_ids, mask_mode, caches)
+            .map(|(logits, _z_h)| logits)
+    }
+
+    /// [`forward`](Self::forward), additionally returning the final H-level
+    /// hidden state `z_H` (`[seq, hidden_size]` row-major, pre-`final_norm`).
+    ///
+    /// This is the ADR-199 R3 latent-memory hook: the returned `z_H` is the
+    /// model's compressed "what I've figured out" tensor, snapshotable via
+    /// `capture_state` / `embed_state` in [`super::state`].
+    pub fn forward_with_state(
+        &self,
+        input_ids: &[u32],
+        mask_mode: AttentionMaskMode,
+        caches: &mut HrmKvCaches,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
         self.check_cache_shape(caches)?;
         let seq = input_ids.len();
         if seq == 0 {
@@ -176,13 +224,11 @@ impl HrmTextModel {
         }
         caches.clear();
 
-        let mut z_h = Vec::with_capacity(seq * self.config.hidden_size);
-        for &token in input_ids {
-            z_h.extend_from_slice(self.embed_tokens.lookup(token)?);
-        }
+        let z_h = self.embed_sequence(input_ids)?;
         let positions: Vec<usize> = (0..seq).collect();
         let z_h = self.run_cycles(z_h, &positions, mask_mode, caches)?;
-        self.project_logits(z_h)
+        let logits = self.project_logits(z_h.clone())?;
+        Ok((logits, z_h))
     }
 
     /// Prefill the caches with a prompt and return the LAST position's
@@ -248,6 +294,49 @@ impl HrmTextModel {
         self.project_logits(z_h)
     }
 
+    /// Multi-token decode: append `tokens` at positions
+    /// `start_pos..start_pos + tokens.len()` in ONE batched forward over the
+    /// existing caches and return logits for every appended position,
+    /// `[tokens.len(), vocab_size]` row-major.
+    ///
+    /// Bitwise identical to feeding the same tokens through
+    /// [`decode_step`](Self::decode_step) one at a time (masked-out future
+    /// keys contribute exactly nothing), but amortizes the recurrence across
+    /// the chunk — the verify pass of ADR-199 R2 self-speculative decoding.
+    /// Like `decode_step`, chunk positions are always causal.
+    pub fn decode_chunk(
+        &self,
+        tokens: &[u32],
+        start_pos: usize,
+        caches: &mut HrmKvCaches,
+    ) -> Result<Vec<f32>> {
+        self.check_cache_shape(caches)?;
+        if tokens.is_empty() {
+            return Err(RuvLLMError::InvalidOperation(
+                "decode_chunk called with empty tokens".to_string(),
+            ));
+        }
+        if start_pos + tokens.len() > self.config.max_position_embeddings {
+            return Err(RuvLLMError::InvalidOperation(format!(
+                "decode chunk {}..{} exceeds max_position_embeddings {}",
+                start_pos,
+                start_pos + tokens.len(),
+                self.config.max_position_embeddings
+            )));
+        }
+        let cached = caches.cached_len()?;
+        if cached != start_pos {
+            return Err(RuvLLMError::KvCache(format!(
+                "decode_chunk at position {} but caches hold {} positions",
+                start_pos, cached
+            )));
+        }
+        let z_h = self.embed_sequence(tokens)?;
+        let positions: Vec<usize> = (start_pos..start_pos + tokens.len()).collect();
+        let z_h = self.run_cycles(z_h, &positions, AttentionMaskMode::Causal, caches)?;
+        self.project_logits(z_h)
+    }
+
     /// Greedy generation: prefill `prompt_ids` (with `prefix_len`
     /// PrefixLM-bidirectional positions), then argmax-decode up to
     /// `max_new_tokens`. Stops at `eos_token_id` (eos is not included in the
@@ -280,7 +369,7 @@ impl HrmTextModel {
 }
 
 /// First-index argmax over logits (deterministic tie-break).
-fn argmax(logits: &[f32]) -> Result<u32> {
+pub(super) fn argmax(logits: &[f32]) -> Result<u32> {
     let mut best = 0usize;
     let mut best_val = f32::NEG_INFINITY;
     for (i, &v) in logits.iter().enumerate() {

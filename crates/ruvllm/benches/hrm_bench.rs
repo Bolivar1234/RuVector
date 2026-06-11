@@ -21,7 +21,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use ruvllm::backends::hrm_text::{
-    AttentionMaskMode, HrmKvCaches, HrmTextConfig, HrmTextModel, NormPosition,
+    AttentionMaskMode, HrmCycles, HrmKvCaches, HrmTextConfig, HrmTextModel, NormPosition,
+    SelfSpeculativeDecoder,
 };
 
 /// Small-but-not-trivial config: hidden 64, 4 total layers (2 per core),
@@ -158,10 +159,50 @@ fn report_kv_memory(c: &mut Criterion) {
     });
 }
 
+/// R2 infrastructure: full-cycle greedy generation vs self-speculative
+/// decoding (1x1 draft / 2x2 verify) producing the IDENTICAL token sequence.
+/// On synthetic weights acceptance is near-random, so this measures
+/// machinery overhead; the real-weight acceptance rate is the R2 gate
+/// (> 50 % per ADR-199).
+fn bench_self_speculative(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hrm_self_speculative");
+    group.sample_size(10);
+
+    let config = bench_config(2, 2);
+    let prompt = token_ids(16);
+    let max_new = 24;
+
+    let model = HrmTextModel::new_random(config.clone(), 42).expect("bench model");
+    group.bench_function("greedy_2x2_baseline", |b| {
+        b.iter(|| {
+            model
+                .generate_greedy(black_box(&prompt), 16, max_new)
+                .expect("greedy")
+        })
+    });
+
+    let mut spec_model = HrmTextModel::new_random(config, 42).expect("bench model");
+    group.bench_function("self_spec_draft1x1_verify2x2", |b| {
+        b.iter(|| {
+            let mut dec = SelfSpeculativeDecoder::new(
+                &mut spec_model,
+                HrmCycles::new(1, 1),
+                HrmCycles::new(2, 2),
+            )
+            .expect("decoder");
+            dec.generate_greedy(black_box(&prompt), 16, max_new)
+                .expect("self-spec")
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_forward_cycles,
     bench_decode_vs_recompute,
+    bench_self_speculative,
     report_kv_memory,
 );
 criterion_main!(benches);
