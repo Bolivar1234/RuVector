@@ -346,11 +346,13 @@ agent_score = 0.40 × task_success
 
 ### The one chart that gates any announcement
 
-A Pareto plot — x-axis: latency or watts; y-axis: task quality; lines:
-HRM-Text at each cycle setting, a Qwen small baseline, a Llama small
-baseline, and ruvLLM routed mode. **The win condition is not highest
-quality. It is a new Pareto point**: better quality at the same edge budget,
-or the same quality at lower cost. No announcement without this chart.
+A Pareto plot — x-axis: the edge cost composite (watts × latency ×
+memory); y-axis: task quality; lines: HRM-Text at each cycle setting
+(1×1, 2×2, 3×3, 4×4), a Qwen small baseline, a Llama small baseline, and
+ruvLLM routed mode. **The win condition is not highest quality. It is a
+new Pareto point**: better quality at the same edge budget, or the same
+quality at lower cost. Publish this one chart first — not ten. No
+announcement without it.
 
 Phase D gates (if reached): logits within 1e-3 of upstream reference;
 PrefixLM mask property tests (bidirectional block ≡ restricted full
@@ -559,15 +561,75 @@ choose_cycles`; every acceptance report embeds `agent_score`, and
 | PrefixLM mask correctness | Property-tested: prefix_len=0 ≡ causal; bidirectional prefix block; causal region bit-identical |
 | Offline acceptance harness | 100/100 tasks, all 5 category gates pass against `MockBackend` |
 
-### What these numbers are and are not
+### Claim boundaries
 
-These validate the **runtime**: the recurrence is mathematically correct,
-the caches are exact, and the R1/R5 experiment harness works end-to-end.
-They are **not** model-quality results — the cycle-scaling quality curve,
-GSM8K/ARC numbers, acceptance rates for self-speculation, and the Pareto
-chart all require the real HRM-Text-1B checkpoint (vLLM endpoint for
-Phases A–C, weight loading for Phase D). The harness runs against a live
-endpoint by setting `HRM_ENDPOINT`; no code changes needed.
+**This implementation validates the runtime substrate only.** It does not
+yet validate HRM-Text-1B task quality, cycle-scaling quality gains,
+self-speculative acceptance, or edge Pareto superiority. Those claims
+require checkpoint-based evaluation on GPU hardware.
+
+The headline result is therefore not "HRM beats SOTA." It is:
+
+> **ruvLLM can now expose recurrent test-time compute as a governed
+> runtime primitive.** Easy tasks get shallow cycles, hard tasks get
+> deeper cycles — same weights, same tokenizer, more thinking only when
+> the router decides it is worth the latency.
+
+### Track staging
+
+| Track | Status | Meaning |
+|-------|--------|---------|
+| Runtime correctness | **Closed** | Native recurrence is mathematically tested |
+| Cache correctness | **Closed** | Decode path is safe to optimize |
+| Cycle latency | **Closed** | R1 compute axis is measurable |
+| Edge cost model | Partially closed | Memory and latency quantified; watts pending hardware |
+| Real model quality | Open | Requires HRM-Text-1B checkpoint on GPU |
+| Self-speculation | Open | Needs acceptance-rate data |
+| Latent memory | Open | Needs native state export + retrieval tests |
+
+### Claims-to-evidence map
+
+Every public claim maps to auditable evidence. Nothing below the line is
+claimable until its evidence exists.
+
+| Claim | Evidence | Status |
+|-------|----------|--------|
+| Native recurrence works | 36 unit/integration tests, ADR-exact loop | **Proven** |
+| Decode cache is exact | Bit-exact parity vs full forward | **Proven** |
+| PrefixLM mask is correct | Property tests (prefix ≡ bidirectional, causal bit-identical) | **Proven** |
+| Cycle cost scales linearly | Criterion bench, `h·(l+1)` invocations | **Proven** |
+| Cycle depth is API-routable | Wire-level assertion in HTTP-stub test; `ComputeClass` schedule | **Proven** |
+| Governed loop exists and gates on verification | Controller tests + 100-task offline acceptance suite | **Proven** |
+| HRM quality improves with cycles | GPU eval (R1 sweep) | Not proven |
+| Self-speculation speeds decode | Acceptance-rate measurement | Not proven |
+| Edge Pareto frontier | Hardware benchmark + the one chart | Not proven |
+
+### Next milestone — R-Track Live Checkpoint Evaluation
+
+The branch is tagged **`hrm-runtime-milestone-0`**: architecture, API,
+cache semantics, and benchmark harness — deliberately unblurred by quality
+claims. The next milestone runs the real `sapientinc/HRM-Text-1B`
+checkpoint on GPU. Acceptance gates:
+
+| Gate | Metric | Pass |
+|------|--------|------|
+| Live PrefixLM parity | logit delta vs upstream reference | < 1e-4 |
+| Cycle quality slope | GSM8K subset accuracy | Positive through ≥ 3 settings |
+| Routing gain | agent_score | Above static (un-routed) baseline |
+| Self-speculation | draft acceptance rate | > 50 % |
+| Edge Pareto | quality per watt | Beats ≥ 1 small baseline |
+
+**Reproducibility contract:** a reviewer runs one command to produce the
+runtime report offline —
+
+```bash
+cargo test -p ruvllm-hrm && cargo test -p ruvllm --no-default-features \
+  --features minimal --test hrm_text_test
+```
+
+— and later points `HRM_ENDPOINT` at the live checkpoint to produce the
+R-track report **without code changes** (the harness, sweep, and examples
+read the endpoint from the environment).
 
 ## References
 
