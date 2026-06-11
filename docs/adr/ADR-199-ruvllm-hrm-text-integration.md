@@ -34,6 +34,18 @@ repeatedly think, route, verify, and compress state — cheap recurrent
 reasoning for edge agentic systems where planning/verification steps should
 not hit a giant remote model.
 
+### Positioning — the public claim
+
+> "We are not claiming a 1B model beats frontier AI. We are testing whether
+> recurrent depth, local memory, and Rust edge kernels can create a new
+> efficiency frontier for governed agentic reasoning."
+
+Frontier models win absolute intelligence. ruvLLM + HRM-Text competes on
+**adaptive reasoning efficiency** — quality per watt, per dollar, per local
+device — through runtime control over recurrence, memory, and edge
+execution. HRM-Text is fresh enough that the safe posture is
+**experimental**: the first milestone is measurement, not marketing.
+
 ## Context
 
 ### What HRM-Text is
@@ -48,7 +60,8 @@ not hit a giant remote model.
 | Tokenizer | Custom 65,536-token vocab with special condition tokens |
 | Serving today | vLLM (`vllm serve sapientinc/HRM-Text-1B`) and SGLang, documented on the model card |
 | Training stack | PyTorch FSDP2, FlashAttention 3 (Hopper), multipack/LPT batching, adam_atan2 — **not portable, not needed for inference** |
-| Efficiency claim | 130–600× less pretraining compute, 150–900× less data; 1B reference run: 16×H100, 46 h (~$1.5K), 84.7 % GSM8k / 60.7 % MMLU |
+| Reported results (paper) | 1B trained from scratch on 40B unique tokens, ~$1,500 budget (16×H100, ~46 h): 60.7 % MMLU, 81.9 % ARC-Challenge, 82.2 % DROP, 84.5 % GSM8K, 56.2 % MATH — strong small-model numbers, nowhere near frontier capability |
+| Efficiency claim | 130–600× less pretraining compute, 150–900× less data (vendor numbers, unreplicated) |
 | Caveats | English-only, weak at code (not code-trained), pre-alignment output quality |
 
 ### Why this fits ruvllm
@@ -115,6 +128,21 @@ pub struct HrmTextBackend {
     endpoint: String,        // http://localhost:8000/v1
     model: String,           // sapientinc/HRM-Text-1B
     tokenizer_mode: PrefixMode,
+}
+
+/// Cycle depth is a FIRST-CLASS, ROUTABLE inference parameter —
+/// not hidden backend config. This is the R1 test-time-compute hook.
+pub struct GenerateRequest {
+    pub prompt: String,
+    pub max_tokens: usize,       // default 512
+    pub temperature: f32,        // default 0.2 for kernel modes
+    pub stop: Vec<String>,
+    pub hrm_cycles: Option<HrmCycles>,
+}
+
+pub struct HrmCycles {
+    pub h_cycles: usize,
+    pub l_cycles: usize,
 }
 ```
 
@@ -195,6 +223,29 @@ the gap between Agent Booster (Tier 1) and remote frontier models (Tier 3) —
 a local Tier-2 reasoning step at 1B-model latency. HRM generated/hidden state
 feeds ruvector as recurrence summaries and task memory (`embed_state`).
 
+The router also schedules **compute depth as a routed resource** — each task
+class maps to a cycle budget:
+
+```rust
+pub enum ComputeClass {
+    ExtractFast,
+    PlanNormal,
+    VerifyDeep,
+    MathDeep,
+    UnknownAdaptive,
+}
+
+pub fn choose_cycles(class: ComputeClass) -> HrmCycles {
+    match class {
+        ComputeClass::ExtractFast     => HrmCycles { h_cycles: 1, l_cycles: 1 },
+        ComputeClass::PlanNormal      => HrmCycles { h_cycles: 2, l_cycles: 2 },
+        ComputeClass::VerifyDeep      => HrmCycles { h_cycles: 3, l_cycles: 3 },
+        ComputeClass::MathDeep        => HrmCycles { h_cycles: 4, l_cycles: 4 },
+        ComputeClass::UnknownAdaptive => HrmCycles { h_cycles: 2, l_cycles: 3 },
+    }
+}
+```
+
 ### Phase D (deferred) — Native Rust inference in `crates/ruvllm`
 
 Gated on the acceptance tests. The analysis says it is feasible: at inference
@@ -261,6 +312,41 @@ Phase D investment. Judge on subtasks, never freeform chat:
 Additional Phase A gate: PrefixLM parity check (vLLM vs upstream reference
 engine, 32 prompts, greedy) to rule out silent causal-only serving.
 
+### Composite scores — publish quality and cost together
+
+The paper's claims are credible only if our benchmarks report quality *and*
+cost jointly, never accuracy alone:
+
+```
+edge_score  = task_quality / (latency_seconds × watts × memory_gb)
+
+agent_score = 0.40 × task_success
+            + 0.20 × verifier_accuracy
+            + 0.15 × json_validity
+            + 0.15 × latency_score
+            + 0.10 × memory_score
+```
+
+`benchmark.rs` computes both for every run and embeds them in the report.
+
+### Research gates vs product gates
+
+| Gate | Type | Question | Pass condition |
+|------|------|----------|----------------|
+| Cycle scaling | Research | Does quality improve with more cycles? | Positive slope through ≥ 3 cycle settings |
+| Stability | Research | Does deeper recurrence degrade outputs? | < 5 % increase in invalid outputs at deeper settings |
+| Self-speculative | Research | Are low-cycle drafts accepted? | > 50 % acceptance |
+| Latent memory | Research | Does warm-start help repeated tasks? | > 10 % latency or quality gain |
+| Edge loop | Product | Full plan→route→verify locally? | < 2 GB, defined watt budget, stable execution |
+
+### The one chart that gates any announcement
+
+A Pareto plot — x-axis: latency or watts; y-axis: task quality; lines:
+HRM-Text at each cycle setting, a Qwen small baseline, a Llama small
+baseline, and ruvLLM routed mode. **The win condition is not highest
+quality. It is a new Pareto point**: better quality at the same edge budget,
+or the same quality at lower cost. No announcement without this chart.
+
 Phase D gates (if reached): logits within 1e-3 of upstream reference;
 PrefixLM mask property tests (bidirectional block ≡ restricted full
 attention; causal region bit-identical to existing path; decode-step ≡
@@ -293,18 +379,23 @@ cycles; no production runtime exposes recurrence depth as an inference
 parameter.
 
 *Experiment (first entry in `benchmark.rs`, runnable in Phase A):* sweep
-cycles {1×1, 1×2, 2×2, 3×3, 4×4} on fixed GSM8k/MATH subsets (200 problems,
-greedy, `SynthCot`), plot accuracy vs FLOPs. Requires a serving path that
-honors a cycle override; if vLLM's integration hardcodes cycles, this
-becomes the first native-path (Phase D) experiment instead.
+cycles {1×1, 1×2, 2×2, 3×3, 4×4} across GSM8K, MATH, ARC-Challenge subsets
+plus routing and verifier task suites (greedy, `SynthCot`/`Direct` as
+appropriate); plot quality against latency, FLOPs, memory, and watts.
+Requires a serving path that honors a cycle override; if vLLM's integration
+hardcodes cycles, this becomes the first native-path (Phase D) experiment
+instead.
 
-*Beyond-SOTA form:* router schedules depth per task — hard tasks 4×4, easy
-extraction 1×2. Follow-up: learned halting policy (original HRM had ACT;
-HRM-Text dropped it) — a genuine research contribution if stable.
+*Beyond-SOTA form:* router schedules depth per task via
+`ComputeClass → choose_cycles` — math gets 4×4, extraction 1×1. Follow-up:
+learned halting policy (original HRM had ACT; HRM-Text dropped it) — a
+genuine research contribution if stable.
 
-*Kill criterion:* accuracy flat or degrading beyond the training-time cycle
-count (recurrent models often destabilize at out-of-distribution depth).
-If flat, R1 and R2 die; fall back to R4/R5.
+*Pass gates:* positive quality slope through at least 3 cycle settings
+(cycle-scaling gate) AND < 5 % increase in invalid outputs at deeper
+settings (stability gate). *Kill:* flat or degrading slope beyond
+training-time depth (recurrent models often destabilize out-of-distribution)
+— if killed, R2 dies with it; fall back to R4/R5.
 
 ### R2 — Self-speculative decoding via cycle asymmetry
 
@@ -317,8 +408,8 @@ speedup at zero extra memory, stacking on existing `ruvllm::speculative`.
 *Experiment (Phase D):* measure token acceptance rate of 1×1-cycle drafts
 against 2×2/4×4-cycle verification on kernel-task generation.
 
-*Kill criterion:* acceptance < ~60 % (below the break-even of the existing
-draft-model path with RuvLTRA-Small).
+*Pass gate:* > 50 % acceptance. *Kill:* at or below 50 %, the existing
+separate-draft path (RuvLTRA-Small) wins and this track closes.
 
 ### R3 — Latent reasoning memory: persisting z_H into ruvector
 
@@ -333,8 +424,9 @@ and the inference engine share a process (Phase D).
 quality and tokens-to-solution. Most speculative track — states may not
 transfer across prompts at all.
 
-*Kill criterion:* warm-start ≤ cold-start quality, or any cross-prompt
-state contamination in verification suites.
+*Pass gate:* > 10 % latency or quality gain on repeated tasks. *Kill:*
+gains at or below that, or any cross-prompt state contamination in
+verification suites. Research branch only until it passes.
 
 ### R4 — Edge agentic Pareto frontier (engineering, not research risk)
 
@@ -344,16 +436,17 @@ Hailo-10H (ADR-173/179), via Q4_K 1B (~0.7 GB) + sparse attention
 (ADR-183/189) + TurboQuant KV (ADR-181). Nobody publishes numbers for a
 governed agent loop at this footprint; we define and own the benchmark:
 GSM8k-class quality per watt, end-to-end loop latency, reproducible on
-~$150 hardware.
+~$150 hardware, reported as `edge_score` and `agent_score`.
 
-*Kill criterion:* none — this works regardless of R1–R3; gated only on the
-Phase A acceptance tests.
+*Pass gate (product):* full loop under 2 GB within a defined watt budget
+with stable execution. No research kill criterion — this works regardless
+of R1–R3; gated only on the Phase A acceptance tests.
 
 ### R5 — Verifier-amplified small-model quality (cheapest jump)
 
 *Hypothesis:* best-of-N with HRM-as-scorer plus the Verify-retry loop, at
-1B-local prices (N=8 costs less than one 7B call), pushes GSM8k from the
-published 84.7 % toward the high 80s/low 90s — above anything in the
+1B-local prices (N=8 costs less than one 7B call), pushes GSM8K from the
+paper-reported 84.5 % toward the high 80s/low 90s — above anything in the
 ≤1.5B class (Qwen2.5-1.5B ≈ 70 %). Combine with the ~$1.5K kernel
 fine-tune on plan/verify/route/extract formats from the decision matrix.
 
@@ -365,7 +458,15 @@ is weakest at its own systematic errors (the controller mitigates this by
 having HRM verify the *execution model's* output, not its own). Kill if
 best-of-8 gains < 2 points over majority vote.
 
-### Sequencing
+### Ranking and sequencing
+
+| Rank | Bet | Defensibility | Upside | Action |
+|------|-----|---------------|--------|--------|
+| 1 | R4 — Edge agentic Pareto frontier | High | High | Build benchmark now |
+| 2 | R1 — Cycle-knob test-time scaling | Medium | Very high | Run sweep immediately |
+| 3 | R5 — Verifier-amplified quality | High | Medium | Add best-of-N |
+| 4 | R2 — Self-speculative decoding | Medium | Very high | Needs native runtime |
+| 5 | R3 — Latent z_H state memory | Low | Extremely high | Research branch only |
 
 R1 and R5 run in days behind the Phase A vLLM adapter and are
 prompt/sampling-level. Their results determine whether the Phase D native
