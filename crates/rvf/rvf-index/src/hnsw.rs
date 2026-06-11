@@ -4,6 +4,8 @@
 //! - Configurable M (max neighbors per layer) and ef_construction
 //! - Layer selection via P = 1/ln(M), level = floor(-ln(random) * P)
 //! - Greedy search at upper layers, beam search at layer 0
+//! - Vamana/DiskANN-style alpha-RNG neighbor pruning (robust prune,
+//!   alpha = [`DEFAULT_ALPHA`]) for diverse, navigable neighbor lists
 
 extern crate alloc;
 
@@ -122,6 +124,11 @@ impl HnswLayer {
     }
 }
 
+/// Default alpha for Vamana-style robust pruning. Values > 1 relax the
+/// relative-neighborhood-graph rule, keeping longer-range "highway" edges
+/// that improve recall (DiskANN uses 1.2 in production).
+pub const DEFAULT_ALPHA: f32 = 1.2;
+
 /// The full HNSW graph structure.
 #[derive(Clone, Debug)]
 pub struct HnswGraph {
@@ -137,6 +144,10 @@ pub struct HnswGraph {
     pub m0: usize,
     /// ef_construction parameter.
     pub ef_construction: usize,
+    /// Alpha for Vamana-style neighbor pruning (construction only; does
+    /// not affect search over an existing graph). `f32::INFINITY`
+    /// disables pruning, reproducing plain closest-first selection.
+    pub alpha: f32,
     /// Level normalization factor: 1 / ln(M).
     ml: f64,
 }
@@ -151,6 +162,7 @@ impl HnswGraph {
             m: config.m,
             m0: config.m0,
             ef_construction: config.ef_construction,
+            alpha: DEFAULT_ALPHA,
             ml: 1.0 / (config.m as f64).ln(),
         }
     }
@@ -227,9 +239,10 @@ impl HnswGraph {
                 distance_fn,
             );
 
-            // Select the closest `max_neighbors` candidates.
-            let selected: Vec<(u64, f32)> =
-                candidates.iter().take(max_neighbors).cloned().collect();
+            // Vamana-style alpha-RNG selection over the beam candidates
+            // (diverse neighbors instead of the plain closest set).
+            let selected =
+                self.select_neighbors_alpha(&candidates, max_neighbors, vectors, distance_fn);
 
             // Connect the new node to selected neighbors.
             let neighbor_ids: Vec<u64> = selected.iter().map(|&(nid, _)| nid).collect();
@@ -381,7 +394,65 @@ impl HnswGraph {
         out
     }
 
-    /// Prune neighbors of a node to keep only the closest `max_neighbors`.
+    /// Vamana/DiskANN-style alpha-RNG neighbor selection (robust prune).
+    ///
+    /// Scans `candidates` (sorted ascending by `(distance, id)` relative
+    /// to the base node) and keeps a candidate `c` only if no
+    /// already-selected neighbor `s` occludes it, i.e. only if
+    /// `alpha * d(s, c) > d(base, c)` for every selected `s`. With
+    /// alpha > 1 this preserves a few longer "highway" edges instead of
+    /// `max_neighbors` mutually-redundant closest nodes, which improves
+    /// graph navigability and recall.
+    ///
+    /// Occluded candidates are kept in order and used to backfill any
+    /// remaining slots (the `keepPrunedConnections` heuristic), so node
+    /// degree — and therefore connectivity — is never reduced versus
+    /// plain closest-first selection. Fully deterministic for a given
+    /// candidate order.
+    fn select_neighbors_alpha(
+        &self,
+        candidates: &[(u64, f32)],
+        max_neighbors: usize,
+        vectors: &dyn VectorStore,
+        distance_fn: &dyn Fn(&[f32], &[f32]) -> f32,
+    ) -> Vec<(u64, f32)> {
+        if candidates.len() <= max_neighbors {
+            return candidates.to_vec();
+        }
+        let mut selected: Vec<(u64, f32)> = Vec::with_capacity(max_neighbors);
+        let mut occluded: Vec<(u64, f32)> = Vec::new();
+        for &(cid, cdist) in candidates {
+            if selected.len() >= max_neighbors {
+                break;
+            }
+            let cvec = match vectors.get_vector(cid) {
+                Some(v) => v,
+                None => continue,
+            };
+            let is_occluded = selected.iter().any(|&(sid, _)| {
+                vectors
+                    .get_vector(sid)
+                    .is_some_and(|sv| self.alpha * distance_fn(sv, cvec) <= cdist)
+            });
+            if is_occluded {
+                occluded.push((cid, cdist));
+            } else {
+                selected.push((cid, cdist));
+            }
+        }
+        // Backfill remaining slots with the closest occluded candidates.
+        let mut spill = occluded.into_iter();
+        while selected.len() < max_neighbors {
+            match spill.next() {
+                Some(p) => selected.push(p),
+                None => break,
+            }
+        }
+        selected
+    }
+
+    /// Prune neighbors of a node to at most `max_neighbors`, using
+    /// alpha-RNG selection relative to the node.
     fn prune_neighbors(
         &mut self,
         node: u64,
@@ -407,10 +478,11 @@ impl HnswGraph {
                     .map(|nv| (nid, distance_fn(node_vec, nv)))
             })
             .collect();
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
-        scored.truncate(max_neighbors);
+        // Deterministic order: (distance, id), independent of input order.
+        scored.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
-        let pruned: Vec<u64> = scored.into_iter().map(|(nid, _)| nid).collect();
+        let kept = self.select_neighbors_alpha(&scored, max_neighbors, vectors, distance_fn);
+        let pruned: Vec<u64> = kept.into_iter().map(|(nid, _)| nid).collect();
         self.layers[layer].adjacency.insert(node, pruned);
     }
 
@@ -507,6 +579,120 @@ mod tests {
         assert!(!results.is_empty());
         // Node 10 should be the closest (exact match).
         assert_eq!(results[0].0, 10);
+    }
+
+    #[test]
+    fn alpha_selection_keeps_diverse_neighbors() {
+        // Base node at origin; two near-duplicates and one distant point.
+        // Plain greedy keeps the two duplicates; alpha-pruning must keep
+        // one duplicate plus the distant (diverse) point first, then
+        // backfill the occluded duplicate only if a slot remains.
+        let vectors = vec![
+            vec![0.0, 0.0], // 0: base
+            vec![1.0, 0.0], // 1: near
+            vec![1.1, 0.0], // 2: near-duplicate of 1
+            vec![0.0, 3.0], // 3: distant, diverse
+        ];
+        let store = InMemoryVectorStore::new(vectors);
+        let graph = HnswGraph::new(&make_config());
+
+        // Candidates sorted by (squared distance to node 0, id).
+        let candidates = vec![(1u64, 1.0f32), (2, 1.21), (3, 9.0)];
+
+        let selected = graph.select_neighbors_alpha(&candidates, 2, &store, &l2_distance);
+        let ids: Vec<u64> = selected.iter().map(|&(id, _)| id).collect();
+        // Node 2 is occluded by node 1 (alpha * d(1,2) = 1.2*0.01 <= 1.21),
+        // so the diverse node 3 is selected ahead of it.
+        assert_eq!(ids, vec![1, 3]);
+
+        // With 3 slots, the occluded candidate is backfilled: full degree.
+        let selected = graph.select_neighbors_alpha(&candidates, 3, &store, &l2_distance);
+        assert_eq!(selected.len(), 3);
+
+        // Disabling pruning reproduces plain closest-first selection.
+        let mut greedy = HnswGraph::new(&make_config());
+        greedy.alpha = f32::INFINITY;
+        let selected = greedy.select_neighbors_alpha(&candidates, 2, &store, &l2_distance);
+        let ids: Vec<u64> = selected.iter().map(|&(id, _)| id).collect();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    /// Shared harness: build a graph over LCG vectors with the given alpha
+    /// and measure recall@10 against brute force.
+    fn measure_recall(n: usize, dim: usize, ef_search: usize, alpha: f32) -> f64 {
+        use alloc::collections::BTreeSet;
+
+        let mut seed: u64 = 42;
+        let vectors: Vec<Vec<f32>> = (0..n)
+            .map(|_| {
+                (0..dim)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        (seed >> 33) as f32 / (1u64 << 31) as f32
+                    })
+                    .collect()
+            })
+            .collect();
+        let store = InMemoryVectorStore::new(vectors.clone());
+
+        let config = HnswConfig {
+            m: 16,
+            m0: 32,
+            ef_construction: 200,
+        };
+        let mut graph = HnswGraph::new(&config);
+        graph.alpha = alpha;
+        let mut rng_seed: u64 = 123;
+        for i in 0..n as u64 {
+            rng_seed = rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let rng_val = ((rng_seed >> 33) as f64 / (1u64 << 31) as f64).clamp(0.001, 0.999);
+            graph.insert(i, rng_val, &store, &l2_distance);
+        }
+
+        let num_queries = 50;
+        let k = 10;
+        let mut total_recall = 0.0;
+        let mut query_seed: u64 = 999;
+        for _ in 0..num_queries {
+            let query: Vec<f32> = (0..dim)
+                .map(|_| {
+                    query_seed = query_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (query_seed >> 33) as f32 / (1u64 << 31) as f32
+                })
+                .collect();
+
+            let mut all_dists: Vec<(u64, f32)> = (0..n as u64)
+                .map(|i| (i, l2_distance(&query, &vectors[i as usize])))
+                .collect();
+            all_dists.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+            let gt_set: BTreeSet<u64> = all_dists.iter().take(k).map(|&(id, _)| id).collect();
+
+            let results = graph.search(&query, k, ef_search, &store, &l2_distance);
+            let result_set: BTreeSet<u64> = results.iter().map(|&(id, _)| id).collect();
+            total_recall += gt_set.intersection(&result_set).count() as f64 / k as f64;
+        }
+        total_recall / num_queries as f64
+    }
+
+    /// Alpha-pruned construction must not regress recall versus plain
+    /// greedy selection (alpha = inf), measured at a deliberately low
+    /// ef_search where graph quality dominates.
+    #[test]
+    fn alpha_pruning_does_not_regress_recall() {
+        let recall_alpha = measure_recall(1000, 32, 30, DEFAULT_ALPHA);
+        let recall_greedy = measure_recall(1000, 32, 30, f32::INFINITY);
+        #[cfg(feature = "std")]
+        std::eprintln!(
+            "recall@10 ef=30: alpha=1.2 -> {recall_alpha:.3}, greedy -> {recall_greedy:.3}"
+        );
+        assert!(
+            recall_alpha + 1e-9 >= recall_greedy,
+            "alpha-pruned recall {recall_alpha:.3} regressed vs greedy {recall_greedy:.3}"
+        );
+        assert!(
+            recall_alpha >= 0.80,
+            "alpha-pruned recall@10 {recall_alpha:.3} below sanity floor at ef=30"
+        );
     }
 
     /// Build HNSW with 1000 random vectors, verify recall@10 >= 0.95.

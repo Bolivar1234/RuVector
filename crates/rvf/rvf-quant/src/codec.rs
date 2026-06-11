@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use crate::binary;
 use crate::product::ProductQuantizer;
+use crate::rabitq::RabitqQuantizer;
 use crate::scalar::ScalarQuantizer;
 use crate::sketch::CountMinSketch;
 use crate::traits::Quantizer;
@@ -18,9 +19,15 @@ use crate::traits::Quantizer;
 // ---------------------------------------------------------------------------
 
 /// Quantization type tags matching the QUANT_SEG wire spec.
+/// (Tag 3 is reserved for residual PQ in `rvf_types::QuantType`.)
 const QUANT_TYPE_SCALAR: u8 = 0;
 const QUANT_TYPE_PRODUCT: u8 = 1;
 const QUANT_TYPE_BINARY: u8 = 2;
+const QUANT_TYPE_RABITQ: u8 = 4;
+
+/// Current RaBitQ QUANT_SEG layout version. Bump on incompatible changes;
+/// decoders reject unknown versions instead of misreading bytes.
+const RABITQ_VERSION: u8 = 1;
 
 /// Errors that can occur while decoding QUANT_SEG payloads.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +36,10 @@ pub enum CodecError {
     TooShort,
     /// Unknown quantization type tag.
     UnknownQuantType(u8),
+    /// Known quantization type, but an unsupported layout version.
+    UnsupportedVersion(u8),
+    /// A header field is internally inconsistent (e.g. bad padded_dim).
+    InvalidField,
 }
 
 impl core::fmt::Display for CodecError {
@@ -36,6 +47,8 @@ impl core::fmt::Display for CodecError {
         match self {
             Self::TooShort => write!(f, "input data too short"),
             Self::UnknownQuantType(t) => write!(f, "unknown quant_type: {}", t),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported quant_seg version: {}", v),
+            Self::InvalidField => write!(f, "invalid quant_seg header field"),
         }
     }
 }
@@ -55,6 +68,8 @@ pub fn encode_quant_seg(quantizer: &dyn Quantizer) -> Vec<u8> {
         encode_scalar_quantizer(sq)
     } else if let Some(pq) = any.downcast_ref::<ProductQuantizer>() {
         encode_product_quantizer(pq)
+    } else if let Some(rq) = any.downcast_ref::<RabitqQuantizer>() {
+        encode_rabitq_quantizer(rq)
     } else if quantizer.tier() as u8 == 2 {
         // Binary quantization is parameter-free beyond the dimension.
         encode_binary_quant_seg(quantizer.dim() as u16)
@@ -78,6 +93,7 @@ pub fn decode_quant_seg(data: &[u8]) -> Result<Box<dyn Quantizer>, CodecError> {
         QUANT_TYPE_SCALAR => Ok(Box::new(decode_scalar(body, dim)?)),
         QUANT_TYPE_PRODUCT => Ok(Box::new(decode_product(body, dim)?)),
         QUANT_TYPE_BINARY => Ok(Box::new(BinaryQuantizerWrapper { dim })),
+        QUANT_TYPE_RABITQ => Ok(Box::new(decode_rabitq(data, body, dim)?)),
         _ => Err(CodecError::UnknownQuantType(quant_type)),
     }
 }
@@ -249,6 +265,75 @@ impl Quantizer for BinaryQuantizerWrapper {
     fn dim(&self) -> usize {
         self.dim
     }
+}
+
+// ---------------------------------------------------------------------------
+// RaBitQ
+// ---------------------------------------------------------------------------
+
+/// Encode a RaBitQ quantizer into a QUANT_SEG payload.
+///
+/// Header layout (within the shared 64-byte aligned header; bytes 4..20
+/// were zero padding in pre-RaBitQ payloads, so old types are unaffected):
+/// ```text
+/// [quant_type=4: u8] [tier: u8] [dim: u16 LE]
+/// [version: u8] [rounds: u8] [reserved: u16]
+/// [seed: u64 LE] [padded_dim: u32 LE] [padding to 64B]
+/// [centroid: dim * f32 LE]
+/// ```
+pub fn encode_rabitq_quantizer(rq: &RabitqQuantizer) -> Vec<u8> {
+    let mut buf = vec![0u8; 64];
+    buf[0] = QUANT_TYPE_RABITQ;
+    buf[1] = 2; // Cold tier
+    buf[2..4].copy_from_slice(&(rq.dim as u16).to_le_bytes());
+    buf[4] = RABITQ_VERSION;
+    buf[5] = rq.rounds;
+    // buf[6..8] reserved (zero)
+    buf[8..16].copy_from_slice(&rq.seed.to_le_bytes());
+    buf[16..20].copy_from_slice(&(rq.padded_dim as u32).to_le_bytes());
+
+    for &v in &rq.centroid {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    buf
+}
+
+/// Decode a RaBitQ QUANT_SEG payload (versioned; bounds-checked).
+///
+/// `data` is the full payload (for header fields beyond the shared
+/// prefix), `body` is the slice after the 64-byte header.
+fn decode_rabitq(data: &[u8], body: &[u8], dim: usize) -> Result<RabitqQuantizer, CodecError> {
+    // Caller guarantees data.len() >= 64.
+    let version = data[4];
+    if version != RABITQ_VERSION {
+        return Err(CodecError::UnsupportedVersion(version));
+    }
+    let rounds = data[5];
+    let seed = u64::from_le_bytes(data[8..16].try_into().expect("len checked"));
+    let padded_dim = u32::from_le_bytes(data[16..20].try_into().expect("len checked")) as usize;
+
+    if dim == 0 || rounds == 0 {
+        return Err(CodecError::InvalidField);
+    }
+    // padded_dim must be the canonical power-of-two padding of dim; this
+    // also bounds it (dim is u16, so padded_dim <= 65536).
+    if padded_dim != dim.max(1).next_power_of_two() {
+        return Err(CodecError::InvalidField);
+    }
+
+    let centroid_bytes = dim.checked_mul(4).ok_or(CodecError::InvalidField)?;
+    if body.len() < centroid_bytes {
+        return Err(CodecError::TooShort);
+    }
+    let mut centroid = Vec::with_capacity(dim);
+    for d in 0..dim {
+        let offset = d * 4;
+        centroid.push(f32::from_le_bytes(
+            body[offset..offset + 4].try_into().expect("len checked"),
+        ));
+    }
+
+    Ok(RabitqQuantizer::with_centroid(dim, centroid, seed, rounds))
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +558,93 @@ mod tests {
             decode_quant_seg(&pq_truncated),
             Err(CodecError::TooShort)
         ));
+    }
+
+    #[test]
+    fn rabitq_quant_seg_round_trip() {
+        let centroid: Vec<f32> = (0..20).map(|i| i as f32 * 0.1 - 1.0).collect();
+        let rq = RabitqQuantizer::with_centroid(20, centroid.clone(), 0x1234_5678_9ABC_DEF0, 3);
+
+        let encoded = encode_rabitq_quantizer(&rq);
+        let decoded = decode_quant_seg(&encoded).unwrap();
+        assert_eq!(decoded.dim(), 20);
+        assert_eq!(decoded.tier(), crate::tier::TemperatureTier::Cold);
+
+        let any: &dyn core::any::Any = decoded.as_ref();
+        let dec = any
+            .downcast_ref::<RabitqQuantizer>()
+            .expect("expected RabitqQuantizer");
+        assert_eq!(dec.dim, rq.dim);
+        assert_eq!(dec.padded_dim, 32);
+        assert_eq!(dec.seed, rq.seed);
+        assert_eq!(dec.rounds, rq.rounds);
+        assert_eq!(dec.centroid, centroid);
+
+        // The decoded quantizer must produce byte-identical codes.
+        let v: Vec<f32> = (0..20).map(|i| (i as f32 * 0.7).sin()).collect();
+        assert_eq!(dec.encode(&v), rq.encode(&v));
+
+        // Trait-based encode dispatches to the RaBitQ layout too.
+        assert_eq!(encode_quant_seg(&rq), encoded);
+    }
+
+    #[test]
+    fn rabitq_quant_seg_rejects_bad_versions_and_fields() {
+        let rq = RabitqQuantizer::with_centroid(8, vec![0.0; 8], 7, 3);
+        let good = encode_rabitq_quantizer(&rq);
+
+        // Future layout version: reject instead of misreading.
+        let mut future = good.clone();
+        future[4] = RABITQ_VERSION + 1;
+        assert!(matches!(
+            decode_quant_seg(&future),
+            Err(CodecError::UnsupportedVersion(v)) if v == RABITQ_VERSION + 1
+        ));
+
+        // Inconsistent padded_dim.
+        let mut bad_pad = good.clone();
+        bad_pad[16..20].copy_from_slice(&7u32.to_le_bytes());
+        assert!(matches!(
+            decode_quant_seg(&bad_pad),
+            Err(CodecError::InvalidField)
+        ));
+
+        // Truncated centroid body.
+        assert!(matches!(
+            decode_quant_seg(&good[..good.len() - 4]),
+            Err(CodecError::TooShort)
+        ));
+
+        // Zero rounds.
+        let mut zero_rounds = good.clone();
+        zero_rounds[5] = 0;
+        assert!(matches!(
+            decode_quant_seg(&zero_rounds),
+            Err(CodecError::InvalidField)
+        ));
+    }
+
+    #[test]
+    fn pre_rabitq_payloads_still_decode() {
+        // A byte-frozen legacy binary-quantizer payload (type 2, header
+        // bytes 4..64 all zero, no body) must keep decoding after the
+        // RaBitQ extension claimed header bytes 4..20 for type 4.
+        let mut legacy = vec![0u8; 64];
+        legacy[0] = 2; // QUANT_TYPE_BINARY
+        legacy[1] = 2; // Cold tier
+        legacy[2..4].copy_from_slice(&24u16.to_le_bytes());
+        let decoded = decode_quant_seg(&legacy).unwrap();
+        assert_eq!(decoded.dim(), 24);
+        assert_eq!(decoded.tier(), crate::tier::TemperatureTier::Cold);
+
+        // Same for a legacy scalar payload.
+        let sq = ScalarQuantizer {
+            min_vals: vec![-1.0, 0.0],
+            max_vals: vec![1.0, 2.0],
+            dim: 2,
+        };
+        let legacy_scalar = encode_scalar_quantizer(&sq);
+        assert!(decode_quant_seg(&legacy_scalar).is_ok());
     }
 
     #[test]

@@ -1852,6 +1852,7 @@ dependencies = [
  "crc32fast",
  "rand",
  "rvf-index",
+ "rvf-quant",
  "rvf-types",
  "tempfile",
 ]

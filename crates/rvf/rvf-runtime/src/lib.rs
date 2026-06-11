@@ -32,6 +32,7 @@ pub mod options;
 #[cfg(feature = "qr")]
 pub mod qr_encode;
 pub mod qr_seed;
+mod rabitq_path;
 pub mod read_path;
 pub mod safety_net;
 pub mod seed_crypto;

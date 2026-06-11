@@ -28,6 +28,7 @@ use crate::index_path::{
 use crate::locking::WriterLock;
 use crate::membership::MembershipFilter;
 use crate::options::*;
+use crate::rabitq_path::RabitqState;
 use crate::read_path::{self, VectorData};
 use crate::status::{CompactionState, StoreStatus};
 use crate::write_path::SegmentWriter;
@@ -76,6 +77,9 @@ pub struct RvfStore {
     /// from an INDEX_SEG or built on the first eligible query). Guarded by
     /// a Mutex so `query(&self)` can build/maintain it lazily.
     index: Mutex<Option<VectorIndex>>,
+    /// In-memory RaBitQ codes for the opt-in two-stage query path (None
+    /// until the first `QueryOptions::rabitq` query builds it lazily).
+    rabitq: Mutex<Option<RabitqState>>,
 }
 
 impl RvfStore {
@@ -126,6 +130,7 @@ impl RvfStore {
             parent_path: None,
             last_witness_hash: [0u8; 32],
             index: Mutex::new(None),
+            rabitq: Mutex::new(None),
         };
 
         store.write_manifest()?;
@@ -177,6 +182,7 @@ impl RvfStore {
             parent_path: None,
             last_witness_hash: [0u8; 32],
             index: Mutex::new(None),
+            rabitq: Mutex::new(None),
         };
 
         store.boot()?;
@@ -224,6 +230,7 @@ impl RvfStore {
             parent_path: None,
             last_witness_hash: [0u8; 32],
             index: Mutex::new(None),
+            rabitq: Mutex::new(None),
         };
 
         store.boot()?;
@@ -324,6 +331,17 @@ impl RvfStore {
             }
         }
 
+        // RaBitQ codes for overwritten IDs are stale: drop the state (it
+        // is rebuilt lazily). New IDs are encoded lazily by sync_missing.
+        {
+            let mut guard = self.rabitq.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(state) = guard.as_ref() {
+                if valid_ids.iter().any(|&id| state.contains(id)) {
+                    *guard = None;
+                }
+            }
+        }
+
         if let Some(meta_entries) = metadata {
             let entries_per_id = meta_entries.len() / valid_ids.len().max(1);
             if entries_per_id > 0 {
@@ -394,6 +412,14 @@ impl RvfStore {
             return Ok((Vec::new(), false));
         }
 
+        // Opt-in RaBitQ two-stage path (binary candidate scan + exact
+        // rescore). Not an HNSW-index serve, so the flag stays false.
+        if self.rabitq_eligible(options) {
+            if let Some(results) = self.query_via_rabitq(vector, k, options) {
+                return Ok((results, false));
+            }
+        }
+
         if self.index_eligible(options) {
             if let Some(results) = self.query_via_index(vector, k, options) {
                 return Ok((results, true));
@@ -401,6 +427,78 @@ impl RvfStore {
         }
 
         Ok((self.query_exact(vector, k, options), false))
+    }
+
+    /// Whether this query can be served by the opt-in RaBitQ two-stage
+    /// path. v1 supports the L2 metric; filtered queries and COW /
+    /// membership stores use the default routing.
+    fn rabitq_eligible(&self, options: &QueryOptions) -> bool {
+        options.rabitq
+            && !options.force_exact
+            && options.filter.is_none()
+            && self.membership_filter.is_none()
+            && self.cow_engine.is_none()
+            && self.options.metric == DistanceMetric::L2
+    }
+
+    /// Serve a query through the RaBitQ two-stage path, building the code
+    /// book on first use.
+    ///
+    /// Stage 1 scans the 1-bit codes with the asymmetric estimator and
+    /// collects `rabitq_oversample * k` live candidates; stage 2 rescores
+    /// them with exact f32 distances. Returns `None` when the candidate
+    /// set cannot supply `k` live results (caller falls back).
+    fn query_via_rabitq(
+        &self,
+        vector: &[f32],
+        k: usize,
+        options: &QueryOptions,
+    ) -> Option<Vec<SearchResult>> {
+        let mut guard = self.rabitq.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = RabitqState::build(&self.vectors);
+        }
+        let state = guard.as_mut()?;
+        // Encode vectors ingested since the state was built.
+        state.sync_missing(&self.vectors);
+
+        let oversample = (options.rabitq_oversample.max(1)) as usize;
+        // Oversample for estimator error (floored so the candidate pool
+        // meets the >= 0.95 recall@10 contract, see RABITQ_MIN_CANDIDATES),
+        // plus headroom for soft-deleted hits the same way the HNSW path
+        // compensates.
+        let deleted = self.deletion_bitmap.count();
+        let k_fetch = k
+            .saturating_mul(oversample)
+            .max(crate::rabitq_path::RABITQ_MIN_CANDIDATES)
+            .saturating_add(deleted.min(2 * k + 16));
+
+        let candidates =
+            state.candidates(vector, k_fetch, |id| !self.deletion_bitmap.is_deleted(id));
+
+        // Stage 2: exact f32 rescore of the candidate set.
+        let mut results: Vec<SearchResult> = candidates
+            .into_iter()
+            .filter_map(|(id, _est)| {
+                self.vectors.get(id).map(|v| SearchResult {
+                    id,
+                    distance: compute_distance(vector, v, &self.options.metric, 0.0),
+                    retrieval_quality: rvf_types::quality::RetrievalQuality::Full,
+                })
+            })
+            .collect();
+        results.sort_by(|a, b| {
+            a.distance
+                .total_cmp(&b.distance)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        results.truncate(k);
+
+        let live = self.vectors.len().saturating_sub(deleted);
+        if results.len() < k.min(live) {
+            return None;
+        }
+        Some(results)
     }
 
     /// Whether this query can be served by the HNSW index path.
@@ -841,8 +939,10 @@ impl RvfStore {
 
         // Compaction removes vectors, so the in-memory HNSW index is
         // invalidated (rebuilt lazily). Persisted INDEX_SEGs are likewise
-        // dropped from the rewritten file below.
+        // dropped from the rewritten file below. The RaBitQ code book
+        // references removed IDs too, so it is dropped alongside.
         *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.rabitq.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         let segments_compacted = deleted_ids.len() as u32;
         let bytes_reclaimed = (deleted_ids.len() as u64) * (self.options.dimension as u64) * 4;
@@ -1885,6 +1985,7 @@ impl RvfStore {
             parent_path: Some(self.path.clone()),
             last_witness_hash: [0u8; 32],
             index: Mutex::new(None),
+            rabitq: Mutex::new(None),
         };
 
         store.write_manifest()?;

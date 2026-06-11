@@ -115,6 +115,18 @@ pub struct QueryOptions {
     /// Force the exact brute-force scan even when an HNSW index is
     /// available. Useful for ground-truth comparison and benchmarking.
     pub force_exact: bool,
+    /// Opt in to the RaBitQ two-stage path: a 1-bit-code candidate scan
+    /// (~32x smaller than f32) followed by an exact f32 rescore of the
+    /// oversampled candidates. Default `false` (full-precision HNSW /
+    /// exact scan). v1 serves the L2 metric only; other metrics and
+    /// filtered/COW queries fall back to the default routing.
+    pub rabitq: bool,
+    /// Candidate oversampling factor for the RaBitQ first stage: the
+    /// binary scan collects `rabitq_oversample * k` candidates (floored
+    /// at an internal minimum pool size that keeps recall@10 >= 0.95 on
+    /// the 10k x 128 benchmark) before the exact rescore. Values below 1
+    /// are treated as 1.
+    pub rabitq_oversample: u16,
 }
 
 impl Default for QueryOptions {
@@ -126,6 +138,8 @@ impl Default for QueryOptions {
             quality_preference: QualityPreference::Auto,
             safety_net_budget: SafetyNetBudget::LAYER_A,
             force_exact: false,
+            rabitq: false,
+            rabitq_oversample: 4,
         }
     }
 }
