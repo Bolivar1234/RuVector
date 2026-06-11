@@ -269,6 +269,110 @@ full-sequence forward, extending the ADR-186 test pattern); KV footprint at
 Pi 5; ≥ 95 % of upstream GSM8k subset score at Q4_K via the existing
 evaluation harness.
 
+## Research frontier — beyond-SOTA tracks
+
+The integration above is the governed baseline. Five tracks could push past
+state of the art on specific axes. None claims absolute frontier-model
+quality — a 1B pre-alignment checkpoint will not beat frontier models on
+open-ended tasks. The claims are Pareto claims: quality per parameter, per
+watt, per dollar, per millisecond. Each track has a kill criterion so we
+measure before we believe.
+
+> **Calibration note.** The ARC Prize team's ablation of the original HRM
+> found much of its gain came from the outer refinement loop and training
+> procedure rather than the H/L hierarchy itself, and HRM-Text's 130–600×
+> efficiency numbers are vendor claims on a young repo. Tracks R1–R3 are
+> bets on the recurrence being real; R4–R5 pay off regardless.
+
+### R1 — Test-time compute scaling on the cycle knob
+
+*Hypothesis:* recurrence depth (`H_cycles × L_cycles`) works as a
+per-request "think longer" dial — o1-style test-time compute scaling at
+zero extra parameters and zero extra weight memory. Upstream ships fixed
+cycles; no production runtime exposes recurrence depth as an inference
+parameter.
+
+*Experiment (first entry in `benchmark.rs`, runnable in Phase A):* sweep
+cycles {1×1, 1×2, 2×2, 3×3, 4×4} on fixed GSM8k/MATH subsets (200 problems,
+greedy, `SynthCot`), plot accuracy vs FLOPs. Requires a serving path that
+honors a cycle override; if vLLM's integration hardcodes cycles, this
+becomes the first native-path (Phase D) experiment instead.
+
+*Beyond-SOTA form:* router schedules depth per task — hard tasks 4×4, easy
+extraction 1×2. Follow-up: learned halting policy (original HRM had ACT;
+HRM-Text dropped it) — a genuine research contribution if stable.
+
+*Kill criterion:* accuracy flat or degrading beyond the training-time cycle
+count (recurrent models often destabilize at out-of-distribution depth).
+If flat, R1 and R2 die; fall back to R4/R5.
+
+### R2 — Self-speculative decoding via cycle asymmetry
+
+*Hypothesis:* a recurrent model can draft with itself at low cycle count
+and verify at full cycle count — same weights, same tokenizer, no separate
+draft model. No other runtime can offer this because no other runtime
+serves a cycle-parameterized model. If acceptance rates hold, ~2–3× decode
+speedup at zero extra memory, stacking on existing `ruvllm::speculative`.
+
+*Experiment (Phase D):* measure token acceptance rate of 1×1-cycle drafts
+against 2×2/4×4-cycle verification on kernel-task generation.
+
+*Kill criterion:* acceptance < ~60 % (below the break-even of the existing
+draft-model path with RuvLTRA-Small).
+
+### R3 — Latent reasoning memory: persisting z_H into ruvector
+
+*Hypothesis:* the H-level state is an explicit compressed "what I've
+figured out" tensor. Snapshot z_H into ruvector keyed by task; warm-start
+the recurrence from a retrieved state instead of the learned init buffer —
+cross-session *latent* memory, closer to continuous-latent reasoning
+(Coconut-style) than to text RAG. Only attemptable here because ruvector
+and the inference engine share a process (Phase D).
+
+*Experiment:* multi-turn task suites, warm-start vs cold-start, measure
+quality and tokens-to-solution. Most speculative track — states may not
+transfer across prompts at all.
+
+*Kill criterion:* warm-start ≤ cold-start quality, or any cross-prompt
+state contamination in verification suites.
+
+### R4 — Edge agentic Pareto frontier (engineering, not research risk)
+
+*Claim:* best agentic reasoning per watt / per dollar, fully offline —
+the complete plan→route→execute→verify loop under 2 GB on Pi 5 +
+Hailo-10H (ADR-173/179), via Q4_K 1B (~0.7 GB) + sparse attention
+(ADR-183/189) + TurboQuant KV (ADR-181). Nobody publishes numbers for a
+governed agent loop at this footprint; we define and own the benchmark:
+GSM8k-class quality per watt, end-to-end loop latency, reproducible on
+~$150 hardware.
+
+*Kill criterion:* none — this works regardless of R1–R3; gated only on the
+Phase A acceptance tests.
+
+### R5 — Verifier-amplified small-model quality (cheapest jump)
+
+*Hypothesis:* best-of-N with HRM-as-scorer plus the Verify-retry loop, at
+1B-local prices (N=8 costs less than one 7B call), pushes GSM8k from the
+published 84.7 % toward the high 80s/low 90s — above anything in the
+≤1.5B class (Qwen2.5-1.5B ≈ 70 %). Combine with the ~$1.5K kernel
+fine-tune on plan/verify/route/extract formats from the decision matrix.
+
+*Experiment (Phase A):* GSM8k subset, N ∈ {1, 4, 8}, HRM `Verify`-mode
+scoring vs majority vote vs single-shot.
+
+*Caveat / kill criterion:* self-verification has known ceilings — a model
+is weakest at its own systematic errors (the controller mitigates this by
+having HRM verify the *execution model's* output, not its own). Kill if
+best-of-8 gains < 2 points over majority vote.
+
+### Sequencing
+
+R1 and R5 run in days behind the Phase A vLLM adapter and are
+prompt/sampling-level. Their results determine whether the Phase D native
+port is scoped for cycle-parameterized serving and self-speculation
+(R1→R2, R3) or only for the edge Pareto play (R4), which is justified
+either way.
+
 ## Consequences
 
 ### Positive
