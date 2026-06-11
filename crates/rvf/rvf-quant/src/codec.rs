@@ -196,9 +196,18 @@ fn decode_product(body: &[u8], _dim: usize) -> Result<ProductQuantizer, CodecErr
     let k = u16::from_le_bytes([body[2], body[3]]) as usize;
     let sub_dim = u16::from_le_bytes([body[4], body[5]]) as usize;
 
-    let codebook_floats = m * k * sub_dim;
-    let codebook_bytes = codebook_floats * 4;
-    if body.len() < 6 + codebook_bytes {
+    // Compute the codebook size in u64 with checked arithmetic: on 32-bit
+    // targets (wasm32) `m * k * sub_dim * 4` can wrap usize, slip past the
+    // length check below, and then index out of bounds in the decode loop.
+    let codebook_bytes = (m as u64)
+        .checked_mul(k as u64)
+        .and_then(|v| v.checked_mul(sub_dim as u64))
+        .and_then(|v| v.checked_mul(4))
+        .ok_or(CodecError::InvalidField)?;
+    let expected = codebook_bytes
+        .checked_add(6)
+        .ok_or(CodecError::InvalidField)?;
+    if (body.len() as u64) < expected {
         return Err(CodecError::TooShort);
     }
 
@@ -363,8 +372,15 @@ pub fn encode_sketch_seg(sketch: &CountMinSketch) -> Vec<u8> {
 }
 
 /// Decode a SKETCH_SEG binary payload into a CountMinSketch.
-pub fn decode_sketch_seg(data: &[u8]) -> CountMinSketch {
-    assert!(data.len() >= 64, "SKETCH_SEG header too short");
+///
+/// Returns an error (never panics) on malformed input: short headers,
+/// counter data shorter than `width * depth`, a zero `width` paired with a
+/// non-zero `depth` (which would bypass the length check while driving an
+/// unbounded row allocation), or `width * depth` overflow.
+pub fn decode_sketch_seg(data: &[u8]) -> Result<CountMinSketch, CodecError> {
+    if data.len() < 64 {
+        return Err(CodecError::TooShort);
+    }
 
     let width = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let depth = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
@@ -373,21 +389,35 @@ pub fn decode_sketch_seg(data: &[u8]) -> CountMinSketch {
     ]);
 
     let body = &data[64..];
-    let expected = width * depth;
-    assert!(body.len() >= expected, "SKETCH_SEG counter data too short");
 
+    // Every row must consume at least one byte; otherwise a crafted
+    // depth (up to u32::MAX) passes the `expected == 0` length check and
+    // OOMs in `Vec::with_capacity` below.
+    if width == 0 && depth != 0 {
+        return Err(CodecError::InvalidField);
+    }
+    // Checked u64 arithmetic: `width * depth` can wrap usize on 32-bit
+    // targets (wasm32) and slip past the length check.
+    let expected = (width as u64)
+        .checked_mul(depth as u64)
+        .ok_or(CodecError::InvalidField)?;
+    if (body.len() as u64) < expected {
+        return Err(CodecError::TooShort);
+    }
+
+    // Safe: width >= 1 here, so depth <= expected <= body.len().
     let mut counters = Vec::with_capacity(depth);
     for row in 0..depth {
         let start = row * width;
         counters.push(body[start..start + width].to_vec());
     }
 
-    CountMinSketch {
+    Ok(CountMinSketch {
         counters,
         width,
         depth,
         total_accesses,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -648,6 +678,68 @@ mod tests {
     }
 
     #[test]
+    fn decode_product_rejects_huge_codebook_dimensions() {
+        // m = k = sub_dim = u16::MAX -> codebook of ~1.1e15 bytes. The
+        // u64 checked size computation must reject this against the
+        // actual body length instead of wrapping usize on 32-bit targets
+        // (wasm32) and reading out of bounds.
+        let mut pq = vec![0u8; 64];
+        pq[0] = QUANT_TYPE_PRODUCT;
+        pq[2..4].copy_from_slice(&4u16.to_le_bytes());
+        pq.extend_from_slice(&u16::MAX.to_le_bytes()); // m
+        pq.extend_from_slice(&u16::MAX.to_le_bytes()); // k
+        pq.extend_from_slice(&u16::MAX.to_le_bytes()); // sub_dim
+        assert!(matches!(decode_quant_seg(&pq), Err(CodecError::TooShort)));
+    }
+
+    #[test]
+    fn decode_sketch_seg_rejects_malformed_inputs() {
+        // Header too short: error, not panic.
+        assert!(matches!(decode_sketch_seg(&[]), Err(CodecError::TooShort)));
+        assert!(matches!(
+            decode_sketch_seg(&[0u8; 16]),
+            Err(CodecError::TooShort)
+        ));
+
+        // width = 0 + depth = u32::MAX: expected counter bytes are 0, so
+        // the length check alone passes; the zero-width guard must reject
+        // it before the depth-sized allocation OOMs.
+        let mut zero_width = vec![0u8; 64];
+        zero_width[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            decode_sketch_seg(&zero_width),
+            Err(CodecError::InvalidField)
+        ));
+
+        // width = depth = u32::MAX: product (~1.8e19) wraps a 32-bit
+        // usize; the checked u64 arithmetic must reject it against the
+        // body length.
+        let mut huge = vec![0u8; 64];
+        huge[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        huge[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            decode_sketch_seg(&huge),
+            Err(CodecError::TooShort)
+        ));
+
+        // Counter data shorter than width * depth.
+        let mut truncated = vec![0u8; 64 + 10];
+        truncated[0..4].copy_from_slice(&8u32.to_le_bytes()); // width
+        truncated[4..8].copy_from_slice(&4u32.to_le_bytes()); // depth -> needs 32
+        assert!(matches!(
+            decode_sketch_seg(&truncated),
+            Err(CodecError::TooShort)
+        ));
+
+        // Degenerate-but-consistent empty sketch (width = depth = 0)
+        // still decodes.
+        let empty = decode_sketch_seg(&[0u8; 64]).expect("empty sketch decodes");
+        assert_eq!(empty.width, 0);
+        assert_eq!(empty.depth, 0);
+        assert!(empty.counters.is_empty());
+    }
+
+    #[test]
     fn sketch_seg_round_trip() {
         let mut sketch = CountMinSketch::new(64, 4);
         for block_id in 0..20u64 {
@@ -657,7 +749,7 @@ mod tests {
         }
 
         let encoded = encode_sketch_seg(&sketch);
-        let decoded = decode_sketch_seg(&encoded);
+        let decoded = decode_sketch_seg(&encoded).expect("well-formed sketch should decode");
 
         assert_eq!(decoded.width, sketch.width);
         assert_eq!(decoded.depth, sketch.depth);

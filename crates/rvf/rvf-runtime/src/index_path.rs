@@ -310,7 +310,17 @@ impl VectorIndex {
         let m0 = u16::from_le_bytes([body[2], body[3]]) as usize;
         let max_layer = u32::from_le_bytes(body[4..8].try_into().ok()?) as usize;
         let entry_ordinal = u64::from_le_bytes(body[8..16].try_into().ok()?);
-        let id_count = u64::from_le_bytes(body[16..24].try_into().ok()?) as usize;
+        let id_count_raw = u64::from_le_bytes(body[16..24].try_into().ok()?);
+
+        // Bound `id_count` by the bytes actually available before
+        // allocating: each delta occupies at least one varint byte, so a
+        // count exceeding the remaining body length can never decode. A
+        // crafted trailer with e.g. id_count = u64::MAX would otherwise
+        // panic (capacity overflow) or OOM in `Vec::with_capacity`.
+        if id_count_raw > (body.len() - 24) as u64 {
+            return None;
+        }
+        let id_count = id_count_raw as usize;
 
         let mut ids = Vec::with_capacity(id_count);
         let mut pos = 24;
@@ -468,6 +478,42 @@ mod tests {
         assert!(VectorIndex::decode_payload(&payload[..payload.len() - 4], &vectors).is_none());
         // Empty payload.
         assert!(VectorIndex::decode_payload(&[], &vectors).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_huge_id_count_without_panicking() {
+        let ids: Vec<u64> = (0..32u64).collect();
+        let vectors = make_vectors(&ids, 8, 3);
+        let index = VectorIndex::build(&vectors, DistanceMetric::L2, 8, 100);
+        let payload = index.encode_payload();
+
+        // Overwrite the trailer's id_count field with adversarial values.
+        // Must return None (safe rebuild), never panic or allocate huge.
+        let len_off = payload.len() - 8;
+        let body_len =
+            u32::from_le_bytes(payload[len_off..len_off + 4].try_into().unwrap()) as usize;
+        let body_start = len_off - body_len;
+        for count in [u64::MAX, u64::MAX / 2, 1u64 << 48, 1u64 << 32] {
+            let mut corrupt = payload.clone();
+            corrupt[body_start + 16..body_start + 24].copy_from_slice(&count.to_le_bytes());
+            assert!(
+                VectorIndex::decode_payload(&corrupt, &vectors).is_none(),
+                "id_count {count} must be rejected"
+            );
+        }
+
+        // Minimal crafted payload: valid magic + body_len + 24-byte body
+        // claiming u64::MAX ids with zero delta bytes available.
+        let mut crafted = Vec::new();
+        crafted.extend_from_slice(&TRAILER_VERSION.to_le_bytes());
+        crafted.extend_from_slice(&8u16.to_le_bytes()); // m0
+        crafted.extend_from_slice(&1u32.to_le_bytes()); // max_layer
+        crafted.extend_from_slice(&u64::MAX.to_le_bytes()); // entry ordinal
+        crafted.extend_from_slice(&u64::MAX.to_le_bytes()); // id_count
+        let body_len = crafted.len() as u32;
+        crafted.extend_from_slice(&body_len.to_le_bytes());
+        crafted.extend_from_slice(&TRAILER_MAGIC);
+        assert!(VectorIndex::decode_payload(&crafted, &vectors).is_none());
     }
 
     #[test]
