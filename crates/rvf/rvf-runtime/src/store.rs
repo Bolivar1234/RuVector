@@ -362,8 +362,11 @@ impl RvfStore {
                 let dist = compute_distance(vector, stored_vec, &self.options.metric);
                 if heap.len() < k {
                     heap.push((OrderedFloat(dist), vec_id));
-                } else if let Some(&(OrderedFloat(worst), _)) = heap.peek() {
-                    if dist < worst {
+                } else if let Some(&(OrderedFloat(worst), worst_id)) = heap.peek() {
+                    // Tie-break equal distances by smaller id so the selected
+                    // k-set is independent of HashMap iteration order (which
+                    // changes across process restarts).
+                    if dist < worst || (dist == worst && vec_id < worst_id) {
                         heap.pop();
                         heap.push((OrderedFloat(dist), vec_id));
                     }
@@ -384,6 +387,7 @@ impl RvfStore {
             a.distance
                 .partial_cmp(&b.distance)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
         Ok(results)
     }
@@ -469,6 +473,7 @@ impl RvfStore {
                 a.distance
                     .partial_cmp(&b.distance)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.id.cmp(&b.id))
             });
             all_results.truncate(k);
         }
