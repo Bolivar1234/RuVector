@@ -7,6 +7,7 @@ use std::collections::BinaryHeap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use rvf_types::dashboard::{DashboardHeader, DASHBOARD_MAGIC, DASHBOARD_MAX_SIZE};
 use rvf_types::ebpf::{EbpfHeader, EBPF_MAGIC};
@@ -21,6 +22,9 @@ use rvf_types::{
 use crate::cow::{CowEngine, CowStats};
 use crate::deletion::DeletionBitmap;
 use crate::filter::{self, metadata_value_to_filter, FilterExpr, FilterValue, MetadataStore};
+use crate::index_path::{
+    VectorIndex, INDEX_MAX_DELETED_FRACTION, INDEX_MIN_EF_SEARCH, INDEX_MIN_VECTORS,
+};
 use crate::locking::WriterLock;
 use crate::membership::MembershipFilter;
 use crate::options::*;
@@ -68,6 +72,10 @@ pub struct RvfStore {
     /// Hash of the last witness entry, used to chain-link successive witnesses.
     /// All zeros when no witness has been written yet (genesis).
     last_witness_hash: [u8; 32],
+    /// In-memory HNSW index over the stored vectors (None until loaded
+    /// from an INDEX_SEG or built on the first eligible query). Guarded by
+    /// a Mutex so `query(&self)` can build/maintain it lazily.
+    index: Mutex<Option<VectorIndex>>,
 }
 
 impl RvfStore {
@@ -117,6 +125,7 @@ impl RvfStore {
             membership_filter: None,
             parent_path: None,
             last_witness_hash: [0u8; 32],
+            index: Mutex::new(None),
         };
 
         store.write_manifest()?;
@@ -167,6 +176,7 @@ impl RvfStore {
             membership_filter: None,
             parent_path: None,
             last_witness_hash: [0u8; 32],
+            index: Mutex::new(None),
         };
 
         store.boot()?;
@@ -213,6 +223,7 @@ impl RvfStore {
             membership_filter: None,
             parent_path: None,
             last_witness_hash: [0u8; 32],
+            index: Mutex::new(None),
         };
 
         store.boot()?;
@@ -293,6 +304,26 @@ impl RvfStore {
             self.vectors.insert(vec_id, vec_data.to_vec());
         }
 
+        // Keep the in-memory HNSW index in sync with the new vectors.
+        {
+            let mut guard = self.index.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(idx) = guard.as_mut() {
+                if valid_ids.iter().any(|&id| idx.contains(id)) {
+                    // An existing ID was overwritten: the graph's edges for
+                    // that node are stale. Drop the index (it is rebuilt
+                    // lazily) and unlink any persisted INDEX_SEG so a
+                    // reopen does not load the stale graph.
+                    *guard = None;
+                    self.segment_dir
+                        .retain(|&(_, _, _, stype)| stype != SegmentType::Index as u8);
+                } else {
+                    let mut new_ids = valid_ids.clone();
+                    new_ids.sort_unstable();
+                    idx.insert_ids(&new_ids, &self.vectors, self.options.metric);
+                }
+            }
+        }
+
         if let Some(meta_entries) = metadata {
             let entries_per_id = meta_entries.len() / valid_ids.len().max(1);
             if entries_per_id > 0 {
@@ -330,21 +361,130 @@ impl RvfStore {
     }
 
     /// Query the store for the k nearest neighbors of the given vector.
+    ///
+    /// Routing: stores with at least `INDEX_MIN_VECTORS` vectors are served
+    /// by the HNSW index (loaded from an INDEX_SEG at open time, or built
+    /// on the first eligible query and maintained incrementally). Smaller
+    /// stores, filtered queries, COW/membership stores, and stores with a
+    /// high soft-deleted fraction use the exact brute-force scan.
     pub fn query(
         &self,
         vector: &[f32],
         k: usize,
         options: &QueryOptions,
     ) -> Result<Vec<SearchResult>, RvfError> {
+        self.query_routed(vector, k, options).map(|(r, _)| r)
+    }
+
+    /// Internal query entry point. Returns the results plus whether the
+    /// HNSW index actually served the query (for honest evidence reporting
+    /// in [`Self::query_with_envelope`]).
+    fn query_routed(
+        &self,
+        vector: &[f32],
+        k: usize,
+        options: &QueryOptions,
+    ) -> Result<(Vec<SearchResult>, bool), RvfError> {
         let dim = self.options.dimension as usize;
         if vector.len() != dim {
             return Err(err(ErrorCode::DimensionMismatch));
         }
 
         if self.vectors.len() == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
 
+        if self.index_eligible(options) {
+            if let Some(results) = self.query_via_index(vector, k, options) {
+                return Ok((results, true));
+            }
+        }
+
+        Ok((self.query_exact(vector, k, options), false))
+    }
+
+    /// Whether this query can be served by the HNSW index path.
+    ///
+    /// Filtered queries, COW/membership stores, small stores, and stores
+    /// with a high deleted fraction always use the exact scan (which is
+    /// both correct and faster in those regimes).
+    fn index_eligible(&self, options: &QueryOptions) -> bool {
+        if options.force_exact || options.filter.is_some() {
+            return false;
+        }
+        if self.membership_filter.is_some() || self.cow_engine.is_some() {
+            return false;
+        }
+        let total = self.vectors.len();
+        if total < INDEX_MIN_VECTORS {
+            return false;
+        }
+        let deleted = self.deletion_bitmap.count();
+        (deleted as f64) <= (total as f64) * INDEX_MAX_DELETED_FRACTION
+    }
+
+    /// Serve a query through the HNSW index, building it on first use.
+    ///
+    /// Returns `None` when the index cannot supply `k` live results; the
+    /// caller then falls back to the exact scan.
+    fn query_via_index(
+        &self,
+        vector: &[f32],
+        k: usize,
+        options: &QueryOptions,
+    ) -> Option<Vec<SearchResult>> {
+        let mut guard = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(VectorIndex::build(
+                &self.vectors,
+                self.options.metric,
+                (self.options.m.max(2)) as usize,
+                (self.options.ef_construction.max(16)) as usize,
+            ));
+        }
+        let idx = guard.as_mut()?;
+        // Insert vectors ingested since the index was built/loaded.
+        idx.sync_missing(&self.vectors, self.options.metric);
+
+        // Oversample to compensate for soft-deleted entries that may
+        // appear among the nearest graph hits.
+        let deleted = self.deletion_bitmap.count();
+        let live = self.vectors.len().saturating_sub(deleted);
+        let k_fetch = k.saturating_add(deleted.min(2 * k + 16));
+        // Floor ef_search so the index path meets the >=0.95 recall@10
+        // contract (see INDEX_MIN_EF_SEARCH); larger values are honored.
+        let ef = (options.ef_search as usize)
+            .max(k_fetch)
+            .max(INDEX_MIN_EF_SEARCH);
+
+        let hits = idx.search(vector, k_fetch, ef, &self.vectors, self.options.metric);
+        let mut results: Vec<SearchResult> = hits
+            .into_iter()
+            .filter(|&(id, _)| !self.deletion_bitmap.is_deleted(id))
+            .take(k)
+            .map(|(id, distance)| SearchResult {
+                id,
+                distance,
+                retrieval_quality: rvf_types::quality::RetrievalQuality::Full,
+            })
+            .collect();
+        if results.len() < k.min(live) {
+            // Not enough live hits after deletion filtering; let the exact
+            // scan answer instead of returning an under-filled result set.
+            return None;
+        }
+        // Preserve deterministic (distance, id) result ordering.
+        results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Some(results)
+    }
+
+    /// Exact brute-force k-nearest-neighbor scan over all live vectors.
+    fn query_exact(&self, vector: &[f32], k: usize, options: &QueryOptions) -> Vec<SearchResult> {
         // Max-heap: peek() returns the largest (farthest) distance in our k set.
         // When a closer vector is found, evict the farthest.
         let mut heap: BinaryHeap<(OrderedFloat, u64)> = BinaryHeap::new();
@@ -403,7 +543,7 @@ impl RvfStore {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        Ok(results)
+        results
     }
 
     /// Query the store and return a full QualityEnvelope (ADR-033 §2.4).
@@ -433,8 +573,8 @@ impl RvfStore {
             _ => options.safety_net_budget,
         };
 
-        // Execute the base query.
-        let results = self.query(vector, k, options)?;
+        // Execute the base query, tracking whether the HNSW index served it.
+        let (results, index_used) = self.query_routed(vector, k, options)?;
         let hnsw_candidate_count = results.len() as u32;
 
         // Determine if safety net should activate.
@@ -500,11 +640,13 @@ impl RvfStore {
             all_results.iter().map(|r| r.retrieval_quality).collect();
         let quality = derive_response_quality(&retrieval_qualities);
 
+        // Honest evidence: index layers are reported as used only when the
+        // HNSW index actually served the query (not on brute-force scans).
         let evidence = SearchEvidenceSummary {
             layers_used: IndexLayersUsed {
-                layer_a: true,
+                layer_a: index_used,
                 layer_b: false,
-                layer_c: false,
+                layer_c: index_used,
                 hot_cache: needs_safety_net,
             },
             n_probe_effective: 0,
@@ -697,6 +839,11 @@ impl RvfStore {
         }
         self.metadata.remove_ids(&deleted_ids);
 
+        // Compaction removes vectors, so the in-memory HNSW index is
+        // invalidated (rebuilt lazily). Persisted INDEX_SEGs are likewise
+        // dropped from the rewritten file below.
+        *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
         let segments_compacted = deleted_ids.len() as u32;
         let bytes_reclaimed = (deleted_ids.len() as u64) * (self.options.dimension as u64) * 4;
 
@@ -758,6 +905,12 @@ impl RvfStore {
             // newer format versions).
             let preserved = scan_preservable_segments(&original_bytes);
             for (orig_offset, seg_id, payload_len, seg_type) in &preserved {
+                // Drop INDEX_SEGs: compaction changes the vector set, so a
+                // preserved index would be stale. It is rebuilt from the
+                // live vectors on the next eligible query.
+                if *seg_type == SegmentType::Index as u8 {
+                    continue;
+                }
                 // Use checked arithmetic for bounds safety.
                 let total_bytes = match (*payload_len as usize).checked_add(SEGMENT_HEADER_SIZE) {
                     Some(t) => t,
@@ -864,7 +1017,13 @@ impl RvfStore {
     }
 
     /// Close the store, releasing the writer lock.
-    pub fn close(self) -> Result<(), RvfError> {
+    ///
+    /// If the in-memory HNSW index changed since it was last persisted,
+    /// it is written out as an INDEX_SEG so the next open can load it
+    /// instead of rebuilding from vectors.
+    pub fn close(mut self) -> Result<(), RvfError> {
+        self.persist_index()?;
+
         self.file
             .sync_all()
             .map_err(|_| err(ErrorCode::FsyncFailed))?;
@@ -874,6 +1033,65 @@ impl RvfStore {
         }
 
         Ok(())
+    }
+
+    /// True when an HNSW index is resident in memory (loaded from an
+    /// INDEX_SEG at open time or built by a previous query).
+    pub fn index_ready(&self) -> bool {
+        self.index
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Persist the in-memory HNSW index as an INDEX_SEG if it has changed
+    /// since it was last persisted (or since it was built/loaded).
+    fn persist_index(&mut self) -> Result<(), RvfError> {
+        if self.read_only {
+            return Ok(());
+        }
+        let payload = {
+            let mut guard = self.index.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                Some(idx) if idx.is_dirty() && idx.node_count() > 0 => {
+                    let payload = idx.encode_payload();
+                    idx.mark_clean();
+                    payload
+                }
+                _ => return Ok(()),
+            }
+        };
+
+        let writer = self
+            .seg_writer
+            .as_mut()
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+        let (seg_id, seg_offset) = {
+            let mut buf_writer = BufWriter::with_capacity(256 * 1024, &self.file);
+            buf_writer
+                .seek(SeekFrom::End(0))
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            writer
+                .write_index_seg(&mut buf_writer, &payload)
+                .map_err(|_| err(ErrorCode::FsyncFailed))?
+        };
+
+        // Newer INDEX_SEGs supersede older ones: keep only the latest
+        // entry in the manifest (orphaned bytes are reclaimed by compact).
+        self.segment_dir
+            .retain(|&(_, _, _, stype)| stype != SegmentType::Index as u8);
+        self.segment_dir.push((
+            seg_id,
+            seg_offset,
+            payload.len() as u64,
+            SegmentType::Index as u8,
+        ));
+
+        self.file
+            .sync_all()
+            .map_err(|_| err(ErrorCode::FsyncFailed))?;
+        self.epoch += 1;
+        self.write_manifest()
     }
 
     // -- Kernel / eBPF embedding API --
@@ -1666,6 +1884,7 @@ impl RvfStore {
             membership_filter: None,
             parent_path: Some(self.path.clone()),
             last_witness_hash: [0u8; 32],
+            index: Mutex::new(None),
         };
 
         store.write_manifest()?;
@@ -1818,6 +2037,29 @@ impl RvfStore {
         // Restore FileIdentity from manifest if present
         if let Some(fi) = manifest.file_identity {
             self.file_identity = fi;
+        }
+
+        // Load the most recently persisted HNSW index, if any. A stale or
+        // corrupt INDEX_SEG is ignored; the index is then rebuilt from
+        // vectors on the first eligible query.
+        let index_entry = self
+            .segment_dir
+            .iter()
+            .rev()
+            .find(|&&(_, _, _, stype)| stype == SegmentType::Index as u8)
+            .copied();
+        if let Some((_, offset, _, _)) = index_entry {
+            let payload = {
+                let mut reader = BufReader::new(&self.file);
+                read_path::read_segment_payload(&mut reader, offset)
+                    .ok()
+                    .map(|(_, p)| p)
+            };
+            if let Some(payload) = payload {
+                if let Some(idx) = VectorIndex::decode_payload(&payload, &self.vectors) {
+                    *self.index.lock().unwrap_or_else(|e| e.into_inner()) = Some(idx);
+                }
+            }
         }
 
         if !self.read_only {
@@ -2210,9 +2452,9 @@ mod tests {
             assert!(data.len() > 65_536);
             let tail = &data[data.len() - 65_536..];
             let magic = SEGMENT_MAGIC.to_le_bytes();
-            let found = tail.windows(6).any(|w| {
-                w[0..4] == magic && w[5] == SegmentType::Manifest as u8
-            });
+            let found = tail
+                .windows(6)
+                .any(|w| w[0..4] == magic && w[5] == SegmentType::Manifest as u8);
             assert!(!found, "manifest header unexpectedly within 64 KB tail");
         }
 

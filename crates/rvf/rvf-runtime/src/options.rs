@@ -112,6 +112,9 @@ pub struct QueryOptions {
     /// Safety net budget caps. Callers may tighten but not loosen
     /// beyond the mode default (unless PreferQuality, which extends to 4x).
     pub safety_net_budget: SafetyNetBudget,
+    /// Force the exact brute-force scan even when an HNSW index is
+    /// available. Useful for ground-truth comparison and benchmarking.
+    pub force_exact: bool,
 }
 
 impl Default for QueryOptions {
@@ -122,6 +125,7 @@ impl Default for QueryOptions {
             timeout_ms: 0,
             quality_preference: QualityPreference::Auto,
             safety_net_budget: SafetyNetBudget::LAYER_A,
+            force_exact: false,
         }
     }
 }

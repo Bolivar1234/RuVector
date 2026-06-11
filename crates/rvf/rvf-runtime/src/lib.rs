@@ -25,6 +25,7 @@ pub mod deletion;
 pub mod dos;
 pub mod ffi;
 pub mod filter;
+mod index_path;
 pub mod locking;
 pub mod membership;
 pub mod options;

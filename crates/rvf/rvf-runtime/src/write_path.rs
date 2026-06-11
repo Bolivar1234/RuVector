@@ -109,6 +109,18 @@ impl SegmentWriter {
         Ok((seg_id, offset))
     }
 
+    /// Write an INDEX_SEG containing an encoded HNSW index payload
+    /// (codec payload + ID-mapping trailer; see `index_path`).
+    pub(crate) fn write_index_seg<W: Write + Seek>(
+        &mut self,
+        writer: &mut W,
+        payload: &[u8],
+    ) -> io::Result<(u64, u64)> {
+        let seg_id = self.alloc_seg_id();
+        let offset = self.write_segment(writer, SegmentType::Index as u8, seg_id, payload)?;
+        Ok((seg_id, offset))
+    }
+
     /// Write a META_SEG for vector metadata.
     #[allow(dead_code)]
     pub(crate) fn write_meta_seg<W: Write + Seek>(
