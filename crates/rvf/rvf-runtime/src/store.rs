@@ -7,6 +7,7 @@ use std::collections::BinaryHeap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use rvf_types::dashboard::{DashboardHeader, DASHBOARD_MAGIC, DASHBOARD_MAX_SIZE};
@@ -77,9 +78,28 @@ pub struct RvfStore {
     /// from an INDEX_SEG or built on the first eligible query). Guarded by
     /// a Mutex so `query(&self)` can build/maintain it lazily.
     index: Mutex<Option<VectorIndex>>,
+    /// True while one query thread is (re)building the HNSW index OUTSIDE
+    /// the `index` mutex. Other query threads fall back to the exact scan
+    /// instead of blocking behind an O(N log N) build (audit finding 5:
+    /// overwrite invalidation must not cause head-of-line blocking).
+    index_building: AtomicBool,
     /// In-memory RaBitQ codes for the opt-in two-stage query path (None
     /// until the first `QueryOptions::rabitq` query builds it lazily).
     rabitq: Mutex<Option<RabitqState>>,
+    /// Same single-builder gate as `index_building`, for the RaBitQ code
+    /// book (its lazy build is an O(N) scan + encode).
+    rabitq_building: AtomicBool,
+}
+
+/// Clears an `AtomicBool` on drop, so a panicking index build can never
+/// leave the "building" gate latched (queries would silently fall back to
+/// the exact scan forever).
+struct ClearOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl RvfStore {
@@ -130,7 +150,9 @@ impl RvfStore {
             parent_path: None,
             last_witness_hash: [0u8; 32],
             index: Mutex::new(None),
+            index_building: AtomicBool::new(false),
             rabitq: Mutex::new(None),
+            rabitq_building: AtomicBool::new(false),
         };
 
         store.write_manifest()?;
@@ -182,7 +204,9 @@ impl RvfStore {
             parent_path: None,
             last_witness_hash: [0u8; 32],
             index: Mutex::new(None),
+            index_building: AtomicBool::new(false),
             rabitq: Mutex::new(None),
+            rabitq_building: AtomicBool::new(false),
         };
 
         store.boot()?;
@@ -230,7 +254,9 @@ impl RvfStore {
             parent_path: None,
             last_witness_hash: [0u8; 32],
             index: Mutex::new(None),
+            index_building: AtomicBool::new(false),
             rabitq: Mutex::new(None),
+            rabitq_building: AtomicBool::new(false),
         };
 
         store.boot()?;
@@ -308,7 +334,7 @@ impl RvfStore {
         ));
 
         for (vec_data, &vec_id) in valid_vectors.iter().zip(valid_ids.iter()) {
-            self.vectors.insert(vec_id, vec_data.to_vec());
+            self.vectors.insert_slice(vec_id, vec_data);
         }
 
         // Keep the in-memory HNSW index in sync with the new vectors.
@@ -456,7 +482,19 @@ impl RvfStore {
     ) -> Option<Vec<SearchResult>> {
         let mut guard = self.rabitq.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
-            *guard = RabitqState::build(&self.vectors);
+            // Build OUTSIDE the lock so concurrent queries are not blocked
+            // behind the O(N) encode; only one thread builds, the others
+            // fall back to the default routing (audit finding 5 pattern).
+            drop(guard);
+            if self.rabitq_building.swap(true, Ordering::AcqRel) {
+                return None;
+            }
+            let _clear = ClearOnDrop(&self.rabitq_building);
+            let built = RabitqState::build(&self.vectors);
+            guard = self.rabitq.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_none() {
+                *guard = built;
+            }
         }
         let state = guard.as_mut()?;
         // Encode vectors ingested since the state was built.
@@ -533,12 +571,27 @@ impl RvfStore {
     ) -> Option<Vec<SearchResult>> {
         let mut guard = self.index.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
-            *guard = Some(VectorIndex::build(
+            // Audit finding 5: the O(N log N) build must not run under the
+            // query mutex (head-of-line blocking after an overwrite drops
+            // the index). Exactly one thread builds into a local index
+            // with NO lock held, then swaps it in; concurrent queries see
+            // `index_building` set and fall back to the exact scan, so
+            // queries keep serving throughout the rebuild.
+            drop(guard);
+            if self.index_building.swap(true, Ordering::AcqRel) {
+                return None;
+            }
+            let _clear = ClearOnDrop(&self.index_building);
+            let built = VectorIndex::build(
                 &self.vectors,
                 self.options.metric,
                 (self.options.m.max(2)) as usize,
                 (self.options.ef_construction.max(16)) as usize,
-            ));
+            );
+            guard = self.index.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_none() {
+                *guard = Some(built);
+            }
         }
         let idx = guard.as_mut()?;
         // Insert vectors ingested since the index was built/loaded.
@@ -600,7 +653,9 @@ impl RvfStore {
             _ => 0.0,
         };
 
-        for &vec_id in self.vectors.ids() {
+        // Scan the contiguous slab in ordinal order (cache-friendly: rows
+        // are adjacent in memory, no per-vector pointer chase).
+        for (vec_id, stored_vec) in self.vectors.iter() {
             if self.deletion_bitmap.is_deleted(vec_id) {
                 continue;
             }
@@ -609,19 +664,15 @@ impl RvfStore {
                     continue;
                 }
             }
-            if let Some(stored_vec) = self.vectors.get(vec_id) {
-                let dist =
-                    compute_distance(vector, stored_vec, &self.options.metric, query_norm_sq);
-                if heap.len() < k {
+            let dist = compute_distance(vector, stored_vec, &self.options.metric, query_norm_sq);
+            if heap.len() < k {
+                heap.push((OrderedFloat(dist), vec_id));
+            } else if let Some(&(OrderedFloat(worst), worst_id)) = heap.peek() {
+                // Tie-break equal distances by smaller id so the selected
+                // k-set is independent of storage iteration order.
+                if dist < worst || (dist == worst && vec_id < worst_id) {
+                    heap.pop();
                     heap.push((OrderedFloat(dist), vec_id));
-                } else if let Some(&(OrderedFloat(worst), worst_id)) = heap.peek() {
-                    // Tie-break equal distances by smaller id so the selected
-                    // k-set is independent of HashMap iteration order (which
-                    // changes across process restarts).
-                    if dist < worst || (dist == worst && vec_id < worst_id) {
-                        heap.pop();
-                        heap.push((OrderedFloat(dist), vec_id));
-                    }
                 }
             }
         }
@@ -685,16 +736,11 @@ impl RvfStore {
         let mut degradation: Option<DegradationReport> = None;
 
         if needs_safety_net && self.vectors.len() > 0 {
-            // Build vector refs for safety net scan.
+            // Build vector refs for safety net scan (slab rows, no copies).
             let vec_refs: Vec<(u64, &[f32])> = self
                 .vectors
-                .ids()
-                .filter_map(|&id| {
-                    if self.deletion_bitmap.is_deleted(id) {
-                        return None;
-                    }
-                    self.vectors.get(id).map(|v| (id, v))
-                })
+                .iter()
+                .filter(|&(id, _)| !self.deletion_bitmap.is_deleted(id))
                 .collect();
 
             let base_results: Vec<crate::options::SearchResult> = all_results.clone();
@@ -935,6 +981,9 @@ impl RvfStore {
         for &id in &deleted_ids {
             self.vectors.remove(id);
         }
+        // Reclaim the tombstoned slab slots (the only point where slots
+        // are reused, so live rows never move between mutations).
+        self.vectors.compact_in_place();
         self.metadata.remove_ids(&deleted_ids);
 
         // Compaction removes vectors, so the in-memory HNSW index is
@@ -977,14 +1026,14 @@ impl RvfStore {
 
             let mut temp_writer = BufWriter::new(&temp_file);
 
-            let live_ids: Vec<u64> = self.vectors.ids().copied().collect();
-            let live_vecs: Vec<Vec<f32>> = live_ids
-                .iter()
-                .filter_map(|&id| self.vectors.get(id).map(|v| v.to_vec()))
-                .collect();
+            let mut live_ids: Vec<u64> = Vec::with_capacity(self.vectors.len());
+            let mut vec_refs: Vec<&[f32]> = Vec::with_capacity(self.vectors.len());
+            for (id, row) in self.vectors.iter() {
+                live_ids.push(id);
+                vec_refs.push(row);
+            }
 
             if !live_ids.is_empty() {
-                let vec_refs: Vec<&[f32]> = live_vecs.iter().map(|v| v.as_slice()).collect();
                 let (seg_id, offset) = seg_writer
                     .write_vec_seg(
                         &mut temp_writer,
@@ -1985,7 +2034,9 @@ impl RvfStore {
             parent_path: Some(self.path.clone()),
             last_witness_hash: [0u8; 32],
             index: Mutex::new(None),
+            index_building: AtomicBool::new(false),
             rabitq: Mutex::new(None),
+            rabitq_building: AtomicBool::new(false),
         };
 
         store.write_manifest()?;
@@ -2106,7 +2157,12 @@ impl RvfStore {
         self.epoch = manifest.epoch;
         self.options.dimension = manifest.dimension;
         self.options.profile = manifest.profile_id;
-        self.vectors = VectorData::new(manifest.dimension);
+        // Pre-size the slab from the manifest so the cold-open load does a
+        // single allocation instead of growing through repeated doublings.
+        self.vectors = VectorData::with_capacity(
+            manifest.dimension,
+            usize::try_from(manifest.total_vectors).unwrap_or(0),
+        );
         self.deletion_bitmap = DeletionBitmap::from_ids(&manifest.deleted_ids);
 
         self.segment_dir = manifest
@@ -2128,9 +2184,16 @@ impl RvfStore {
                     .map_err(|_| err(ErrorCode::InvalidChecksum))?
             };
 
-            if let Some(vec_entries) = read_path::read_vec_seg_payload(&payload) {
-                for (vec_id, vec_data) in vec_entries {
-                    self.vectors.insert(vec_id, vec_data);
+            // Fast path: bulk-copy the segment's rows straight into the
+            // contiguous slab (no per-vector allocation). Falls back to
+            // the legacy parser for segments whose dimension differs from
+            // the manifest dimension (such rows are skipped by the slab,
+            // matching the layout invariant).
+            if self.vectors.load_from_vec_seg(&payload).is_none() {
+                if let Some(vec_entries) = read_path::read_vec_seg_payload(&payload) {
+                    for (vec_id, vec_data) in vec_entries {
+                        self.vectors.insert(vec_id, vec_data);
+                    }
                 }
             }
         }
@@ -3189,6 +3252,163 @@ mod tests {
             .unwrap();
         assert_eq!(count_witness_segments(&store), 1);
         assert_ne!(store.last_witness_hash(), &[0u8; 32]);
+
+        store.close().unwrap();
+    }
+
+    // ── Audit finding 5: index rebuild must not block queries ─────────
+
+    /// While one thread holds the `index_building` gate, other queries must
+    /// be served by the exact scan instead of blocking (and must not build
+    /// the index themselves).
+    #[test]
+    fn query_falls_back_to_exact_scan_while_index_is_building() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("building_fallback.rvf");
+
+        let options = RvfOptions {
+            dimension: 8,
+            metric: DistanceMetric::L2,
+            ..Default::default()
+        };
+        let mut store = RvfStore::create(&path, options).unwrap();
+
+        let n = (crate::index_path::INDEX_MIN_VECTORS + 64) as u64;
+        let vecs: Vec<Vec<f32>> = (0..n).map(|i| random_vector(8, i)).collect();
+        let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+        let ids: Vec<u64> = (0..n).collect();
+        store.ingest_batch(&refs, &ids, None).unwrap();
+
+        // Simulate another thread mid-build: the gate is held.
+        store.index_building.store(true, Ordering::Release);
+        let q = random_vector(8, 17);
+        let results = store.query(&q, 10, &QueryOptions::default()).unwrap();
+        assert_eq!(results.len(), 10);
+        assert_eq!(results[0].id, 17);
+        // Nobody built the index under the latched gate.
+        assert!(!store.index_ready());
+
+        // Gate released: the next query builds and installs the index.
+        store.index_building.store(false, Ordering::Release);
+        let results = store.query(&q, 10, &QueryOptions::default()).unwrap();
+        assert_eq!(results.len(), 10);
+        assert_eq!(results[0].id, 17);
+        assert!(store.index_ready());
+
+        store.close().unwrap();
+    }
+
+    /// Interleaved overwrites (which drop the HNSW index) and concurrent
+    /// queries: queries must keep serving — no panic, no deadlock, full
+    /// result sets — while rebuilds happen outside the query mutex.
+    /// Timing is deliberately not asserted to avoid flakes; a deadlock
+    /// fails via the harness timeout.
+    #[test]
+    fn overwrite_invalidation_keeps_queries_serving() {
+        use std::sync::RwLock;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hot_overwrite.rvf");
+
+        let options = RvfOptions {
+            dimension: 8,
+            metric: DistanceMetric::L2,
+            ..Default::default()
+        };
+        let mut store = RvfStore::create(&path, options).unwrap();
+
+        let n = (crate::index_path::INDEX_MIN_VECTORS + 200) as u64;
+        let vecs: Vec<Vec<f32>> = (0..n).map(|i| random_vector(8, i)).collect();
+        let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+        let ids: Vec<u64> = (0..n).collect();
+        store.ingest_batch(&refs, &ids, None).unwrap();
+
+        // Build the index once so the overwrites below actually invalidate it.
+        let warm = random_vector(8, 7_777);
+        store.query(&warm, 10, &QueryOptions::default()).unwrap();
+        assert!(store.index_ready());
+
+        let store = RwLock::new(store);
+        std::thread::scope(|scope| {
+            // Reader threads: concurrent queries throughout the overwrites.
+            for t in 0..4u64 {
+                let store = &store;
+                scope.spawn(move || {
+                    for i in 0..40u64 {
+                        let q = random_vector(8, 100_000 + t * 1_000 + i);
+                        let guard = store.read().unwrap();
+                        let results = guard.query(&q, 10, &QueryOptions::default()).unwrap();
+                        assert_eq!(results.len(), 10);
+                        for w in results.windows(2) {
+                            assert!(w[0].distance <= w[1].distance);
+                        }
+                    }
+                });
+            }
+            // Writer thread: repeatedly overwrite existing ids, each one
+            // dropping the in-memory index.
+            let store = &store;
+            scope.spawn(move || {
+                for i in 0..10u64 {
+                    let v = random_vector(8, 555_000 + i);
+                    let mut guard = store.write().unwrap();
+                    guard
+                        .ingest_batch(&[v.as_slice()], &[i % 50], None)
+                        .unwrap();
+                    drop(guard);
+                    std::thread::yield_now();
+                }
+            });
+        });
+
+        // Queries still serve after the dust settles, and the index can
+        // be rebuilt (possibly by this very query).
+        let store = store.into_inner().unwrap();
+        let results = store.query(&warm, 10, &QueryOptions::default()).unwrap();
+        assert_eq!(results.len(), 10);
+        let _ = store.query(&warm, 10, &QueryOptions::default()).unwrap();
+        store.close().unwrap();
+    }
+
+    /// Overwriting an existing id must still invalidate stale index state
+    /// and produce correct nearest-neighbor results afterwards.
+    #[test]
+    fn overwrite_returns_fresh_vector_via_index_path() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("overwrite_fresh.rvf");
+
+        let options = RvfOptions {
+            dimension: 8,
+            metric: DistanceMetric::L2,
+            ..Default::default()
+        };
+        let mut store = RvfStore::create(&path, options).unwrap();
+
+        let n = (crate::index_path::INDEX_MIN_VECTORS + 16) as u64;
+        let vecs: Vec<Vec<f32>> = (0..n).map(|i| random_vector(8, i)).collect();
+        let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+        let ids: Vec<u64> = (0..n).collect();
+        store.ingest_batch(&refs, &ids, None).unwrap();
+
+        store
+            .query(&random_vector(8, 1), 5, &QueryOptions::default())
+            .unwrap();
+        assert!(store.index_ready());
+
+        // Overwrite id 3 with a far-away vector.
+        let far = vec![100.0f32; 8];
+        store.ingest_batch(&[far.as_slice()], &[3], None).unwrap();
+        assert!(!store.index_ready(), "overwrite must drop the stale index");
+
+        // Query at the new location must find the overwritten id first.
+        let results = store.query(&far, 1, &QueryOptions::default()).unwrap();
+        assert_eq!(results[0].id, 3);
+        assert!(results[0].distance < f32::EPSILON);
+
+        // And the old location must NOT return id 3 anymore.
+        let old_q = random_vector(8, 3);
+        let results = store.query(&old_q, 5, &QueryOptions::default()).unwrap();
+        assert!(results.iter().all(|r| r.id != 3 || r.distance > 1.0));
 
         store.close().unwrap();
     }

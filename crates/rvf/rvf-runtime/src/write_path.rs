@@ -438,9 +438,8 @@ impl SegmentWriter {
         let mut header = SegmentHeader::new(seg_type, seg_id);
         header.payload_length = payload.len() as u64;
 
-        // Compute a simple content hash (first 16 bytes of CRC-based hash).
-        let hash = content_hash(payload);
-        header.content_hash = hash;
+        // Content hash: single shared implementation (see crate::hashing).
+        header.content_hash = crate::hashing::legacy_content_hash(payload);
 
         // Write header as raw bytes.
         let header_bytes = header_to_bytes(&header);
@@ -479,24 +478,6 @@ fn header_to_bytes(h: &SegmentHeader) -> [u8; SEGMENT_HEADER_SIZE] {
     buf
 }
 
-/// Compute a simple 16-byte content hash (CRC32-based, rotated for distinct bytes).
-fn content_hash(data: &[u8]) -> [u8; 16] {
-    let mut hash = [0u8; 16];
-    let crc = crc32_slice(data);
-    // Use different rotations of CRC to fill 16 bytes with distinct values.
-    for i in 0..4 {
-        let rotated = crc.rotate_left(i as u32 * 8);
-        hash[i * 4..(i + 1) * 4].copy_from_slice(&rotated.to_le_bytes());
-    }
-    hash
-}
-
-/// IEEE CRC32 (poly 0xEDB88320, init 0xFFFFFFFF, final XOR) via crc32fast.
-/// Produces values identical to the previous per-bit implementation.
-fn crc32_slice(data: &[u8]) -> u32 {
-    crc32fast::hash(data)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,39 +508,6 @@ mod tests {
 
         // Check seg_type.
         assert_eq!(data[5], SegmentType::Vec as u8);
-    }
-
-    #[test]
-    fn crc32_matches_reference_bitwise_implementation() {
-        // Reference: the original per-bit IEEE CRC32 (poly 0xEDB88320,
-        // init 0xFFFFFFFF, final XOR) that crc32_slice replaced.
-        fn crc32_reference(data: &[u8]) -> u32 {
-            let mut crc: u32 = 0xFFFF_FFFF;
-            for &byte in data {
-                crc ^= byte as u32;
-                for _ in 0..8 {
-                    if crc & 1 != 0 {
-                        crc = (crc >> 1) ^ 0xEDB8_8320;
-                    } else {
-                        crc >>= 1;
-                    }
-                }
-            }
-            !crc
-        }
-
-        let inputs: [&[u8]; 5] = [
-            b"",
-            b"a",
-            b"123456789",
-            b"hello rvf segment payload",
-            &[0xFFu8; 1024],
-        ];
-        for input in inputs {
-            assert_eq!(crc32_slice(input), crc32_reference(input));
-        }
-        // Standard IEEE CRC32 check value.
-        assert_eq!(crc32_slice(b"123456789"), 0xCBF4_3926);
     }
 
     #[test]

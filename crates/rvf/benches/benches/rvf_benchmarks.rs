@@ -755,6 +755,16 @@ fn runtime_query_100k_benchmarks(c: &mut Criterion) {
     });
 
     store.close().unwrap();
+
+    // Cold-open: time from open_readonly() to query-ready vector storage
+    // (loads every VEC_SEG plus the persisted INDEX_SEG for 100k vectors).
+    group.bench_function("cold_open", |b| {
+        b.iter(|| {
+            let store = RvfStore::open_readonly(&path).unwrap();
+            black_box(store.status().total_vectors);
+        })
+    });
+
     group.finish();
 }
 

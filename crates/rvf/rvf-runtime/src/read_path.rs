@@ -7,8 +7,12 @@
 //! 4. On-demand: load cold segments as queries need them
 
 use rvf_types::{FileIdentity, SegmentHeader, SegmentType, SEGMENT_HEADER_SIZE, SEGMENT_MAGIC};
-use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
+
+/// In-memory vector storage. The contiguous-slab implementation lives in
+/// [`crate::vector_slab`]; re-exported here so existing consumers
+/// (`store`, `index_path`, `rabitq_path`) keep their import path.
+pub(crate) use crate::vector_slab::VectorData;
 
 /// A parsed segment directory entry.
 #[derive(Clone, Debug)]
@@ -30,43 +34,6 @@ pub(crate) struct ParsedManifest {
     pub segment_dir: Vec<SegDirEntry>,
     pub deleted_ids: Vec<u64>,
     pub file_identity: Option<FileIdentity>,
-}
-
-/// In-memory vector storage loaded from VEC_SEGs.
-#[allow(dead_code)]
-pub(crate) struct VectorData {
-    /// Maps vector_id -> (dimension-sized f32 slice stored as Vec<f32>).
-    pub vectors: HashMap<u64, Vec<f32>>,
-    pub dimension: u16,
-}
-
-impl VectorData {
-    pub(crate) fn new(dimension: u16) -> Self {
-        Self {
-            vectors: HashMap::new(),
-            dimension,
-        }
-    }
-
-    pub(crate) fn get(&self, id: u64) -> Option<&[f32]> {
-        self.vectors.get(&id).map(|v| v.as_slice())
-    }
-
-    pub(crate) fn insert(&mut self, id: u64, data: Vec<f32>) {
-        self.vectors.insert(id, data);
-    }
-
-    pub(crate) fn remove(&mut self, id: u64) {
-        self.vectors.remove(&id);
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.vectors.len()
-    }
-
-    pub(crate) fn ids(&self) -> impl Iterator<Item = &u64> {
-        self.vectors.keys()
-    }
 }
 
 /// Scan backwards from EOF to find and parse the latest valid manifest.
@@ -318,9 +285,15 @@ pub(crate) fn read_vec_seg_payload(payload: &[u8]) -> Option<Vec<(u64, Vec<f32>)
     let vector_count =
         u32::from_le_bytes([payload[2], payload[3], payload[4], payload[5]]) as usize;
 
-    let bytes_per_vec = dimension * 4;
-    let expected_size = 6 + vector_count * (8 + bytes_per_vec);
-    if payload.len() < expected_size {
+    // Checked u64 arithmetic: on 32-bit targets (wasm32) a crafted
+    // `vector_count` can wrap `vector_count * (8 + bytes_per_vec)` in
+    // usize, pass this length check, and panic on out-of-bounds reads in
+    // the loop below.
+    let bytes_per_vec = (dimension as u64) * 4;
+    let expected_size = (vector_count as u64)
+        .checked_mul(8 + bytes_per_vec)
+        .and_then(|v| v.checked_add(6))?;
+    if (payload.len() as u64) < expected_size {
         return None;
     }
 
@@ -478,20 +451,9 @@ pub(crate) fn read_segment_payload<R: Read + Seek>(
 }
 
 /// Compute a 16-byte content hash matching the write path's algorithm.
-/// Uses CRC32 with rotations to fill 16 bytes.
+/// Delegates to the single shared implementation in [`crate::hashing`].
 fn compute_content_hash(data: &[u8]) -> [u8; 16] {
-    let mut hash = [0u8; 16];
-    let crc = crc32_for_verify(data);
-    for i in 0..4 {
-        let rotated = crc.rotate_left(i as u32 * 8);
-        hash[i * 4..(i + 1) * 4].copy_from_slice(&rotated.to_le_bytes());
-    }
-    hash
-}
-
-/// IEEE CRC32 computation (matches write_path::crc32_slice).
-fn crc32_for_verify(data: &[u8]) -> u32 {
-    crc32fast::hash(data)
+    crate::hashing::legacy_content_hash(data)
 }
 
 #[cfg(test)]
@@ -527,5 +489,26 @@ mod tests {
         assert_eq!(result[0].1, vec![1.0, 2.0]);
         assert_eq!(result[1].0, 20);
         assert_eq!(result[1].1, vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn vec_seg_rejects_oversized_counts_without_panicking() {
+        // Maximal dimension and vector_count: the size product
+        // (~1.1e15 bytes) wraps a 32-bit usize. The checked u64 size
+        // computation must reject the payload (None), never pass the
+        // length check and read out of bounds.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u16::MAX.to_le_bytes()); // dimension
+        payload.extend_from_slice(&u32::MAX.to_le_bytes()); // vector_count
+        payload.extend_from_slice(&[0u8; 32]); // a little body, far too short
+        assert!(read_vec_seg_payload(&payload).is_none());
+
+        // A count that wraps usize-32 to a tiny value (dim 0 -> 8 bytes
+        // per record; count * 8 wraps at 2^29 records on 32-bit).
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&(1u32 << 29).to_le_bytes());
+        payload.extend_from_slice(&[0u8; 64]);
+        assert!(read_vec_seg_payload(&payload).is_none());
     }
 }

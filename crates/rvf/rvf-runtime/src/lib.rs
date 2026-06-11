@@ -25,6 +25,7 @@ pub mod deletion;
 pub mod dos;
 pub mod ffi;
 pub mod filter;
+mod hashing;
 mod index_path;
 pub mod locking;
 pub mod membership;
@@ -38,6 +39,7 @@ pub mod safety_net;
 pub mod seed_crypto;
 pub mod status;
 pub mod store;
+mod vector_slab;
 pub mod witness;
 pub mod write_path;
 
