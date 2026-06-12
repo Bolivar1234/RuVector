@@ -1,6 +1,6 @@
 # ADR-210: Default-On Semantic Embeddings — all-MiniLM-L6-v2 as the Intelligence Engine's Primary Embedder
 
-- **Status**: proposed
+- **Status**: accepted (with hardening edits, review of 2026-06-12)
 - **Date**: 2026-06-12
 - **Deciders**: ruv
 - **Tags**: embeddings, onnx, intelligence-engine, sona, rabitq, hnsw, performance
@@ -47,8 +47,31 @@ lineage). Despite all this machinery, the model is effectively **off**:
 
 ## Decision
 
+Defaulting to ONNX MiniLM is not a model upgrade. It is a **contract
+upgrade**: the intelligence layer stops pretending hash buckets are meaning
+and makes semantic behavior the normal path, while keeping fallback
+observable, deterministic, and auditable.
+
 Make semantic embeddings the default brain of the intelligence layer, in four
-coordinated changes:
+coordinated changes plus one cross-cutting invariant:
+
+### D0. Embedding-provenance invariant (cross-cutting, mandatory)
+
+Every persisted vector store (hooks intelligence stores, HNSW memories,
+`.rvf`/`.db` files created through the embedding path) MUST record:
+
+```
+{ embedderKind, modelId, dimension, normalize, prefixPolicy }
+```
+
+- Inserts whose provenance does not match the store's recorded provenance are
+  **refused** (clear error naming both sides), not coerced. No mixed stores.
+- Legacy stores without provenance metadata are treated as
+  `{ embedderKind: "hash", dimension: <recorded or inferred>, normalize:
+  false, prefixPolicy: "none" }` and open **read-only** for vector writes
+  until re-embedded.
+- This invariant is the defense against the decision's real failure mode —
+  partial migration (see Risks).
 
 ### D1. `enableOnnx` defaults to true with graceful, *loud* fallback
 - `IntelligenceEngine` constructor flips to `enableOnnx: true`.
@@ -68,9 +91,15 @@ coordinated changes:
 
 ### D2. Normalize at embed time; align RaBitQ/HNSW with cosine geometry
 - The embedder's `normalize` option becomes default-true (unit vectors).
-  For unit vectors, L2 ranking is monotone in cosine similarity, so the
-  L2-only RaBitQ v1 estimator and the HNSW distance kernels compose with
-  MiniLM today — no third correction scalar, no IP/cosine codec work.
+  The precise claim: for unit-norm vectors, `||a − b||² = 2 − 2·cos(a, b)`,
+  so L2 distance is a strictly decreasing function of cosine similarity and
+  the two rankings are identical — **but only when both vectors are unit
+  norm**. The D0 provenance invariant (`normalize: true` recorded per store,
+  mixed inserts refused) is what makes this equivalence safe to rely on; a
+  single un-normalized vector in the store silently breaks the ranking
+  equivalence. With it, the L2-only RaBitQ v1 estimator and the HNSW distance
+  kernels compose with MiniLM today — no third correction scalar, no
+  IP/cosine codec work.
 - Re-tune the documented ANN floors on text embeddings: add a benchmark
   embedding a fixed public text corpus (deterministic, committed fixture)
   with MiniLM, measuring recall@10 vs exact for HNSW (ef sweep) and RaBitQ
@@ -91,13 +120,52 @@ coordinated changes:
 ### D4. Model registry grows defaults + prefix conventions (prepares #524)
 - Loader metadata gains `queryPrefix`/`passagePrefix` fields; the embedder
   applies them automatically (`embedQuery` vs `embedPassage` entry points;
-  plain `embed()` = passage). MiniLM uses empty prefixes; `bge-small-en-v1.5`
-  and `e5-small-v2` get their documented conventions, removing the silent
-  misuse hazard for prefix-requiring models.
+  plain `embed()` = passage). Per-model facts, from the model cards:
+  - `all-MiniLM-L6-v2`: 384-dim, general semantic search, **no prefixes**
+    (https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2).
+  - `e5-small-v2`: **requires** `query: ` / `passage: ` prefixes — the model
+    card states quality degrades without them
+    (https://huggingface.co/intfloat/e5-small-v2).
+  - `bge-small-en-v1.5`: query instruction **recommended for short-query →
+    long-passage retrieval**; passages need no instruction
+    (https://huggingface.co/BAAI/bge-small-en-v1.5).
+  The registry encodes exactly these policies (`prefixPolicy: none |
+  required | query-recommended`), and `prefixPolicy` is part of the D0
+  provenance record so stores embedded with and without prefixes can never
+  silently mix.
 - Default model stays `all-MiniLM-L6-v2` in this ADR (bundle-size neutral).
   Switching the default to BGE-small (same 384 dims) is deferred to #524's
   decision once bundling strategy is settled; this ADR makes that switch a
   one-line registry change with prefixes already handled.
+
+### D5. Rollout flags (operator escape hatches)
+
+Environment variables override config, for staged rollout and incident
+response without code changes:
+
+- `RUVECTOR_EMBEDDER=auto|minilm|hash` — `auto` (default): MiniLM when
+  loadable, loud hash fallback otherwise; `minilm`: hard-require the model
+  (fail rather than fall back); `hash`: force the legacy embedder
+  (bug-for-bug escape hatch).
+- `RUVECTOR_ONNX=0|1` — kill switch for the entire ONNX runtime path
+  (`0` ≡ `RUVECTOR_EMBEDDER=hash`); `1` ≡ `minilm`.
+- `RUVECTOR_REEMBED=refuse|warn|auto` — what happens when opening a store
+  whose provenance mismatches the active embedder: `refuse` (default; the D0
+  invariant), `warn` (open read-only with a warning), `auto` (re-embed
+  in place — requires source text to be present; refuses otherwise).
+
+### Acceptance gates (test-enforced before the default flips)
+
+1. `stats().embedderKind === "onnx-minilm"` when the model loads.
+2. Fallback emits exactly **one** warning per process, not one per call.
+3. A 256-dim legacy store opens **read-only** for vector writes.
+4. Mixed-provenance insert (256-dim hash store + 384-dim MiniLM vector, or
+   prefix-policy mismatch) fails with a clear error.
+5. Normalized embedding L2 norm ∈ [0.999, 1.001] for every emitted vector.
+6. `embedQuery()` applies the registered prefix for E5/BGE.
+7. MiniLM applies **no** prefix on either entry point.
+8. The RaBitQ/HNSW recall benchmark runs on the real text fixture (D2), not
+   only uniform-random vectors.
 
 ### Explicit non-goals
 - No change to the Rust crates' embedding story (ruvllm neural embeddings are
@@ -126,6 +194,13 @@ coordinated changes:
 - Prefix support removes a correctness trap before BGE/E5 adoption (#524).
 
 ### Negative
+- **The primary risk is not latency — it is partial migration**: old hash
+  memories, new MiniLM memories, and SONA hash fingerprints coexisting
+  without clear attribution would corrupt every similarity comparison
+  silently. The D0 provenance invariant (mandatory metadata, refused mixed
+  inserts, read-only legacy stores) is the mitigation, and acceptance gates
+  3–4 enforce it; if D0 ships incompletely, this ADR's default flip must not
+  ship at all.
 - First-use latency and ~23 MB model download (or bundle weight, per #524's
   eventual bundling decision) become the default experience; offline/CI
   environments exercise the fallback path routinely — mitigated by lazy init,
@@ -147,6 +222,9 @@ coordinated changes:
 
 ## Links
 
+- Model cards: [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
+  · [e5-small-v2](https://huggingface.co/intfloat/e5-small-v2)
+  · [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5)
 - Issue #517 — route learning (state keys over task text; semantic synergy)
 - Issue #523 — ONNX contract fixes that make default-on safe (shipped 0.2.29)
 - Issue #524 — BGE bundling (+0.08 nDCG@10); prefix conventions prepared here
