@@ -579,6 +579,55 @@ export function getParallelWorkerCount(): number {
   return bundledPool ? bundledPool.numWorkers : 0;
 }
 
+/** Batches at or above this size route through the worker pool (ADR-210 D3). */
+export const BULK_EMBED_THRESHOLD = 32;
+
+let bulkPoolFallbackWarned = false;
+
+/**
+ * Default bulk-embedding path (ADR-210 D3): batches of `threshold`
+ * (default 32) or more texts route through the bundled parallel worker pool
+ * — fp32 model bytes shared across workers via SharedArrayBuffer, vectors
+ * identical to the single-thread path. Smaller batches, and any batch when
+ * pool startup fails (no worker_threads, no SharedArrayBuffer), use the
+ * single-threaded batch path with one stderr note.
+ *
+ * INT8 STATUS (honest gap, ADR-210 D3): the registered int8 variants
+ * (QUANTIZED_MODELS in onnx-optimized.ts) cannot run on the bundled WASM
+ * runtime today — its graph analyzer rejects quantized MiniLM exports
+ * ("Failed analyse for node /Unsqueeze", verified against both
+ * Xenova/all-MiniLM-L6-v2 model_quantized.onnx and the official
+ * sentence-transformers model_quint8_avx2.onnx exports). Bulk ingest
+ * therefore defaults to parallel-fp32; int8 ingest needs a Rust-side
+ * runtime upgrade in the ruvector-onnx-embeddings-wasm crate (tracked as
+ * an ADR-210 follow-up). Single-query latency keeps fp32 either way.
+ */
+export async function embedBulk(
+  texts: string[],
+  opts: { threshold?: number } = {}
+): Promise<number[][]> {
+  if (!texts || texts.length === 0) return [];
+  const threshold = opts.threshold ?? BULK_EMBED_THRESHOLD;
+  if (!isInitialized) {
+    await initOnnxEmbedder();
+  }
+  if (texts.length >= threshold) {
+    try {
+      return await embedBatchParallel(texts);
+    } catch (e: any) {
+      if (!bulkPoolFallbackWarned) {
+        bulkPoolFallbackWarned = true;
+        console.error(
+          `ruvector: parallel bulk-embed pool unavailable (${e?.message ?? e}); ` +
+          `using single-threaded batch embedding.`
+        );
+      }
+    }
+  }
+  const results = await embedBatch(texts);
+  return results.map(r => r.embedding);
+}
+
 /** Shut down the bundled worker pool and release its threads. */
 export async function shutdownParallelEmbedder(): Promise<void> {
   if (bundledPool) {

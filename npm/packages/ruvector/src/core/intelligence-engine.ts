@@ -13,7 +13,7 @@
 
 import { FastAgentDB, Episode, Trajectory, EpisodeSearchResult } from './agentdb-fast';
 import { SonaEngine, SonaConfig, LearnedPattern, SonaStats, isSonaAvailable } from './sona-wrapper';
-import { OnnxEmbedder, OnnxEmbedderConfig, isOnnxAvailable, initOnnxEmbedder, getEmbedderProvenance } from './onnx-embedder';
+import { OnnxEmbedder, OnnxEmbedderConfig, isOnnxAvailable, initOnnxEmbedder, getEmbedderProvenance, embedBulk, shutdownParallelEmbedder } from './onnx-embedder';
 import {
   EmbeddingProvenance,
   resolveEmbedderSelection,
@@ -392,6 +392,52 @@ export class IntelligenceEngine {
 
     // Fall back to sync embedding
     return this.embed(text);
+  }
+
+  /**
+   * Batch embedding for bulk ingest (ADR-210 D3). When the ONNX model is
+   * loaded, batches of 32+ texts route through the bundled parallel worker
+   * pool (parallel-fp32 — see embedBulk in onnx-embedder.ts for the int8
+   * status note); smaller batches use the single-threaded batch path. On
+   * fallback, semantics match embedAsync exactly: hash per-item with the
+   * loud once-per-process warning, or a hard error under
+   * RUVECTOR_EMBEDDER=minilm (D5). Texts are embedded as passages (D4).
+   *
+   * Callers that start the pool should call shutdownEmbedderPool() when the
+   * bulk work is done so worker threads do not keep the process alive.
+   */
+  async embedBatchAsync(texts: string[]): Promise<number[][]> {
+    if (!texts || texts.length === 0) return [];
+    if (this.onnxEmbedder) {
+      try {
+        if (!this.onnxReady) {
+          const ok = this.onnxInitPromise ? await this.onnxInitPromise : await this.initOnnx();
+          if (!ok) throw this.onnxInitError ?? new Error('ONNX initialization failed');
+        }
+        return await embedBulk(texts);
+      } catch (e: any) {
+        if (this.onnxHardRequire) {
+          throw new Error(
+            `RUVECTOR_EMBEDDER=minilm hard-requires the ONNX embedder and fallback is disabled: ${e?.message ?? e}`
+          );
+        }
+        warnHashFallbackOnce(e?.message ?? String(e));
+        // Fall through to sync methods
+      }
+    }
+    return texts.map(t => this.embed(t));
+  }
+
+  /**
+   * Shut down the bundled bulk-embed worker pool, releasing its threads
+   * (ADR-210 D3). Safe to call when the pool was never started.
+   */
+  async shutdownEmbedderPool(): Promise<void> {
+    try {
+      await shutdownParallelEmbedder();
+    } catch {
+      // Pool teardown is best-effort.
+    }
   }
 
   /**

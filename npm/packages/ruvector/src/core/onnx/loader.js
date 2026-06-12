@@ -123,7 +123,11 @@ export class ModelLoader {
      * @returns {Promise<{modelBytes: Uint8Array, tokenizerJson: string, config: object}>}
      */
     async loadModel(modelName = DEFAULT_MODEL) {
-        const modelConfig = MODELS[modelName];
+        // Own-property lookup only: a hostile model name like '__proto__'
+        // must be rejected as unknown, not resolve to a prototype member.
+        const modelConfig = Object.prototype.hasOwnProperty.call(MODELS, modelName)
+            ? MODELS[modelName]
+            : undefined;
         if (!modelConfig) {
             throw new Error(`Unknown model: ${modelName}. Available: ${Object.keys(MODELS).join(', ')}`);
         }

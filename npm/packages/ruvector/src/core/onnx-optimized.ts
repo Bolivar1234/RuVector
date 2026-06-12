@@ -263,7 +263,10 @@ export class OptimizedOnnxEmbedder {
       // log a quantization (FP16/INT8) that is not actually applied. When the
       // loader gains variant support, thread the selected variant through to
       // loadModel() here instead of computing an unused URL.
-      const modelInfo = QUANTIZED_MODELS[this.config.modelId];
+      // Own-property lookup only ('__proto__'-style ids must miss, ADR-210).
+      const modelInfo = Object.prototype.hasOwnProperty.call(QUANTIZED_MODELS, this.config.modelId)
+        ? QUANTIZED_MODELS[this.config.modelId]
+        : undefined;
       if (modelInfo) {
         this.dimension = modelInfo.dimension;
       }

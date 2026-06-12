@@ -188,15 +188,17 @@ program
     const spinner = ora('Loading database...').start();
 
     try {
-      // Read dimension + embedding provenance from sidecar (#508, ADR-210 D0)
+      // Read dimension + embedding provenance from sidecar (#508, ADR-210 D0).
+      // Sidecar JSON is untrusted on-disk input: malformed records are treated
+      // as absent (sanitizeDimension / sanitizeProvenanceSafe), never crash.
       let dimension = 384;
       let storeProvenance = null;
       const metaPath = `${dbPath}.meta.json`;
       if (fs.existsSync(metaPath)) {
         try {
           const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-          dimension = meta.dimension || 384;
-          storeProvenance = meta.provenance || null;
+          dimension = sanitizeDimension(meta.dimension, 384);
+          storeProvenance = sanitizeProvenanceSafe(meta.provenance);
         } catch (_) {}
       }
 
@@ -204,14 +206,15 @@ program
       const data = JSON.parse(fs.readFileSync(file, 'utf8'));
       // Accept a plain array (raw vectors, no declared provenance) or the
       // ADR-210 object form `{ provenance, vectors }` from embedding-path
-      // exporters.
+      // exporters. A malformed declared provenance is treated as undeclared
+      // (the dimension gate below still applies).
       let declaredProvenance = null;
       let vectors;
       if (Array.isArray(data)) {
         vectors = data;
       } else if (data && Array.isArray(data.vectors)) {
         vectors = data.vectors;
-        declaredProvenance = data.provenance || null;
+        declaredProvenance = sanitizeProvenanceSafe(data.provenance);
       } else {
         vectors = [data];
       }
@@ -221,7 +224,7 @@ program
       if (storeProvenance) {
         const provMod = loadProvenance();
         const describe = provMod ? provMod.describeProvenance : (p) => JSON.stringify(p);
-        const badDim = vectors.find(v => Array.isArray(v.vector) && v.vector.length !== storeProvenance.dimension);
+        const badDim = vectors.find(v => v && Array.isArray(v.vector) && v.vector.length !== storeProvenance.dimension);
         const provMismatch = declaredProvenance && provMod
           ? provMod.compareProvenance(storeProvenance, declaredProvenance)
           : [];
@@ -290,7 +293,7 @@ program
       let dimension = 384;
       const metaPath = `${dbPath}.meta.json`;
       if (fs.existsSync(metaPath)) {
-        try { dimension = JSON.parse(fs.readFileSync(metaPath, 'utf8')).dimension || 384; } catch (_) {}
+        try { dimension = sanitizeDimension(JSON.parse(fs.readFileSync(metaPath, 'utf8')).dimension, 384); } catch (_) {}
       }
 
       if (!fs.existsSync(dbPath)) {
@@ -348,8 +351,8 @@ program
       if (fs.existsSync(metaPath)) {
         try {
           const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-          dimension = meta.dimension || dimension;
-          metric = meta.metric || metric;
+          dimension = sanitizeDimension(meta.dimension, dimension);
+          metric = typeof meta.metric === 'string' ? meta.metric : metric;
         } catch (_) {}
       }
 
@@ -1988,7 +1991,7 @@ program
       let dimension = 384;
       const metaPath = `${dbPath}.meta.json`;
       if (fs.existsSync(metaPath)) {
-        try { dimension = JSON.parse(fs.readFileSync(metaPath, 'utf8')).dimension || 384; } catch (_) {}
+        try { dimension = sanitizeDimension(JSON.parse(fs.readFileSync(metaPath, 'utf8')).dimension, 384); } catch (_) {}
       }
       const db = new VectorDB({ dimensions: dimension, storagePath: dbPath });
       const count = await db.len();
@@ -2051,7 +2054,7 @@ program
       const importMetaPath = `${dbPath}.meta.json`;
       if (fs.existsSync(importMetaPath)) {
         let targetProvenance = null;
-        try { targetProvenance = JSON.parse(fs.readFileSync(importMetaPath, 'utf8')).provenance || null; } catch (_) {}
+        try { targetProvenance = sanitizeProvenanceSafe(JSON.parse(fs.readFileSync(importMetaPath, 'utf8')).provenance); } catch (_) {}
         if (targetProvenance && targetProvenance.dimension !== dimension) {
           const provMod = loadProvenance();
           const describe = provMod ? provMod.describeProvenance : (p) => JSON.stringify(p);
@@ -2902,6 +2905,28 @@ function loadProvenance() {
   return provenanceMod;
 }
 
+/**
+ * Sanitize a provenance record read from disk (untrusted JSON, ADR-210
+ * security pass): malformed records are treated as ABSENT (null), never
+ * crash. Falls back to a minimal shape check when dist is missing.
+ */
+function sanitizeProvenanceSafe(value) {
+  const prov = loadProvenance();
+  if (prov && typeof prov.sanitizeProvenance === 'function') {
+    return prov.sanitizeProvenance(value);
+  }
+  return (
+    value && typeof value === 'object' && !Array.isArray(value) &&
+    typeof value.embedderKind === 'string' &&
+    Number.isInteger(value.dimension) && value.dimension > 0 && value.dimension <= 65536
+  ) ? value : null;
+}
+
+/** Bound a dimension read from an untrusted sidecar to a sane integer. */
+function sanitizeDimension(value, fallback) {
+  return (Number.isInteger(value) && value > 0 && value <= 65536) ? value : fallback;
+}
+
 class Intelligence {
   constructor(options = {}) {
     this.intelPath = this.getIntelPath();
@@ -3032,19 +3057,25 @@ class Intelligence {
     try {
       if (fs.existsSync(this.intelPath)) {
         const data = JSON.parse(fs.readFileSync(this.intelPath, 'utf-8'));
-        // Merge with defaults to ensure all fields exist
+        // Merge with defaults to ensure all fields exist. The file is
+        // untrusted on-disk input (ADR-210 security pass): shape-check each
+        // field so a hand-edited/corrupted store cannot crash later code
+        // that iterates arrays or spreads objects.
+        const asArray = (v, dflt) => (Array.isArray(v) ? v : dflt);
+        const asObject = (v, dflt) => (v && typeof v === 'object' && !Array.isArray(v) ? v : dflt);
         return {
-          patterns: data.patterns || defaults.patterns,
-          memories: data.memories || defaults.memories,
-          trajectories: data.trajectories || defaults.trajectories,
-          errors: data.errors || defaults.errors,
-          file_sequences: data.file_sequences || defaults.file_sequences,
-          agents: data.agents || defaults.agents,
-          edges: data.edges || defaults.edges,
-          stats: { ...defaults.stats, ...(data.stats || {}) },
+          patterns: asObject(data.patterns, defaults.patterns),
+          memories: asArray(data.memories, defaults.memories),
+          trajectories: asArray(data.trajectories, defaults.trajectories),
+          errors: asObject(data.errors, defaults.errors),
+          file_sequences: asArray(data.file_sequences, defaults.file_sequences),
+          agents: asObject(data.agents, defaults.agents),
+          edges: asArray(data.edges, defaults.edges),
+          stats: { ...defaults.stats, ...asObject(data.stats, {}) },
           // ADR-210 D0: embedding provenance of stored memory vectors
-          // (null = legacy store, read-only for vector writes until reembed)
-          embeddingProvenance: data.embeddingProvenance || null,
+          // (null = legacy store, read-only for vector writes until reembed).
+          // Malformed records are treated as absent (sanitized, never crash).
+          embeddingProvenance: sanitizeProvenanceSafe(data.embeddingProvenance),
           // Preserve in-flight trajectories so trajectory-end (run in a later
           // process) can find what trajectory-begin recorded (#517)
           activeTrajectories: data.activeTrajectories || {},
@@ -3205,16 +3236,18 @@ class Intelligence {
    * Re-embed every stored memory with `embedFn` and stamp `provenance`.
    * Requires retained source text; memories without text must be dropped
    * explicitly (the command refuses otherwise — no fabricated vectors).
+   *
+   * ADR-210 D3: when `embedBatchFn` is provided and the store holds
+   * `batchThreshold` (32) or more re-embeddable memories, the whole corpus
+   * is embedded in one bulk call (the engine routes it through the bundled
+   * parallel worker pool); smaller stores embed per-item via `embedFn`.
    */
-  async reembedAll(embedFn, provenance, { dropMissing = false } = {}) {
-    const memories = this.data.memories || [];
+  async reembedAll(embedFn, provenance, { dropMissing = false, embedBatchFn = null, batchThreshold = 32 } = {}) {
+    const memories = Array.isArray(this.data.memories) ? this.data.memories : [];
     const kept = [];
-    let reembedded = 0;
     let dropped = 0;
     for (const m of memories) {
-      if (typeof m.content === 'string' && m.content.length > 0) {
-        m.embedding = await embedFn(m.content);
-        reembedded++;
+      if (m && typeof m.content === 'string' && m.content.length > 0) {
         kept.push(m);
       } else if (dropMissing) {
         dropped++;
@@ -3222,10 +3255,21 @@ class Intelligence {
         throw new Error('memory without retained source text encountered; rerun with --drop-missing');
       }
     }
+    let usedBulk = false;
+    if (embedBatchFn && kept.length >= batchThreshold) {
+      const vectors = await embedBatchFn(kept.map(m => m.content));
+      if (!Array.isArray(vectors) || vectors.length !== kept.length) {
+        throw new Error(`bulk embed returned ${vectors && vectors.length} vectors for ${kept.length} texts`);
+      }
+      for (let i = 0; i < kept.length; i++) kept[i].embedding = vectors[i];
+      usedBulk = true;
+    } else {
+      for (const m of kept) m.embedding = await embedFn(m.content);
+    }
     this.data.memories = kept;
     this.data.stats.total_memories = kept.length;
     this.data.embeddingProvenance = provenance;
-    return { reembedded, dropped };
+    return { reembedded: kept.length, dropped, bulk: usedBulk };
   }
 
   // Memory operations - use engine's VectorDB for semantic search
@@ -4616,8 +4660,8 @@ hooksCmd.command('reembed')
       return;
     }
     const intel = new Intelligence({ skipEngine: true }); // embedder chosen explicitly below
-    const memories = intel.data.memories || [];
-    const missing = memories.filter(m => !(typeof m.content === 'string' && m.content.length > 0)).length;
+    const memories = Array.isArray(intel.data.memories) ? intel.data.memories : [];
+    const missing = memories.filter(m => !(m && typeof m.content === 'string' && m.content.length > 0)).length;
 
     if (missing > 0 && !opts.dropMissing) {
       // Honest refusal: those vectors cannot be re-embedded (no source text),
@@ -4634,6 +4678,8 @@ hooksCmd.command('reembed')
     // Pick the target embedder per RUVECTOR_EMBEDDER (D5).
     const selection = provMod.resolveEmbedderSelection();
     let embedFn;
+    let embedBatchFn = null;
+    let shutdownPool = null;
     let provenance;
     if (selection === 'hash') {
       // Deterministic, offline-safe: the wrapper's own hash embedder.
@@ -4667,6 +4713,14 @@ hooksCmd.command('reembed')
         return;
       }
       embedFn = (t) => engine.embedAsync(t);
+      // ADR-210 D3: 32+ memories re-embed in one bulk call through the
+      // bundled parallel worker pool (parallel-fp32; see embedBulk for the
+      // int8 status). The pool's worker threads keep the process alive, so
+      // they are shut down once the bulk work completes.
+      if (typeof engine.embedBatchAsync === 'function') {
+        embedBatchFn = (texts) => engine.embedBatchAsync(texts);
+        shutdownPool = () => (typeof engine.shutdownEmbedderPool === 'function' ? engine.shutdownEmbedderPool() : Promise.resolve());
+      }
       provenance = engine.getActiveProvenance();
     }
 
@@ -4682,12 +4736,19 @@ hooksCmd.command('reembed')
     }
 
     try {
-      const result = await intel.reembedAll(embedFn, provenance, { dropMissing: !!opts.dropMissing });
+      const startMs = Date.now();
+      const result = await intel.reembedAll(embedFn, provenance, { dropMissing: !!opts.dropMissing, embedBatchFn });
       intel.save();
-      console.log(JSON.stringify({ success: true, ...result, provenance }));
+      let parallelWorkers = 0;
+      try {
+        parallelWorkers = require('../dist/core/onnx-embedder.js').getParallelWorkerCount();
+      } catch (_) {}
+      console.log(JSON.stringify({ success: true, ...result, parallelWorkers, elapsedMs: Date.now() - startMs, provenance }));
     } catch (e) {
       console.log(JSON.stringify({ success: false, error: e.message }));
       process.exitCode = 1;
+    } finally {
+      if (shutdownPool) await shutdownPool().catch(() => {});
     }
   });
 

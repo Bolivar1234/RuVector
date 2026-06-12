@@ -76,9 +76,17 @@ export const MODEL_PREFIXES: Record<string, ModelPrefixSpec> = {
   'gte-small': { ...NO_PREFIX },
 };
 
-/** Prefix spec for a model; unknown models get the no-prefix policy. */
+/**
+ * Prefix spec for a model; unknown models get the no-prefix policy.
+ * Own-property lookup only: a hostile model id like '__proto__' or
+ * 'constructor' must resolve to NO_PREFIX, not to a prototype member
+ * (ADR-210 security pass).
+ */
 export function getModelPrefixSpec(modelId: string | null | undefined): ModelPrefixSpec {
-  return (modelId && MODEL_PREFIXES[modelId]) || NO_PREFIX;
+  if (modelId && Object.prototype.hasOwnProperty.call(MODEL_PREFIXES, modelId)) {
+    return MODEL_PREFIXES[modelId];
+  }
+  return NO_PREFIX;
 }
 
 /**
@@ -125,6 +133,58 @@ export function compareProvenance(a: EmbeddingProvenance, b: EmbeddingProvenance
   if (!!a.normalize !== !!b.normalize) mismatches.push('normalize');
   if (a.prefixPolicy !== b.prefixPolicy) mismatches.push('prefixPolicy');
   return mismatches;
+}
+
+/** Upper bound accepted for a provenance dimension read from disk. */
+export const MAX_PROVENANCE_DIMENSION = 65536;
+
+const VALID_PREFIX_POLICIES: ReadonlyArray<string> = ['none', 'required', 'query-recommended'];
+
+/**
+ * Sanitize a provenance record read from DISK (a `.meta.json` sidecar or
+ * `intelligence.json`). On-disk JSON is untrusted input: a malformed or
+ * adversarial record must never crash the caller. Anything that is not a
+ * plausibly-valid record is treated as ABSENT (returns null), which callers
+ * already handle as the no-provenance / legacy path — conservative for a
+ * corrupted stamp (the store degrades to read-only for vector writes rather
+ * than accepting writes under a fabricated identity).
+ */
+export function sanitizeProvenance(value: unknown): EmbeddingProvenance | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+
+  const embedderKind = v.embedderKind;
+  if (typeof embedderKind !== 'string' || embedderKind.length === 0 || embedderKind.length > 64) {
+    return null;
+  }
+
+  const dimension = v.dimension;
+  if (
+    typeof dimension !== 'number' ||
+    !Number.isInteger(dimension) ||
+    dimension < 1 ||
+    dimension > MAX_PROVENANCE_DIMENSION
+  ) {
+    return null;
+  }
+
+  let modelId: string | null = null;
+  if (typeof v.modelId === 'string') {
+    if (v.modelId.length === 0 || v.modelId.length > 256) return null;
+    modelId = v.modelId;
+  } else if (v.modelId !== null && v.modelId !== undefined) {
+    return null;
+  }
+
+  let prefixPolicy: PrefixPolicy = 'none';
+  if (v.prefixPolicy !== undefined) {
+    if (typeof v.prefixPolicy !== 'string' || !VALID_PREFIX_POLICIES.includes(v.prefixPolicy)) {
+      return null;
+    }
+    prefixPolicy = v.prefixPolicy as PrefixPolicy;
+  }
+
+  return { embedderKind, modelId, dimension, normalize: !!v.normalize, prefixPolicy };
 }
 
 /** Thrown when an insert's provenance does not match the store's (D0). */
@@ -236,6 +296,8 @@ export default {
   legacyHashProvenance,
   describeProvenance,
   compareProvenance,
+  sanitizeProvenance,
+  MAX_PROVENANCE_DIMENSION,
   ProvenanceMismatchError,
   assertProvenanceMatch,
   resolveEmbedderSelection,
