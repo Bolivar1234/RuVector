@@ -92,6 +92,13 @@ jobs:
           npm install --workspaces=false --no-audit --no-fund
           npm run build
 
+      # The RVF fingerprint store needs the @ruvector/rvf-node native backend,
+      # which nothing else on this runner installs (first CI run failed with
+      # BackendNotFound — that was infra, not drift).
+      - name: Install RVF node backend (fingerprint store)
+        working-directory: npm/packages/rvf
+        run: npm install --workspaces=false --no-audit --no-fund
+
       # ── Gate 2: behavioral parity harness ──
       - name: Behavioral parity harness
         id: harness
