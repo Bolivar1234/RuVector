@@ -188,22 +188,65 @@ program
     const spinner = ora('Loading database...').start();
 
     try {
-      // Read dimension from sidecar (avoids JSON-parsing binary redb)
+      // Read dimension + embedding provenance from sidecar (#508, ADR-210 D0)
       let dimension = 384;
+      let storeProvenance = null;
       const metaPath = `${dbPath}.meta.json`;
       if (fs.existsSync(metaPath)) {
-        try { dimension = JSON.parse(fs.readFileSync(metaPath, 'utf8')).dimension || 384; } catch (_) {}
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+          dimension = meta.dimension || 384;
+          storeProvenance = meta.provenance || null;
+        } catch (_) {}
       }
 
       spinner.text = 'Reading vectors...';
       const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-      const vectors = Array.isArray(data) ? data : [data];
+      // Accept a plain array (raw vectors, no declared provenance) or the
+      // ADR-210 object form `{ provenance, vectors }` from embedding-path
+      // exporters.
+      let declaredProvenance = null;
+      let vectors;
+      if (Array.isArray(data)) {
+        vectors = data;
+      } else if (data && Array.isArray(data.vectors)) {
+        vectors = data.vectors;
+        declaredProvenance = data.provenance || null;
+      } else {
+        vectors = [data];
+      }
+
+      // ADR-210 D0: a store stamped with embedding provenance refuses
+      // mismatched inserts — clear error naming both sides, no coercion.
+      if (storeProvenance) {
+        const provMod = loadProvenance();
+        const describe = provMod ? provMod.describeProvenance : (p) => JSON.stringify(p);
+        const badDim = vectors.find(v => Array.isArray(v.vector) && v.vector.length !== storeProvenance.dimension);
+        const provMismatch = declaredProvenance && provMod
+          ? provMod.compareProvenance(storeProvenance, declaredProvenance)
+          : [];
+        if (badDim || provMismatch.length > 0) {
+          const incoming = declaredProvenance
+            ? describe(declaredProvenance)
+            : `${badDim.vector.length}-dimensional vectors with undeclared provenance`;
+          spinner.fail(chalk.red(
+            `Insert refused (ADR-210): ${dbPath} records embedding provenance ${describe(storeProvenance)}, ` +
+            `but the incoming data is ${incoming}` +
+            (provMismatch.length ? ` (differs on: ${provMismatch.join(', ')})` : '') +
+            `. Mixed stores are never created — re-embed the data or the store.`
+          ));
+          process.exit(1);
+        }
+      }
 
       // New database: derive dimension from the data and write the sidecar
-      // so later stats/search invocations open it correctly (#508).
+      // so later stats/search invocations open it correctly (#508). Declared
+      // provenance from the embedding path is stamped alongside (ADR-210 D0).
       if (!fs.existsSync(dbPath) && vectors.length > 0 && Array.isArray(vectors[0].vector)) {
         dimension = vectors[0].vector.length;
-        try { fs.writeFileSync(metaPath, JSON.stringify({ dimension }, null, 2)); } catch (_) {}
+        const meta = { dimension };
+        if (declaredProvenance) meta.provenance = declaredProvenance;
+        try { fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2)); } catch (_) {}
       }
 
       // The native binding loads/persists through storagePath itself —
@@ -2003,6 +2046,24 @@ program
 
       spinner.text = `Importing ${vectors.length} vectors...`;
       const dimension = vectors[0].vector.length;
+
+      // ADR-210 D0: refuse mismatched imports into a provenance-stamped store.
+      const importMetaPath = `${dbPath}.meta.json`;
+      if (fs.existsSync(importMetaPath)) {
+        let targetProvenance = null;
+        try { targetProvenance = JSON.parse(fs.readFileSync(importMetaPath, 'utf8')).provenance || null; } catch (_) {}
+        if (targetProvenance && targetProvenance.dimension !== dimension) {
+          const provMod = loadProvenance();
+          const describe = provMod ? provMod.describeProvenance : (p) => JSON.stringify(p);
+          spinner.fail(chalk.red(
+            `Import refused (ADR-210): ${dbPath} records embedding provenance ${describe(targetProvenance)}, ` +
+            `but the incoming data is ${dimension}-dimensional with undeclared provenance. ` +
+            `Mixed stores are never created — re-embed the data or the store.`
+          ));
+          process.exit(1);
+        }
+      }
+
       const db = new VectorDB({ dimensions: dimension, storagePath: dbPath });
       await db.insertBatch(vectors);
       const count = await db.len();
@@ -2825,6 +2886,22 @@ function loadIntelligenceEngine() {
   return IntelligenceEngine;
 }
 
+// ADR-210 D0: shared embedding-provenance invariant (compare/refuse logic,
+// legacy-default derivation, rollout-flag resolution). Lazy, same pattern as
+// the engine: when dist is missing the CLI degrades to pre-ADR-210 behavior.
+let provenanceMod = null;
+let provenanceLoadAttempted = false;
+function loadProvenance() {
+  if (provenanceLoadAttempted) return provenanceMod;
+  provenanceLoadAttempted = true;
+  try {
+    provenanceMod = require('../dist/core/embedding-provenance.js');
+  } catch (e) {
+    provenanceMod = null;
+  }
+  return provenanceMod;
+}
+
 class Intelligence {
   constructor(options = {}) {
     this.intelPath = this.getIntelPath();
@@ -2965,6 +3042,9 @@ class Intelligence {
           agents: data.agents || defaults.agents,
           edges: data.edges || defaults.edges,
           stats: { ...defaults.stats, ...(data.stats || {}) },
+          // ADR-210 D0: embedding provenance of stored memory vectors
+          // (null = legacy store, read-only for vector writes until reembed)
+          embeddingProvenance: data.embeddingProvenance || null,
           // Preserve in-flight trajectories so trajectory-end (run in a later
           // process) can find what trajectory-begin recorded (#517)
           activeTrajectories: data.activeTrajectories || {},
@@ -3037,11 +3117,132 @@ class Intelligence {
     return normA > 0 && normB > 0 ? dot / (normA * normB) : 0;
   }
 
+  // ========================================================================
+  // ADR-210 D0: embedding-provenance invariant for the intelligence store.
+  // Every memory write records/validates { embedderKind, modelId, dimension,
+  // normalize, prefixPolicy }; mismatched writes are refused, legacy stores
+  // (memories without provenance) are read-only until `hooks reembed`.
+  // ========================================================================
+
+  storedProvenance() { return this.data.embeddingProvenance || null; }
+
+  vectorMemoryCount() {
+    return (this.data.memories || []).filter(m => Array.isArray(m.embedding) && m.embedding.length > 0).length;
+  }
+
+  /** Store predates ADR-210 (has vectors but no provenance record). */
+  isLegacyVectorStore() {
+    return !this.storedProvenance() && this.vectorMemoryCount() > 0;
+  }
+
+  /** Legacy default: hash, dimension inferred from the stored vectors. */
+  inferredLegacyProvenance() {
+    const prov = loadProvenance();
+    const first = (this.data.memories || []).find(m => Array.isArray(m.embedding) && m.embedding.length > 0);
+    const dim = first ? first.embedding.length : 256;
+    if (prov) return prov.legacyHashProvenance(dim);
+    return { embedderKind: 'hash', modelId: null, dimension: dim, normalize: false, prefixPolicy: 'none' };
+  }
+
+  /** Provenance of an embedding produced by the wrapper's sync hash path. */
+  syncWriteProvenance(embedding) {
+    return { embedderKind: 'hash', modelId: null, dimension: embedding.length, normalize: true, prefixPolicy: 'none' };
+  }
+
+  /**
+   * Gate a vector write (throws on refusal). Stamps provenance on the first
+   * write to a fresh store; refuses mismatched writes naming both sides;
+   * legacy stores are read-only until re-embedded.
+   */
+  checkVectorWrite(active) {
+    const prov = loadProvenance();
+    if (!prov || !active) return; // enforcement needs the dist module
+    if (this.isLegacyVectorStore()) {
+      const legacy = this.inferredLegacyProvenance();
+      const err = new Error(
+        `Vector store ${this.intelPath} predates embedding provenance (ADR-210) and is read-only for vector writes. ` +
+        `Stored vectors are treated as ${prov.describeProvenance(legacy)}; the active embedder is ` +
+        `${prov.describeProvenance(active)}. Run 'ruvector hooks reembed' to re-embed and unlock it.`
+      );
+      err.code = 'ERR_LEGACY_STORE_READONLY';
+      throw err;
+    }
+    const stored = this.storedProvenance();
+    if (!stored) {
+      this.data.embeddingProvenance = active;
+      return;
+    }
+    prov.assertProvenanceMatch(stored, active, this.intelPath);
+  }
+
+  /**
+   * Non-throwing write gate honoring RUVECTOR_REEMBED (D5):
+   *   refuse (default) → rethrow; warn → skip the write with one stderr
+   *   warning per process; auto → handled by callers that can re-embed.
+   * Returns { ok } or { ok: false, skipped: true }.
+   */
+  guardVectorWrite(active) {
+    try {
+      this.checkVectorWrite(active);
+      return { ok: true };
+    } catch (e) {
+      const prov = loadProvenance();
+      const policy = prov ? prov.resolveReembedPolicy() : 'refuse';
+      if (policy === 'warn') {
+        if (!Intelligence._reembedWarned) {
+          Intelligence._reembedWarned = true;
+          console.error(`ruvector: ${e.message} (RUVECTOR_REEMBED=warn: store stays read-only, write skipped)`);
+        }
+        return { ok: false, skipped: true, error: e.message };
+      }
+      // 'auto' without an async re-embed path behaves like refuse, with a hint.
+      if (policy === 'auto') e.message += ` (RUVECTOR_REEMBED=auto: run 'ruvector hooks reembed' — in-place re-embedding needs the async path)`;
+      throw e;
+    }
+  }
+
+  /**
+   * Re-embed every stored memory with `embedFn` and stamp `provenance`.
+   * Requires retained source text; memories without text must be dropped
+   * explicitly (the command refuses otherwise — no fabricated vectors).
+   */
+  async reembedAll(embedFn, provenance, { dropMissing = false } = {}) {
+    const memories = this.data.memories || [];
+    const kept = [];
+    let reembedded = 0;
+    let dropped = 0;
+    for (const m of memories) {
+      if (typeof m.content === 'string' && m.content.length > 0) {
+        m.embedding = await embedFn(m.content);
+        reembedded++;
+        kept.push(m);
+      } else if (dropMissing) {
+        dropped++;
+      } else {
+        throw new Error('memory without retained source text encountered; rerun with --drop-missing');
+      }
+    }
+    this.data.memories = kept;
+    this.data.stats.total_memories = kept.length;
+    this.data.embeddingProvenance = provenance;
+    return { reembedded, dropped };
+  }
+
   // Memory operations - use engine's VectorDB for semantic search
   async rememberAsync(memoryType, content, metadata = {}) {
     if (this.engine) {
+      let entry = null;
       try {
-        const entry = await this.engine.remember(content, memoryType);
+        entry = await this.engine.remember(content, memoryType);
+      } catch {}
+      if (entry) {
+        // ADR-210 D0: validate provenance BEFORE persisting; provenance
+        // refusals propagate (no silent fallback into a mixed store).
+        const active = typeof this.engine.getActiveProvenance === 'function'
+          ? this.engine.getActiveProvenance()
+          : this.syncWriteProvenance(entry.embedding);
+        const guard = this.guardVectorWrite(active);
+        if (!guard.ok) return null;
         // Also store in legacy format for compatibility
         this.data.memories.push({
           id: entry.id,
@@ -3054,7 +3255,7 @@ class Intelligence {
         if (this.data.memories.length > 5000) this.data.memories.splice(0, 1000);
         this.data.stats.total_memories = this.data.memories.length;
         return entry.id;
-      } catch {}
+      }
     }
     return this.remember(memoryType, content, metadata);
   }
@@ -3062,6 +3263,10 @@ class Intelligence {
   remember(memoryType, content, metadata = {}) {
     const id = `mem_${this.now()}`;
     const embedding = this.embed(content);
+    // ADR-210 D0: refuse mismatched/legacy vector writes (throws), or skip
+    // under RUVECTOR_REEMBED=warn (returns null).
+    const guard = this.guardVectorWrite(this.syncWriteProvenance(embedding));
+    if (!guard.ok) return null;
     this.data.memories.push({ id, memory_type: memoryType, content, embedding, metadata, timestamp: this.now() });
     if (this.data.memories.length > 5000) this.data.memories.splice(0, 1000);
     this.data.stats.total_memories = this.data.memories.length;
@@ -3075,10 +3280,52 @@ class Intelligence {
     return id;
   }
 
+  /**
+   * Best-effort remember for ambient learning hooks (post-edit/post-command):
+   * a provenance refusal must not fail the hook — note it once and move on.
+   */
+  tryRemember(memoryType, content, metadata = {}) {
+    try {
+      return this.remember(memoryType, content, metadata);
+    } catch (e) {
+      if (!Intelligence._rememberSkipNoted) {
+        Intelligence._rememberSkipNoted = true;
+        console.error(chalk.dim(`   (memory write skipped: ${e.message})`));
+      }
+      return null;
+    }
+  }
+
+  /**
+   * ADR-210: reads stay allowed on legacy/mismatched stores, but similarity
+   * against differently-embedded vectors is meaningless — say so once.
+   */
+  warnRecallProvenance(active) {
+    const prov = loadProvenance();
+    if (!prov || !active || Intelligence._recallWarned) return;
+    let stored = this.storedProvenance();
+    if (!stored && this.isLegacyVectorStore()) stored = this.inferredLegacyProvenance();
+    if (!stored) return;
+    const mismatches = prov.compareProvenance(stored, active);
+    if (mismatches.length > 0) {
+      Intelligence._recallWarned = true;
+      console.error(
+        `ruvector: recall quality degraded — stored vectors are ${prov.describeProvenance(stored)} ` +
+        `but the query was embedded as ${prov.describeProvenance(active)} (differs on: ${mismatches.join(', ')}). ` +
+        `Run 'ruvector hooks reembed' to fix.`
+      );
+    }
+  }
+
   async recallAsync(query, topK = 5) {
     if (this.engine) {
       try {
         const results = await this.engine.recall(query, topK);
+        // After recall: embedAsync has settled, so getActiveProvenance() now
+        // reflects the embedder that actually served the query.
+        if (typeof this.engine.getActiveProvenance === 'function') {
+          this.warnRecallProvenance(this.engine.getActiveProvenance());
+        }
         // Return same format as sync recall() - direct memory objects
         return results.map(r => ({
           id: r.id,
@@ -3094,6 +3341,7 @@ class Intelligence {
 
   recall(query, topK) {
     const queryEmbed = this.embed(query);
+    this.warnRecallProvenance(this.syncWriteProvenance(queryEmbed));
     return this.data.memories
       .map(m => ({ score: this.similarity(queryEmbed, m.embedding), memory: m }))
       .sort((a, b) => b.score - a.score).slice(0, topK).map(r => r.memory);
@@ -3369,6 +3617,8 @@ class Intelligence {
           sonaEnabled: engineStats.sonaEnabled,
           attentionEnabled: engineStats.attentionEnabled,
           embeddingDim: engineStats.memoryDimensions,
+          // ADR-210 D1: which embedder actually serves embeds right now
+          embedderKind: engineStats.embedderKind,
           totalMemories: engineStats.totalMemories,
           totalEpisodes: engineStats.totalEpisodes,
           trajectoriesRecorded: engineStats.trajectoriesRecorded,
@@ -4266,7 +4516,8 @@ hooksCmd.command('post-edit').description('Post-edit learning').argument('<file>
   const lastFile = intel.getLastEditedFile();
   if (lastFile && lastFile !== file) intel.recordFileSequence(lastFile, file);
   intel.learn(state, success ? 'successful-edit' : 'failed-edit', success ? 'completed' : 'failed', success ? 1.0 : -0.5);
-  intel.remember('edit', `${success ? 'successful' : 'failed'} edit of ${ext} in ${crate}`);
+  // Best-effort: a provenance-locked store (ADR-210) must not fail the hook
+  intel.tryRemember('edit', `${success ? 'successful' : 'failed'} edit of ${ext} in ${crate}`);
   intel.save();
   console.log(`📊 Learning recorded: ${success ? '✅' : '❌'} ${path.basename(file)}`);
   const test = intel.shouldTest(file);
@@ -4291,7 +4542,8 @@ hooksCmd.command('post-command').description('Post-command learning').argument('
   const success = opts.error ? false : (opts.success ?? true);
   const classification = intel.classifyCommand(cmd);
   intel.learn(`cmd_${classification.category}_${classification.subcategory}`, success ? 'success' : 'failure', success ? 'completed' : 'failed', success ? 0.8 : -0.3);
-  intel.remember('command', `${cmd} ${success ? 'succeeded' : 'failed'}`);
+  // Best-effort: a provenance-locked store (ADR-210) must not fail the hook
+  intel.tryRemember('command', `${cmd} ${success ? 'succeeded' : 'failed'}`);
   intel.save();
   console.log(`📊 Command ${success ? '✅' : '❌'} recorded`);
 });
@@ -4310,16 +4562,31 @@ hooksCmd.command('suggest-context').description('Suggest relevant context').acti
 
 hooksCmd.command('remember').description('Store in memory').requiredOption('-t, --type <type>', 'Memory type').option('--silent', 'Suppress output').option('--semantic', 'Use ONNX semantic embeddings (slower, better quality)').argument('<content...>', 'Content').action(async (content, opts) => {
   const intel = new Intelligence();
-  let id;
-  if (opts.semantic) {
-    // Use async ONNX embedding
-    id = await intel.rememberAsync(opts.type, content.join(' '));
-  } else {
-    id = intel.remember(opts.type, content.join(' '));
-  }
-  intel.save();
-  if (!opts.silent) {
-    console.log(JSON.stringify({ success: true, id, semantic: !!opts.semantic }));
+  try {
+    let id;
+    if (opts.semantic) {
+      // Use async ONNX embedding
+      id = await intel.rememberAsync(opts.type, content.join(' '));
+    } else {
+      id = intel.remember(opts.type, content.join(' '));
+    }
+    if (id === null) {
+      // RUVECTOR_REEMBED=warn: store is read-only, write skipped (ADR-210)
+      if (!opts.silent) {
+        console.log(JSON.stringify({ success: false, skipped: true, reason: 'store is read-only for vector writes (embedding provenance, ADR-210); run `ruvector hooks reembed`' }));
+      }
+      return;
+    }
+    intel.save();
+    if (!opts.silent) {
+      console.log(JSON.stringify({ success: true, id, semantic: !!opts.semantic }));
+    }
+  } catch (e) {
+    // ADR-210 D0: mismatched/legacy vector writes are refused, not coerced.
+    if (!opts.silent) {
+      console.log(JSON.stringify({ success: false, error: e.message, code: e.code || 'ERR_EMBEDDING_PROVENANCE' }));
+    }
+    process.exitCode = 1;
   }
 });
 
@@ -4333,6 +4600,96 @@ hooksCmd.command('recall').description('Search memory').argument('<query...>', '
   }
   console.log(JSON.stringify({ query: query.join(' '), semantic: !!opts.semantic, results: results.map(r => ({ type: r.memory_type || 'unknown', content: (r.content || '').slice(0, 200), timestamp: r.timestamp || '', score: r.score })) }, null, 2));
 });
+
+// ADR-210 D1: maintenance command — re-embed hash-era memories with the
+// active embedder and stamp embedding provenance, unlocking legacy stores.
+// Possible because hook memories retain their source text (`content`).
+hooksCmd.command('reembed')
+  .description('Re-embed stored memories with the active embedder and stamp embedding provenance (ADR-210)')
+  .option('--dry-run', 'Report what would change without writing')
+  .option('--drop-missing', 'Drop memories that no longer retain source text')
+  .action(async (opts) => {
+    const provMod = loadProvenance();
+    if (!provMod) {
+      console.log(JSON.stringify({ success: false, error: 'embedding-provenance module unavailable (dist not built)' }));
+      process.exitCode = 1;
+      return;
+    }
+    const intel = new Intelligence({ skipEngine: true }); // embedder chosen explicitly below
+    const memories = intel.data.memories || [];
+    const missing = memories.filter(m => !(typeof m.content === 'string' && m.content.length > 0)).length;
+
+    if (missing > 0 && !opts.dropMissing) {
+      // Honest refusal: those vectors cannot be re-embedded (no source text),
+      // and keeping them would recreate a mixed store.
+      console.log(JSON.stringify({
+        success: false,
+        error: `${missing} of ${memories.length} memories have no retained source text and cannot be re-embedded`,
+        hint: 'rerun with --drop-missing to discard them, or leave the store read-only for vector writes',
+      }));
+      process.exitCode = 1;
+      return;
+    }
+
+    // Pick the target embedder per RUVECTOR_EMBEDDER (D5).
+    const selection = provMod.resolveEmbedderSelection();
+    let embedFn;
+    let provenance;
+    if (selection === 'hash') {
+      // Deterministic, offline-safe: the wrapper's own hash embedder.
+      embedFn = async (t) => intel.embed(t);
+      provenance = { embedderKind: 'hash', modelId: null, dimension: intel.embed('probe').length, normalize: true, prefixPolicy: 'none' };
+    } else {
+      const EngineClass = loadIntelligenceEngine();
+      if (!EngineClass) {
+        console.log(JSON.stringify({ success: false, error: 'IntelligenceEngine unavailable (dist not built); cannot re-embed semantically' }));
+        process.exitCode = 1;
+        return;
+      }
+      let engine;
+      try {
+        engine = new EngineClass({ enableSona: false, enableAttention: false });
+      } catch (e) {
+        console.log(JSON.stringify({ success: false, error: e.message }));
+        process.exitCode = 1;
+        return;
+      }
+      const ready = typeof engine.awaitOnnx === 'function' ? await engine.awaitOnnx() : false;
+      if (!ready) {
+        // Honest failure: re-embedding with a fallback hash would defeat the
+        // point. Tell the operator what to do instead of fabricating quality.
+        console.log(JSON.stringify({
+          success: false,
+          error: `ONNX model could not be loaded (${engine.getOnnxInitError?.()?.message || 'offline?'}); semantic re-embedding is impossible right now`,
+          hint: 'retry with network access, or force the hash embedder with RUVECTOR_EMBEDDER=hash',
+        }));
+        process.exitCode = 1;
+        return;
+      }
+      embedFn = (t) => engine.embedAsync(t);
+      provenance = engine.getActiveProvenance();
+    }
+
+    if (opts.dryRun) {
+      console.log(JSON.stringify({
+        success: true,
+        dryRun: true,
+        wouldReembed: memories.length - missing,
+        wouldDrop: opts.dropMissing ? missing : 0,
+        targetProvenance: provenance,
+      }));
+      return;
+    }
+
+    try {
+      const result = await intel.reembedAll(embedFn, provenance, { dropMissing: !!opts.dropMissing });
+      intel.save();
+      console.log(JSON.stringify({ success: true, ...result, provenance }));
+    } catch (e) {
+      console.log(JSON.stringify({ success: false, error: e.message }));
+      process.exitCode = 1;
+    }
+  });
 
 hooksCmd.command('pre-compact').description('Pre-compact hook').option('--auto', 'Auto mode').action(() => {
   const intel = new Intelligence();
