@@ -4013,18 +4013,23 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 // Start server
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error('RuVector MCP server running on stdio');
-
   // Exit cleanly when the parent process closes the stdio pipe or sends a
   // termination signal. Without these handlers, the MCP server can survive
   // the parent's death (e.g. when the client is killed with SIGKILL) and
   // accumulate as an orphaned process under PPID=1, consuming RSS for the
-  // lifetime of the user session.
-  process.stdin.on('end', () => process.exit(0));
+  // lifetime of the user session. Registered BEFORE the (async) transport
+  // connect: a signal arriving during startup previously hit the default
+  // handler and died with a non-zero code — a race that made the
+  // sigterm-cleanup suite flaky (SIGTERM and SIGINT failed alternately on
+  // CI depending on which spawn won the 2s ready-wait).
   process.on('SIGINT', () => process.exit(0));
   process.on('SIGTERM', () => process.exit(0));
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error('RuVector MCP server running on stdio');
+
+  process.stdin.on('end', () => process.exit(0));
 }
 
 main().catch(console.error);
