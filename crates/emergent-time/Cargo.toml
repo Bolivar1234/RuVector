@@ -1,11 +1,14 @@
 [package]
 name = "emergent-time"
-version.workspace = true
+# Decoupled from the workspace version so the crate can be released
+# independently (workspace is at 2.2.3; 2.2.3 was published without a README).
+version = "2.2.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Calculus of emergent / relational time: Wheeler-DeWitt timeless constraint, Page-Wootters relational clocks, entropic time, Connes-Rovelli thermal time, and Structural Proper Time for agentic and quantum systems"
 keywords = ["time", "quantum-gravity", "relational", "thermodynamics", "agents"]
 categories = ["science", "simulation", "algorithms"]
