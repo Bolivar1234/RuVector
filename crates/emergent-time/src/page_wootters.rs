@@ -56,7 +56,7 @@
 //!    reproduced*, nothing stronger.
 
 use crate::complex::{normalized, Complex};
-use crate::complex_matrix::schrodinger_propagator;
+use crate::complex_matrix::{exp_i_apply_from_spectrum, schrodinger_propagator};
 use crate::real_matrix::RealMatrix;
 use crate::state::condition_on_clock;
 
@@ -70,18 +70,52 @@ pub struct PageWootters {
     pub vecs: RealMatrix,
     /// Hilbert-space dimension of each sector.
     pub dim: usize,
+    /// The `t`-independent global static state `|Ψ>` (length `dim²`), computed
+    /// once in [`PageWootters::new`] (P2: hoisted out of the per-`t` path).
+    psi_static: Vec<Complex>,
+    /// The normalized reference state `|ψ_0> = Σ_k |E_k>` (length `dim`),
+    /// precomputed so cached-eigenbasis evolution never rebuilds it.
+    psi0: Vec<Complex>,
 }
 
 impl PageWootters {
     /// Build from a real symmetric system Hamiltonian.
+    ///
+    /// Diagonalizes `H_R` **once** here; every later `schrodinger_state(t)` /
+    /// `conditional_state(t)` reuses the cached spectrum and the cached static
+    /// state, so no per-`t` call re-runs the eigensolver or rebuilds the
+    /// `dim²`-length global vector.
     pub fn new(h_r: RealMatrix) -> Self {
         let (energies, vecs) = h_r.symmetric_eigen();
         let dim = h_r.n;
+
+        // P2: build the t-independent static state |Ψ> once.
+        let inv = 1.0 / (dim as f64).sqrt();
+        let mut psi_static = vec![Complex::ZERO; dim * dim];
+        for k in 0..dim {
+            for r in 0..dim {
+                psi_static[k * dim + r] = Complex::real(inv * vecs.get(r, k));
+            }
+        }
+
+        // Reference state |ψ_0> = Σ_k |E_k> as a complex vector (P1 cache).
+        let psi0: Vec<Complex> = (0..dim)
+            .map(|r| {
+                let mut acc = 0.0;
+                for k in 0..dim {
+                    acc += vecs.get(r, k);
+                }
+                Complex::real(acc)
+            })
+            .collect();
+
         PageWootters {
             h_r,
             energies,
             vecs,
             dim,
+            psi_static,
+            psi0,
         }
     }
 
@@ -107,17 +141,11 @@ impl PageWootters {
     }
 
     /// The globally static entangled state `|Ψ>` (length `dim²`, `C ⊗ R` order).
+    ///
+    /// `t`-independent; computed once in [`PageWootters::new`] and returned from
+    /// the cache here (P2). Cheap to clone for callers that need to own it.
     pub fn global_static_state(&self) -> Vec<Complex> {
-        let d = self.dim;
-        let inv = 1.0 / (d as f64).sqrt();
-        let mut psi = vec![Complex::ZERO; d * d];
-        for k in 0..d {
-            // clock index = k, system component |E_k>_R has amplitude vecs[r][k]
-            for r in 0..d {
-                psi[k * d + r] = Complex::real(inv * self.vecs.get(r, k));
-            }
-        }
-        psi
+        self.psi_static.clone()
     }
 
     /// The clock pointer (bra) for reading "time `t`": `|t>_C = Σ_k e^{iE_k t}|k>`.
@@ -130,16 +158,33 @@ impl PageWootters {
 
     /// Conditional state of the rest sector when the clock reads `t`, normalized.
     /// This is the *emergent* evolved state — derived purely from a static `|Ψ>`.
+    ///
+    /// Conditions the **cached** static state (P2) on the clock pointer; no `dim²`
+    /// vector is materialized per call.
     pub fn conditional_state(&self, t: f64) -> Vec<Complex> {
-        let psi = self.global_static_state();
         let bra = self.clock_pointer(t);
-        let raw = condition_on_clock(&psi, &bra, self.dim);
+        let raw = condition_on_clock(&self.psi_static, &bra, self.dim);
         normalized(&raw)
     }
 
     /// The ordinary Schrödinger-evolved reference state `e^{-iH_R t}|ψ_0>`,
     /// normalized — what the conditional state must reproduce.
+    ///
+    /// P1: evolves directly in the **cached** energy eigenbasis,
+    /// `e^{-iH_R t}|ψ_0> = Σ_k e^{-iE_k t} ⟨E_k|ψ_0⟩ |E_k⟩`, which is `O(dim²)`
+    /// per call and never re-diagonalizes `H_R` or forms a propagator matrix.
     pub fn schrodinger_state(&self, t: f64) -> Vec<Complex> {
+        // theta = -t : U(t) = e^{-iH_R t}.
+        let evolved = exp_i_apply_from_spectrum(&self.energies, &self.vecs, -t, &self.psi0);
+        normalized(&evolved)
+    }
+
+    /// The from-scratch Schrödinger-evolved reference state — diagonalizes
+    /// `H_R` afresh and forms the full propagator `U(t) = e^{-iH_R t}`. Kept as a
+    /// reference path for callers (and tests) that want to validate the cached
+    /// [`schrodinger_state`](Self::schrodinger_state) route against the
+    /// independent `H`-only implementation.
+    pub fn schrodinger_state_from_scratch(&self, t: f64) -> Vec<Complex> {
         let u = schrodinger_propagator(&self.h_r, t);
         let evolved = u.matvec(&self.reference_state());
         normalized(&evolved)
@@ -180,5 +225,25 @@ mod tests {
         let b = pw.conditional_state(1.5);
         // Generic Hamiltonian: states at different clock readings differ.
         assert!(fidelity(&a, &b) < 0.999);
+    }
+
+    /// P1 correctness gate: the cached-eigenbasis `schrodinger_state` must agree
+    /// component-for-component with the from-scratch propagator path. Both are
+    /// normalized identically, so this is an exact-up-to-roundoff equality (not
+    /// merely a fidelity / global-phase match).
+    #[test]
+    fn cached_evolution_equals_from_scratch_propagator() {
+        let pw = PageWootters::new(sample_h());
+        for &t in &[0.0, 0.5, 1.3, 2.7, -1.1, -3.4] {
+            let cached = pw.schrodinger_state(t);
+            let scratch = pw.schrodinger_state_from_scratch(t);
+            assert_eq!(cached.len(), scratch.len());
+            for (a, b) in cached.iter().zip(&scratch) {
+                assert!(
+                    (a.re - b.re).abs() < 1e-12 && (a.im - b.im).abs() < 1e-12,
+                    "t={t}: cached {a:?} != scratch {b:?}"
+                );
+            }
+        }
     }
 }

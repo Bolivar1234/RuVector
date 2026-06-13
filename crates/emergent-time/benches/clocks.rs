@@ -44,6 +44,17 @@ fn bench_page_wootters(c: &mut Criterion) {
     c.bench_function("page_wootters_conditional_n8", |b| {
         b.iter(|| black_box(pw.conditional_state(black_box(1.3))))
     });
+
+    // P1: cached-eigenbasis Schrödinger evolution vs the from-scratch path that
+    // re-diagonalizes H_R and forms the full propagator every call. Same H size
+    // (n16) as `schrodinger_propagator_n16` for a like-for-like comparison.
+    let pw16 = PageWootters::new(sym_h(16));
+    c.bench_function("page_wootters_schrodinger_cached_n16", |b| {
+        b.iter(|| black_box(pw16.schrodinger_state(black_box(1.0))))
+    });
+    c.bench_function("page_wootters_schrodinger_from_scratch_n16", |b| {
+        b.iter(|| black_box(pw16.schrodinger_state_from_scratch(black_box(1.0))))
+    });
 }
 
 fn bench_structural_clock(c: &mut Criterion) {

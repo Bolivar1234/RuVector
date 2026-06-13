@@ -130,11 +130,16 @@ impl CMatrix {
     }
 }
 
-/// `exp(i * theta * H)` for a real **symmetric** generator `H`, via its
-/// spectral decomposition. The result is unitary.
-pub fn exp_i_symmetric(h: &RealMatrix, theta: f64) -> CMatrix {
-    let (eigvals, v) = h.symmetric_eigen();
-    let n = h.n;
+/// `exp(i * theta * H)` for a generator supplied by its **precomputed** real
+/// spectral decomposition `(eigvals, V)` with `H = V diag(eigvals) Vᵀ`.
+///
+/// This is the cache-reuse entry point: callers who already hold the spectrum
+/// (e.g. [`crate::page_wootters::PageWootters`], which diagonalizes once in
+/// `new`) build any number of evolution operators `e^{iθH}` without paying for
+/// re-diagonalization. The result is unitary.
+pub fn exp_i_from_spectrum(eigvals: &[f64], v: &RealMatrix, theta: f64) -> CMatrix {
+    let n = v.n;
+    debug_assert_eq!(eigvals.len(), n, "spectrum length must match matrix dimension");
     // phases[k] = e^{i*theta*E_k}
     let phases: Vec<Complex> = eigvals.iter().map(|&e| Complex::phase(theta * e)).collect();
     let mut out = CMatrix::zeros(n);
@@ -149,6 +154,56 @@ pub fn exp_i_symmetric(h: &RealMatrix, theta: f64) -> CMatrix {
         }
     }
     out
+}
+
+/// Apply `exp(i * theta * H)` to a complex vector `psi` directly, using the
+/// **precomputed** spectral decomposition `(eigvals, V)` — without ever forming
+/// the propagator matrix. This is `O(n²)` work per call and the natural way to
+/// evolve a state in its own energy eigenbasis:
+///
+/// ```text
+///   e^{iθH} |ψ> = Σ_k e^{iθE_k} <E_k|ψ> |E_k>,   |E_k> = column k of V.
+/// ```
+///
+/// Equivalent (to round-off) to `exp_i_from_spectrum(eigvals, v, theta).matvec(psi)`
+/// but allocates no `n × n` matrix.
+pub fn exp_i_apply_from_spectrum(
+    eigvals: &[f64],
+    v: &RealMatrix,
+    theta: f64,
+    psi: &[Complex],
+) -> Vec<Complex> {
+    let n = v.n;
+    debug_assert_eq!(eigvals.len(), n, "spectrum length must match matrix dimension");
+    debug_assert_eq!(psi.len(), n, "state length must match matrix dimension");
+    // Coefficients c_k = <E_k|ψ> (V is real, so the bra is just the column).
+    let mut coeffs = vec![Complex::ZERO; n];
+    for k in 0..n {
+        let mut acc = Complex::ZERO;
+        for r in 0..n {
+            acc += psi[r].scale(v.get(r, k));
+        }
+        coeffs[k] = Complex::phase(theta * eigvals[k]) * acc;
+    }
+    // Reconstruct in the standard basis: out[r] = Σ_k V[r][k] * (phase_k c_k).
+    let mut out = vec![Complex::ZERO; n];
+    for r in 0..n {
+        let mut acc = Complex::ZERO;
+        for k in 0..n {
+            acc += coeffs[k].scale(v.get(r, k));
+        }
+        out[r] = acc;
+    }
+    out
+}
+
+/// `exp(i * theta * H)` for a real **symmetric** generator `H`, via its
+/// spectral decomposition. The result is unitary. From-scratch convenience for
+/// callers who hold only `H`; reuse [`exp_i_from_spectrum`] when the spectrum is
+/// already cached.
+pub fn exp_i_symmetric(h: &RealMatrix, theta: f64) -> CMatrix {
+    let (eigvals, v) = h.symmetric_eigen();
+    exp_i_from_spectrum(&eigvals, &v, theta)
 }
 
 /// Schrödinger propagator `U(t) = e^{-iHt}` for a real symmetric Hamiltonian.

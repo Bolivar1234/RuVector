@@ -120,6 +120,17 @@ impl RealMatrix {
     /// columns of the returned orthogonal matrix `V`, so `self == V * diag(λ) * Vᵀ`.
     /// Robust and accurate for the small matrices used throughout this crate.
     pub fn symmetric_eigen(&self) -> (Vec<f64>, RealMatrix) {
+        // Maximum number of cyclic Jacobi sweeps. A backstop only: with the
+        // relative convergence test below, well-conditioned symmetric matrices
+        // converge in well under 10 sweeps; the cap guards against a pathological
+        // input spinning forever.
+        const MAX_SWEEPS: usize = 100;
+        // Relative off-diagonal threshold. Converge when the off-diagonal
+        // Frobenius² is below `(REL_TOL)²` times the matrix Frobenius² — a
+        // *scale-invariant* criterion (the old absolute `off < 1e-28` was
+        // unreachable for large-norm matrices and silently relied on the cap).
+        const REL_TOL: f64 = 1e-14;
+
         let n = self.n;
         let mut a = self.clone();
         let mut v = RealMatrix::identity(n);
@@ -130,7 +141,20 @@ impl RealMatrix {
             return (vec![a.get(0, 0)], v);
         }
 
-        for _sweep in 0..100 {
+        // Scale reference for the relative test: the total Frobenius² of the
+        // (symmetric) matrix. Off-diagonal mass is measured against this, so the
+        // threshold tracks the matrix norm rather than an absolute constant.
+        let mut frob_sq = 0.0;
+        for i in 0..(n * n) {
+            frob_sq += a.data[i] * a.data[i];
+        }
+        // Convergence floor: off² must drop below tol² * scale. Guard against an
+        // all-zero matrix (frob_sq == 0), where any off² == 0 already converged.
+        let scale = if frob_sq > 0.0 { frob_sq } else { 1.0 };
+        let tol_sq = REL_TOL * REL_TOL * scale;
+
+        let mut converged = false;
+        for _sweep in 0..MAX_SWEEPS {
             // Sum of squared off-diagonal elements — the Jacobi convergence measure.
             let mut off = 0.0;
             for p in 0..n {
@@ -138,7 +162,11 @@ impl RealMatrix {
                     off += a.get(p, q).powi(2);
                 }
             }
-            if off < 1e-28 {
+            // `off` counts the strict upper triangle; the symmetric lower mirror
+            // doubles it, but comparing against the relative floor is unaffected
+            // by the constant factor.
+            if off < tol_sq {
+                converged = true;
                 break;
             }
 
@@ -185,6 +213,21 @@ impl RealMatrix {
                 }
             }
         }
+
+        // R4 non-convergence guard. The previous implementation could exhaust
+        // the sweep cap and return an *unconverged* (still-off-diagonal) result
+        // with no signal at all. We cannot change the public signature — every
+        // caller across the crate destructures `(Vec<f64>, RealMatrix)` — so we
+        // surface non-convergence via a debug assertion that names the failure
+        // mode. In release builds the result is returned as before (best
+        // effort), but a genuinely non-convergent symmetric input now fails
+        // loudly in dev rather than silently.
+        debug_assert!(
+            converged,
+            "symmetric_eigen: Jacobi did not converge in {MAX_SWEEPS} sweeps \
+             (relative off-diagonal threshold {REL_TOL:e} not met) for n={n} — \
+             returning an unconverged spectrum"
+        );
 
         let eigvals: Vec<f64> = (0..n).map(|i| a.get(i, i)).collect();
         (eigvals, v)
@@ -243,5 +286,57 @@ mod tests {
                 assert!((id.get(r, c) - expect).abs() < 1e-9);
             }
         }
+    }
+
+    /// R4: near-degenerate stress test. Two eigenvalues separated by only
+    /// `1e-10` with tiny off-diagonal coupling — the regime where a poorly-tuned
+    /// Jacobi loop either stalls (absolute threshold) or returns non-orthonormal
+    /// vectors. With the relative criterion the solver must still converge to
+    /// orthonormal eigenvectors and the correct (near-degenerate) spectrum.
+    #[test]
+    fn near_degenerate_converges_orthonormal() {
+        let off = 1e-12;
+        let m = RealMatrix::from_fn(3, |r, c| {
+            let diag = [1.0, 1.0 + 1e-10, 2.0];
+            if r == c {
+                diag[r]
+            } else {
+                off
+            }
+        });
+        let (vals, v) = m.symmetric_eigen();
+
+        // Orthonormal eigenvectors: VᵀV = I.
+        let vt = RealMatrix::from_fn(3, |r, c| v.get(c, r));
+        let id = vt.matmul(&v);
+        for r in 0..3 {
+            for c in 0..3 {
+                let expect = if r == c { 1.0 } else { 0.0 };
+                assert!(
+                    (id.get(r, c) - expect).abs() < 1e-9,
+                    "VᵀV[{r}][{c}] = {} not orthonormal",
+                    id.get(r, c)
+                );
+            }
+        }
+
+        // Reconstruction holds → spectrum + vectors are a valid decomposition,
+        // confirming convergence on the near-degenerate input.
+        let recon = RealMatrix::from_spectrum(&vals, &v);
+        for i in 0..9 {
+            assert!(
+                (recon.data[i] - m.data[i]).abs() < 1e-9,
+                "reconstruction mismatch at {i}: {} vs {}",
+                recon.data[i],
+                m.data[i]
+            );
+        }
+
+        // Eigenvalues are near {1, 1+1e-10, 2}; off-diagonal coupling shifts them
+        // by O(off) only. Sorted, the extreme values bracket correctly.
+        let mut sorted = vals.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((sorted[0] - 1.0).abs() < 1e-6, "low eigenvalue {}", sorted[0]);
+        assert!((sorted[2] - 2.0).abs() < 1e-6, "high eigenvalue {}", sorted[2]);
     }
 }
