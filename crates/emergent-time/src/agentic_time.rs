@@ -726,6 +726,57 @@ mod tests {
     }
 
     #[test]
+    fn contradiction_free_weights_blind_to_error_channel() {
+        // M3 circularity guard. The real-trace evaluation defines its
+        // event-to-predict (an error cascade) from the harness `is_error` flag,
+        // which also feeds the `contradiction` channel. To keep the agentic-vs-
+        // baseline comparison non-circular, M3 runs an *honest* variant with
+        // `contradiction = 0`, so the clock cannot read the very signal that
+        // defines the event. This test locks that property in: with the
+        // contradiction weight zeroed, a pure contradiction jump contributes
+        // EXACTLY zero to the tick, while the full-weight clock sees it.
+        let honest = AgenticTime::new(AgenticWeights {
+            contradiction: 0.0,
+            ..AgenticWeights::default()
+        });
+        let full = AgenticTime::new(AgenticWeights::default());
+
+        let base = AgentState {
+            belief: vec![1.0, 0.0],
+            memory: vec![0.0],
+            retrieval: vec![0.0],
+            goal_graph: 0.0,
+            contradiction: 0.0,
+            plan: vec![1.0, 0.0],
+            tokens: 0,
+        };
+        // Only the contradiction channel moves between base and `errored`.
+        let mut errored = base.clone();
+        errored.contradiction = 0.9;
+
+        let honest_tick = honest.tick(&base, &errored);
+        let full_tick = full.tick(&base, &errored);
+
+        // Honest clock is blind to the error-only move; full clock is not.
+        assert!(
+            honest_tick.abs() < 1e-12,
+            "honest (contradiction=0) clock must not react to a pure error jump, got {honest_tick}"
+        );
+        assert!(
+            full_tick > 0.0,
+            "full clock must react to the contradiction jump (diagnostic variant)"
+        );
+        // Sanity: when other channels move, the honest clock DOES react (it is
+        // not a dead clock — it just ignores the error channel specifically).
+        let mut belief_moved = base.clone();
+        belief_moved.belief = vec![0.0, 1.0];
+        assert!(
+            honest.tick(&base, &belief_moved) > 0.0,
+            "honest clock must still react to non-error channel movement"
+        );
+    }
+
+    #[test]
     fn classifier_distinguishes_health() {
         let th = HealthThresholds::default();
         // Converging fast: healthy.

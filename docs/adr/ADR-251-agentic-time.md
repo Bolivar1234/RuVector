@@ -116,10 +116,16 @@ when uncertainty changes meaningfully.
 3. **Replay stability** — same trace + same model versions ⇒ same ticks
    (deterministic; the synthetic generators use a seeded xorshift PRNG).
 4. **Baseline dominance** — Agentic Time must beat at least one simple baseline
-   before controlling production execution. *This is a gate, not a current
-   result:* on the synthetic trace it does **not** beat the fair
-   `WindowedDeltaClock` baseline (see **Honest limitations**); the gate is met
-   only on a real trace (M3).
+   before controlling production execution. **This gate is currently UNMET.** On
+   the synthetic trace the agentic clock does **not** beat the fair
+   `WindowedDeltaClock` baseline, and on **real recorded traces (M3, now done)**
+   it does not beat it either: across the two real Claude-Code session
+   transcripts available for this repo the contradiction-free *honest* agentic
+   clock scores **0 win / 1 tie / 1 loss** vs the fair windowed baseline (see
+   **Honest limitations** §3 and the `real_trace_eval` example). Agentic Time is
+   therefore **not yet cleared to control production execution as an
+   early-warning lead**; its defensible value at this point is diagnostic
+   (per-channel attribution + health classifier), not a raw-lead win.
 5. **Explainability** — every tick carries a human-readable reason and a class.
    *Implemented: `AgenticTime::explain → Tick { delta, class, reason, …per-channel }`.*
 
@@ -141,6 +147,8 @@ when uncertainty changes meaningfully.
 | Explainable ticks (class + reason) | `agentic_time::{Tick, TickClass}` |
 | Clock benchmark (wall/step/token/agentic) | `agentic_time::early_warning_lead` |
 | **Fair baseline** (windowed z-score change-point detector) | `agentic_time::WindowedDeltaClock` |
+| **M3 real-trace defensibility gate** (real Claude-Code traces, pre-registered) | `examples/real_trace_eval.rs` |
+| M3 circularity guard (contradiction-free honest variant) | `agentic_time` test `contradiction_free_weights_blind_to_error_channel` |
 
 Benchmark result on the bundled synthetic failing-workflow trace (a healthy
 phase, then a plan-thrash onset where the plan oscillates and contradictions
@@ -155,7 +163,9 @@ least as early. Agentic Time's ~40-step lead and the structural clock's **2.8×*
 figure over the entropy clock are properties of the *constructed* trace (the lead
 scales with how far the planted structural precursor precedes the failure signal),
 not a head-to-head win; that win, if it exists, must be demonstrated on a real
-trace (M3). Compression to a fixed tolerance is currently ~1.3×; the ≥5×/
+trace (M3). **M3 is now done and the win did not materialize: on real traces the
+agentic clock scores 0 win / 1 tie / 1 loss vs the fair baseline (see Honest
+limitations §3).** Compression to a fixed tolerance is currently ~1.3×; the ≥5×/
 95%-retention compression target is a stretch goal pending the graph layer.
 
 ## Acceptance criteria
@@ -210,9 +220,78 @@ over-read:
    with how far the structural precursor was planted ahead of the entropy/failure
    signal), not a measured competitive advantage. A genuine head-to-head — where
    the agentic clock's multi-channel composition is expected to win precisely when
-   *no single scalar* carries the signal — requires a **real Ruflo trace vs the
-   fair windowed baseline**, which is **M3 future work** (and is the gate in the
-   Acceptance criteria above).
+   *no single scalar* carries the signal — requires a **real trace vs the fair
+   windowed baseline**. That is **M3**, and it is **now done** (see below).
+
+   **M3 result (real traces, done — and it is a null/mixed, reported honestly).**
+   The `examples/real_trace_eval.rs` harness runs the comparison on **real
+   recorded agent traces**: the Claude-Code session transcripts for this repo
+   (`~/.claude/projects/C--Users-ruv-ruvector/*.jsonl`) — real tool-use
+   sequences, retries, and `is_error` events, not synthetic data. (We deliberately
+   did **not** use `.ruvector/intelligence.json`: its 51 "trajectories" are flat
+   single-event *success* records — every one `outcome = completed`, reward ∈
+   [0.8, 1.0], no multi-step structure, **no failure events** — so it can neither
+   expose the agentic channels nor define an event-to-predict; using it would have
+   been dishonest.)
+
+   - **Channel mapping (documented heuristic proxies, not planted signals).** Each
+     step (an assistant turn issuing ≥1 tool call) maps real signals to channels:
+     belief = TF vector over **tool types**; memory = cumulative **distinct files
+     touched**; retrieval = **Read/Grep/search** volume; goal-graph = arrival of a
+     **new user prompt**; contradiction = step **`is_error` rate**; plan = assistant
+     **text length + same-tool repetition** (plan thrash).
+   - **Event-to-predict, defined independently of the channels.** A real **error
+     cascade** — first step with ≥2 harness `is_error` results inside a 4-step
+     span. Errors come from Claude Code's `is_error` flag, **not** from any agentic
+     delta, so predicting it is a genuine forecast, not a tautology.
+   - **Circularity guard.** Because `contradiction` is derived from the same
+     `is_error` flag that defines the event, the **honest** variant zeroes the
+     contradiction weight: the clock must predict the cascade from
+     belief/memory/retrieval/goal/plan movement **alone**, blind to the error
+     signal. (Locked in by the unit test
+     `contradiction_free_weights_blind_to_error_channel`.)
+   - **Pre-registered, before any lead was computed:** baseline window = 10, alarm
+     = mean + 3σ, metric = early-warning lead in steps, event = ≥2 errors / 4
+     steps. Not tuned to the outcome.
+   - **Measured lead distribution (n = 2 scoreable real traces):**
+
+     | clock | trace 31cca102 (550 steps, event @37) | trace 9d1a949d (127 steps, event @29) |
+     |---|---|---|
+     | wall / step | 0 / 0 | 0 / 0 |
+     | token-count (constant) | 15 | 17 |
+     | **fair baseline** (token-delta) | 15 | 0 |
+     | **fair baseline** (belief-shift) | 0 (never fires) | 0 (never fires) |
+     | **agentic-honest** (the gate) | **0 (never fires)** | **0 (never fires)** |
+     | agentic-full (diagnostic, sees error) | 0 | 0 |
+
+     Per-trace verdict: **0 win / 1 tie / 1 loss** for agentic-honest vs the fair
+     baseline (the fair token-delta baseline wins on 31cca102 with a 15-step lead;
+     both tie at 0 on 9d1a949d).
+   - **Why the honest clock never fires — and why that is a *real* finding, not a
+     degenerate clock.** The honest composite signal is **alive**, not flat
+     (per-step increments: mean ≈ 1.5, max ≈ 4.4). It never alarms because the
+     agent's **early exploratory churn sets a high `mean + 3σ` bar** (≈ 4.5–5.4),
+     and later genuine movement (max ≈ 3.4 before the event) never clears it. The
+     fair *token-delta* baseline fires precisely because token cadence is steadier
+     early, giving it a tighter baseline. This is a property of real agent traces:
+     a multi-channel `mean + kσ` change-point alarm is *disfavoured* by early
+     high-variance exploration. (The harness prints this diagnostic per trace.)
+
+   **Honest conclusion.** On real traces the agentic clock **does not beat the
+   fair windowed baseline** (0 win / 1 tie / 1 loss). This is consistent with the
+   synthetic M1 finding and **does not manufacture a win**. The defensible
+   contribution of the primitive, on the present evidence, is as an
+   **explainable/diagnostic** signal — the per-channel attribution
+   (`Tick { class, reason, …per-channel }`) and the seven-state health classifier
+   — **not** a raw early-warning-lead advantage. Two caveats bound even this null:
+   the sample is tiny (n = 2, not significance-tested), and every channel is a
+   documented heuristic proxy over transcript text, not an instrumented
+   agent-state stream (a planted signal is ruled out by the contradiction-free
+   variant, but proxy noise is real). A larger corpus of instrumented traces, a
+   detector less sensitive to early-exploration variance (e.g. ADWIN-style
+   adaptive windows rather than a fixed early baseline), or richer channels could
+   still change this verdict — but until they do, the crate claims only the
+   diagnostic value, honestly.
 
 4. **Page–Wootters scope.** The construction is valid for real-symmetric
    Hamiltonians; the post-conditioning normalization equals the Born-rule
