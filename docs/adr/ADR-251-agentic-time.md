@@ -122,10 +122,16 @@ when uncertainty changes meaningfully.
    it does not beat it either: across the two real Claude-Code session
    transcripts available for this repo the contradiction-free *honest* agentic
    clock scores **0 win / 1 tie / 1 loss** vs the fair windowed baseline (see
-   **Honest limitations** §3 and the `real_trace_eval` example). Agentic Time is
-   therefore **not yet cleared to control production execution as an
-   early-warning lead**; its defensible value at this point is diagnostic
-   (per-channel attribution + health classifier), not a raw-lead win.
+   **Honest limitations** §3 and the `real_trace_eval` example). **M3b then
+   implemented the exact fix M3 proposed — an adaptive-window (Page–Hinkley)
+   detector instead of the fixed `mean + kσ` baseline — applied identically to
+   both sides, and the verdict did NOT improve: the honest clock goes to 0 win /
+   0 tie / 2 loss under the adaptive detector (the adaptive detector makes the
+   *fair baseline* fire much earlier, while the honest agentic signal's genuine
+   movement still arrives only after the event).** Agentic Time is therefore
+   **not yet cleared to control production execution as an early-warning lead**;
+   its defensible value at this point is diagnostic (per-channel attribution +
+   health classifier), not a raw-lead win.
 5. **Explainability** — every tick carries a human-readable reason and a class.
    *Implemented: `AgenticTime::explain → Tick { delta, class, reason, …per-channel }`.*
 
@@ -149,6 +155,8 @@ when uncertainty changes meaningfully.
 | **Fair baseline** (windowed z-score change-point detector) | `agentic_time::WindowedDeltaClock` |
 | **M3 real-trace defensibility gate** (real Claude-Code traces, pre-registered) | `examples/real_trace_eval.rs` |
 | M3 circularity guard (contradiction-free honest variant) | `agentic_time` test `contradiction_free_weights_blind_to_error_channel` |
+| **M3b adaptive detector** (Page–Hinkley; the fix M3 proposed) | `adaptive::{PageHinkley, adaptive_alarm_step, adaptive_early_warning_lead}` |
+| M3b adaptive detector wired into the real-trace gate (fixed vs adaptive) | `examples/real_trace_eval.rs` (prints both) |
 
 Benchmark result on the bundled synthetic failing-workflow trace (a healthy
 phase, then a plan-thrash onset where the plan oscillates and contradictions
@@ -165,7 +173,9 @@ scales with how far the planted structural precursor precedes the failure signal
 not a head-to-head win; that win, if it exists, must be demonstrated on a real
 trace (M3). **M3 is now done and the win did not materialize: on real traces the
 agentic clock scores 0 win / 1 tie / 1 loss vs the fair baseline (see Honest
-limitations §3).** Compression to a fixed tolerance is currently ~1.3×; the ≥5×/
+limitations §3). M3b tried the adaptive-detector fix M3 proposed (Page–Hinkley)
+and it did not rescue the claim either — 0 win / 0 tie / 2 loss — so the null is
+now more robust.** Compression to a fixed tolerance is currently ~1.3×; the ≥5×/
 95%-retention compression target is a stretch goal pending the graph layer.
 
 ## Acceptance criteria
@@ -292,6 +302,62 @@ over-read:
    adaptive windows rather than a fixed early baseline), or richer channels could
    still change this verdict — but until they do, the crate claims only the
    diagnostic value, honestly.
+
+   **M3b — the adaptive-detector fix M3 proposed, tried and reported honestly.**
+   M3 named the specific cause of the honest null (a *frozen* `mean + kσ`
+   baseline poisoned by early-exploration churn) and the specific fix (an
+   *adaptive-window* detector whose reference statistic keeps moving). M3b
+   implements that fix as a **Page–Hinkley test** (Page 1954; Hinkley 1970;
+   `src/adaptive.rs`): it tracks the cumulative deviation of each increment from
+   a **running mean** (not a frozen window), alarming when the cumulative rise
+   above its running minimum exceeds `λ`, with `δ` tolerating normal jitter. It
+   is unit-tested to fire on a real step-change and stay silent on stationary
+   noise, and — crucially — is applied **identically to the agentic clock AND the
+   fair baseline** (same `δ`, same `λ`), so any verdict change is a fair
+   same-detector-both-sides result, not an artifact. Parameters were
+   **pre-registered** (`δ = 0.15`, `λ = 5.0`, upward form) before any adaptive
+   lead was computed.
+
+   - **Adaptive lead distribution (same n = 2 real traces, fixed-vs-adaptive):**
+
+     | clock | 31cca102 (event @37) fixed → adaptive | 9d1a949d (event @29) fixed → adaptive |
+     |---|---|---|
+     | fair baseline (token-delta) | 15 → 15 | 0 → 27 |
+     | fair baseline (belief-shift) | 0 → **32** | 0 → **25** |
+     | **agentic-honest** (the gate) | **0 → 0** (alarm @75, after event) | **0 → 0** (alarm @49, after event) |
+     | agentic-full (diagnostic) | 0 → 0 | 0 → 0 |
+
+     Per-trace verdict under the adaptive detector: **0 win / 0 tie / 2 loss** for
+     agentic-honest vs the fair baseline (worse than the fixed-window 0/1/1,
+     because the adaptive detector makes the *fair baseline* fire much earlier
+     while the honest agentic alarm still lands only after the event).
+
+   - **What the adaptive detector did and did not do.** It *worked as designed*:
+     the fair belief-shift baseline, which never fired under the fixed window, now
+     alarms with leads of 32 and 25 — the running-mean reference is genuinely
+     more sensitive and no longer poisoned by early variance. But it did **not**
+     rescue the agentic-honest clock: on both traces the honest composite's first
+     adaptive alarm (steps 75 and 49) lands *after* the error cascade (steps 37
+     and 29), so its lead stays 0. The honest reading is that the agentic-honest
+     composite simply does **not carry an early precursor** for these specific
+     error-cascade events — the genuine multi-channel movement arrives with or
+     after the trouble, not before it.
+
+   **M3b honest conclusion — the fix did not rescue the claim; the null is now
+   more robust.** We implemented the exact remedy M3 diagnosed (an adaptive
+   running-reference detector instead of a frozen early baseline) and ran it
+   fairly on both sides. The verdict did not flip in the agentic clock's favour —
+   it moved against it (0/1/1 → 0/2 loss). This is a **legitimate, valuable
+   result**: a proposed fix tried and shown not to work removes a standing
+   "but maybe with a better detector…" objection. The defensible contribution of
+   Agentic Time remains its **explainable/diagnostic** value (per-channel
+   attribution + the seven-state health classifier), not a raw early-warning-lead
+   advantage. The same caveats bound this stronger null: n = 2 is tiny and not
+   significance-tested, and the channels are heuristic proxies. Had the adaptive
+   detector produced a fair win, the n = 2 caveat would have *demanded* a larger
+   pre-registered corpus before any claim — and that same larger corpus is the
+   only thing that could still overturn this null. Both the fixed-window and
+   adaptive numbers are printed side-by-side by `examples/real_trace_eval.rs`.
 
 4. **Page–Wootters scope.** The construction is valid for real-symmetric
    Hamiltonians; the post-conditioning normalization equals the Born-rule

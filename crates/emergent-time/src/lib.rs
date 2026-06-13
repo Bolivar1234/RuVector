@@ -39,6 +39,7 @@
 //!   time  =  ordered change measured from inside the system
 //! ```
 
+pub mod adaptive;
 pub mod agentic;
 pub mod agentic_time;
 pub mod complex;
@@ -57,6 +58,7 @@ pub use complex::Complex;
 pub use complex_matrix::CMatrix;
 pub use real_matrix::RealMatrix;
 
+pub use adaptive::{adaptive_alarm_step, adaptive_early_warning_lead, PageHinkley};
 pub use agentic::CausalTimeline;
 pub use agentic_time::{AgentHealth, AgentState, AgenticTime, AgenticWeights};
 pub use entropic::EntropicClock;
