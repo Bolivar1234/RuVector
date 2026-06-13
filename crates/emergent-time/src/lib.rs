@@ -51,6 +51,7 @@ pub mod real_matrix;
 pub mod state;
 pub mod structural_clock;
 pub mod thermal;
+pub mod weight_learning;
 pub mod wheeler_dewitt;
 
 // Convenience re-exports of the most-used types.
