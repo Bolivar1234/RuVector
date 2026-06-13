@@ -61,7 +61,9 @@ fn bench_structural_clock(c: &mut Criterion) {
     let traj = structural_clock::generate_scenario(&Scenario::default());
     let spt = StructuralProperTime::new(StructuralMetric::default());
     let mut g = c.benchmark_group("structural_clock");
-    g.bench_function("cumulative", |b| b.iter(|| black_box(spt.cumulative(&traj))));
+    g.bench_function("cumulative", |b| {
+        b.iter(|| black_box(spt.cumulative(&traj)))
+    });
     g.bench_function("early_warning_lead", |b| {
         b.iter(|| black_box(early_warning_lead(&spt, &traj, 80, 30, 4.0)))
     });

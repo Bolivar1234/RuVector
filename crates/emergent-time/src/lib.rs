@@ -64,8 +64,7 @@ pub use agentic_time::{AgentHealth, AgentState, AgenticTime, AgenticWeights};
 pub use entropic::EntropicClock;
 pub use page_wootters::PageWootters;
 pub use structural_clock::{
-    Clock, EntropyClock, Scenario, StateSnapshot, StructuralMetric, StructuralProperTime,
-    WallClock,
+    Clock, EntropyClock, Scenario, StateSnapshot, StructuralMetric, StructuralProperTime, WallClock,
 };
 
 #[cfg(test)]

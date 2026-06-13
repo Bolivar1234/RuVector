@@ -178,7 +178,10 @@ mod tests {
             }
             // Deterministic perturbation to escape any accidental coincidence.
             offset += 0.5;
-            assert!(offset < 100.0, "failed to find a generic non-matching clock");
+            assert!(
+                offset < 100.0,
+                "failed to find a generic non-matching clock"
+            );
         };
 
         // Sanity: the chosen clock is genuinely not the energy-matched one.
@@ -187,7 +190,10 @@ mod tests {
             .flat_map(|r| (0..3).map(move |c| (r, c)))
             .map(|(r, c)| (h_c.get(r, c) - matched.get(r, c)).abs())
             .fold(0.0f64, f64::max);
-        assert!(max_diff > 1.0, "test clock must differ from the matched clock");
+        assert!(
+            max_diff > 1.0,
+            "test clock must differ from the matched clock"
+        );
 
         let j = bipartite_constraint(&h_c, &h_r);
         let (j_vals, _) = j.symmetric_eigen();

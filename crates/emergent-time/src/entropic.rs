@@ -82,7 +82,10 @@ pub fn gibbs_density(h: &RealMatrix, beta: f64) -> RealMatrix {
     let (energies, vecs) = h.symmetric_eigen();
     // Shift by the ground-state energy for numerical stability of exp.
     let e_min = energies.iter().cloned().fold(f64::INFINITY, f64::min);
-    let weights: Vec<f64> = energies.iter().map(|&e| (-beta * (e - e_min)).exp()).collect();
+    let weights: Vec<f64> = energies
+        .iter()
+        .map(|&e| (-beta * (e - e_min)).exp())
+        .collect();
     let z: f64 = weights.iter().sum();
     let probs: Vec<f64> = weights.iter().map(|w| w / z).collect();
     RealMatrix::from_spectrum(&probs, &vecs)
@@ -92,7 +95,10 @@ pub fn gibbs_density(h: &RealMatrix, beta: f64) -> RealMatrix {
 pub fn gibbs_entropy(h: &RealMatrix, beta: f64) -> f64 {
     let (energies, _v) = h.symmetric_eigen();
     let e_min = energies.iter().cloned().fold(f64::INFINITY, f64::min);
-    let weights: Vec<f64> = energies.iter().map(|&e| (-beta * (e - e_min)).exp()).collect();
+    let weights: Vec<f64> = energies
+        .iter()
+        .map(|&e| (-beta * (e - e_min)).exp())
+        .collect();
     let z: f64 = weights.iter().sum();
     let probs: Vec<f64> = weights.iter().map(|w| w / z).collect();
     entropy_from_spectrum(&probs)
@@ -112,7 +118,11 @@ pub fn entropic_time_sweep(
 ) -> Vec<(f64, f64, f64)> {
     let mut out = Vec::with_capacity(steps);
     for i in 0..steps {
-        let frac = if steps <= 1 { 0.0 } else { i as f64 / (steps - 1) as f64 };
+        let frac = if steps <= 1 {
+            0.0
+        } else {
+            i as f64 / (steps - 1) as f64
+        };
         let lam = lo + frac * (hi - lo);
         let s = gibbs_entropy(h, lam);
         out.push((lam, s, clock.tau(s)));

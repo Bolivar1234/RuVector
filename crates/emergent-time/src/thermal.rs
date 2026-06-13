@@ -28,10 +28,7 @@ const PROB_FLOOR: f64 = 1e-12;
 /// Eigenvalues below `PROB_FLOOR` are clamped to keep the logarithm finite.
 pub fn modular_hamiltonian(rho: &RealMatrix) -> RealMatrix {
     let (probs, vecs) = rho.symmetric_eigen();
-    let k_eigs: Vec<f64> = probs
-        .iter()
-        .map(|&p| -(p.max(PROB_FLOOR)).ln())
-        .collect();
+    let k_eigs: Vec<f64> = probs.iter().map(|&p| -(p.max(PROB_FLOOR)).ln()).collect();
     RealMatrix::from_spectrum(&k_eigs, &vecs)
 }
 

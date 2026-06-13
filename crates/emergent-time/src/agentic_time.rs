@@ -346,8 +346,7 @@ impl AgenticTime {
         let goal_graph = w.goal_graph * (c.goal_graph - p.goal_graph).abs();
         let contradiction = w.contradiction * (c.contradiction - p.contradiction).abs();
         let plan = w.plan * l2(&p.plan, &c.plan);
-        let delta = (belief + memory + retrieval + goal_graph + contradiction + plan
-            - noise_floor)
+        let delta = (belief + memory + retrieval + goal_graph + contradiction + plan - noise_floor)
             .max(0.0);
 
         // Dominant channel drives the class and reason.
@@ -359,10 +358,11 @@ impl AgenticTime {
             ("contradiction", contradiction),
             ("plan", plan),
         ];
-        let (dom_name, dom_val) = channels
-            .iter()
-            .copied()
-            .fold(("none", 0.0), |acc, x| if x.1 > acc.1 { x } else { acc });
+        let (dom_name, dom_val) =
+            channels
+                .iter()
+                .copied()
+                .fold(("none", 0.0), |acc, x| if x.1 > acc.1 { x } else { acc });
 
         let class = if delta <= 0.0 {
             TickClass::Idle
@@ -422,11 +422,11 @@ pub enum AgentHealth {
 /// Thresholds for the health classifier.
 #[derive(Clone, Copy, Debug)]
 pub struct HealthThresholds {
-    pub idle: f64,            // below this Δτ, the agent is not changing
-    pub healthy_ati: f64,     // ATI at/above this is healthy
-    pub drifting_ati: f64,    // ATI at/above this is drifting (else replan)
-    pub collapse: f64,        // contradiction at/above this is collapsing
-    pub human_review: f64,    // contradiction at/above this escalates
+    pub idle: f64,         // below this Δτ, the agent is not changing
+    pub healthy_ati: f64,  // ATI at/above this is healthy
+    pub drifting_ati: f64, // ATI at/above this is drifting (else replan)
+    pub collapse: f64,     // contradiction at/above this is collapsing
+    pub human_review: f64, // contradiction at/above this escalates
 }
 
 impl Default for HealthThresholds {
@@ -569,7 +569,9 @@ pub fn generate_failing_trace(seed: u64) -> AgentTrace {
     let baseline_window = 18;
     let mut rng = Rng::new(seed);
 
-    let target: Vec<f64> = (0..dim).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+    let target: Vec<f64> = (0..dim)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+        .collect();
 
     let mut states = Vec::with_capacity(steps);
     let mut progress = Vec::with_capacity(steps);
@@ -614,7 +616,10 @@ pub fn generate_failing_trace(seed: u64) -> AgentTrace {
 
         states.push(AgentState {
             belief,
-            memory: states.last().map(|s: &AgentState| s.belief.clone()).unwrap_or_else(|| vec![0.0; dim]),
+            memory: states
+                .last()
+                .map(|s: &AgentState| s.belief.clone())
+                .unwrap_or_else(|| vec![0.0; dim]),
             retrieval,
             goal_graph,
             contradiction,
@@ -696,12 +701,9 @@ mod tests {
         let token_base = WindowedDeltaClock::token_delta(bw);
         let belief_base = WindowedDeltaClock::belief_shift(bw);
 
-        let lead_agentic =
-            early_warning_lead(&agentic, &tr.states, tr.fail_index, bw, 4.0);
-        let lead_token_base =
-            early_warning_lead(&token_base, &tr.states, tr.fail_index, bw, 4.0);
-        let lead_belief_base =
-            early_warning_lead(&belief_base, &tr.states, tr.fail_index, bw, 4.0);
+        let lead_agentic = early_warning_lead(&agentic, &tr.states, tr.fail_index, bw, 4.0);
+        let lead_token_base = early_warning_lead(&token_base, &tr.states, tr.fail_index, bw, 4.0);
+        let lead_belief_base = early_warning_lead(&belief_base, &tr.states, tr.fail_index, bw, 4.0);
 
         // (1) Both fair detectors fire — they are real competitors, not strawmen.
         assert!(
@@ -811,7 +813,10 @@ mod tests {
         assert!(!tick.reason.is_empty());
         assert!(matches!(
             tick.class,
-            TickClass::Progress | TickClass::Learning | TickClass::Contradiction | TickClass::Collapse
+            TickClass::Progress
+                | TickClass::Learning
+                | TickClass::Contradiction
+                | TickClass::Collapse
         ));
         // With noise_floor == 0, the post-floor delta equals the raw channel
         // sum exactly (this is the *only* floor value for which the identity
@@ -847,7 +852,10 @@ mod tests {
 
         // The thrash-onset transition is large, so sum > floor and delta is
         // strictly *less* than the raw channel sum by exactly the floor.
-        assert!(sum > floor, "precondition: movement should exceed the floor");
+        assert!(
+            sum > floor,
+            "precondition: movement should exceed the floor"
+        );
         let expected = (sum - floor).max(0.0);
         assert!(
             (tick.delta - expected).abs() < 1e-9,
@@ -874,7 +882,10 @@ mod tests {
             + clamped.goal_graph
             + clamped.contradiction
             + clamped.plan;
-        assert!(clamped_sum > 0.0, "raw channels stay non-zero under a high floor");
+        assert!(
+            clamped_sum > 0.0,
+            "raw channels stay non-zero under a high floor"
+        );
     }
 
     #[test]

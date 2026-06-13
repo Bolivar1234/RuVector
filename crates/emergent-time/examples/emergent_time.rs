@@ -42,7 +42,10 @@ fn main() {
     let residual = wheeler_dewitt::constraint_residual(&j, &psi);
     let phys = wheeler_dewitt::solve_constraint(&j);
     println!("  global state satisfies the constraint:  ||J|Psi>|| = {residual:.2e}");
-    println!("  kernel eigenvalue nearest zero:          {:.2e}", phys.eigenvalue);
+    println!(
+        "  kernel eigenvalue nearest zero:          {:.2e}",
+        phys.eigenvalue
+    );
     println!("  -> the universe's state carries no external time parameter.");
 
     // ---- 2. Page–Wootters: evolution from a static state ------------------
@@ -74,7 +77,10 @@ fn main() {
     // K should equal beta*H + const; report the off-diagonal match.
     let diff = RealMatrix::from_fn(h.n, |r, c| k.get(r, c) - beta * h.get(r, c));
     println!("  modular Hamiltonian K = beta*H + c*I ?");
-    println!("    max |off-diagonal(K - beta*H)| = {:.2e}", diff.max_offdiag());
+    println!(
+        "    max |off-diagonal(K - beta*H)| = {:.2e}",
+        diff.max_offdiag()
+    );
     println!("  -> physical time flow is recovered from the thermodynamic state itself.");
 
     // ---- 5a. Agentic causal time ------------------------------------------
@@ -177,61 +183,33 @@ fn main() {
     let clocks: [(&str, &dyn agentic_time::AgentClock); 6] = [
         ("wall (constant-rate)", &agentic_time::AgentWallClock),
         ("step-count (constant-rate)", &agentic_time::StepCountClock),
-        ("token-count (constant-rate)", &agentic_time::TokenCountClock),
+        (
+            "token-count (constant-rate)",
+            &agentic_time::TokenCountClock,
+        ),
         ("windowed-z[token-delta] FAIR", &token_base),
         ("windowed-z[belief] FAIR", &belief_base),
         ("agentic (multi-channel)", &agentic),
     ];
     for (label, cl) in clocks {
-        let lead =
-            agentic_time::early_warning_lead(cl, &tr.states, tr.fail_index, abw, 4.0);
+        let lead = agentic_time::early_warning_lead(cl, &tr.states, tr.fail_index, abw, 4.0);
         println!("    {label:<26} {lead:>12}");
     }
-    println!(
-        "  NOTE: wall/step/token are constant-rate clocks (zero baseline variance ->"
-    );
-    println!(
-        "        their alarm CANNOT fire); their 0 lead is a coverage gap, not a"
-    );
-    println!(
-        "        measured loss. The windowed-z detectors ARE fair competitors and"
-    );
-    println!(
-        "        on THIS designed trace they fire at least as early as the agentic"
-    );
-    println!(
-        "        clock: the belief-shift detector catches the planted structural"
-    );
-    println!(
-        "        signal (a single-channel z-score already sees it), and the"
-    );
-    println!(
-        "        token-delta detector trips early on quantization noise (tokens are"
-    );
-    println!(
-        "        a near-constant integer stream) -- reported, not hidden."
-    );
-    println!(
-        "  HONEST FRAMING: the agentic clock does NOT beat a fair baseline on this"
-    );
-    println!(
-        "        synthetic trace. The 40-step lead is a property of how far the"
-    );
-    println!(
-        "        structural precursor was planted ahead of failure, NOT a measured"
-    );
-    println!(
-        "        competitive win. The agentic clock's real value -- composing many"
-    );
-    println!(
-        "        weak channels when no single scalar carries the signal -- can only"
-    );
-    println!(
-        "        be substantiated on a REAL trace vs this fair baseline (M3 work;"
-    );
-    println!(
-        "        see ADR-251 'Honest limitations')."
-    );
+    println!("  NOTE: wall/step/token are constant-rate clocks (zero baseline variance ->");
+    println!("        their alarm CANNOT fire); their 0 lead is a coverage gap, not a");
+    println!("        measured loss. The windowed-z detectors ARE fair competitors and");
+    println!("        on THIS designed trace they fire at least as early as the agentic");
+    println!("        clock: the belief-shift detector catches the planted structural");
+    println!("        signal (a single-channel z-score already sees it), and the");
+    println!("        token-delta detector trips early on quantization noise (tokens are");
+    println!("        a near-constant integer stream) -- reported, not hidden.");
+    println!("  HONEST FRAMING: the agentic clock does NOT beat a fair baseline on this");
+    println!("        synthetic trace. The 40-step lead is a property of how far the");
+    println!("        structural precursor was planted ahead of failure, NOT a measured");
+    println!("        competitive win. The agentic clock's real value -- composing many");
+    println!("        weak channels when no single scalar carries the signal -- can only");
+    println!("        be substantiated on a REAL trace vs this fair baseline (M3 work;");
+    println!("        see ADR-251 'Honest limitations').");
     // Live health verdict at a window straddling the thrash onset.
     let th = agentic_time::HealthThresholds::default();
     let w0 = tr.thrash_onset.saturating_sub(2);
@@ -243,7 +221,9 @@ fn main() {
     println!(
         "  agentic-time index at onset window: dtau={dtau:.2}, dprogress={dprog:.2} -> {verdict:?}"
     );
-    println!("  -> agents should measure time by meaningful change, not seconds, tokens, or steps.");
+    println!(
+        "  -> agents should measure time by meaningful change, not seconds, tokens, or steps."
+    );
 
     println!("\n  thesis:  physics state -> vector geometry -> internal clock -> prediction");
 }

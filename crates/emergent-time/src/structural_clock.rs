@@ -135,11 +135,11 @@ impl Clock for EntropyClock {
 /// Weights for the composite structural metric `τ = f(ΔS, Δv, ΔG, ΔC, ΔE)`.
 #[derive(Clone, Copy, Debug)]
 pub struct StructuralMetric {
-    pub w_embedding: f64,   // Δv
-    pub w_entropy: f64,     // ΔS
-    pub w_graph: f64,       // ΔG
-    pub w_coherence: f64,   // ΔC (coherence *loss* only)
-    pub w_pred_error: f64,  // ΔE
+    pub w_embedding: f64,  // Δv
+    pub w_entropy: f64,    // ΔS
+    pub w_graph: f64,      // ΔG
+    pub w_coherence: f64,  // ΔC (coherence *loss* only)
+    pub w_pred_error: f64, // ΔE
     /// Increments below this gate are treated as idle (no internal time).
     pub gate: f64,
 }
@@ -469,8 +469,8 @@ pub fn generate_scenario(sc: &Scenario) -> Vec<StateSnapshot> {
 
         // Entropy only responds to the *late* regime (level past 0.5), i.e. it
         // lags the structural signal.
-        let entropy = 0.2 + 1.8 * ((level - 0.5) / 0.5).clamp(0.0, 1.0)
-            + sc.noise * rng.next_f64().abs();
+        let entropy =
+            0.2 + 1.8 * ((level - 0.5) / 0.5).clamp(0.0, 1.0) + sc.noise * rng.next_f64().abs();
         // Coherence and graph topology track the structural level directly.
         let coherence = (1.0 - level).clamp(0.0, 1.0);
         let graph = level + sc.noise * rng.next_f64().abs();

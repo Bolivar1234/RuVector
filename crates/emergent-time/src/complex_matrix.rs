@@ -139,7 +139,11 @@ impl CMatrix {
 /// re-diagonalization. The result is unitary.
 pub fn exp_i_from_spectrum(eigvals: &[f64], v: &RealMatrix, theta: f64) -> CMatrix {
     let n = v.n;
-    debug_assert_eq!(eigvals.len(), n, "spectrum length must match matrix dimension");
+    debug_assert_eq!(
+        eigvals.len(),
+        n,
+        "spectrum length must match matrix dimension"
+    );
     // phases[k] = e^{i*theta*E_k}
     let phases: Vec<Complex> = eigvals.iter().map(|&e| Complex::phase(theta * e)).collect();
     let mut out = CMatrix::zeros(n);
@@ -174,7 +178,11 @@ pub fn exp_i_apply_from_spectrum(
     psi: &[Complex],
 ) -> Vec<Complex> {
     let n = v.n;
-    debug_assert_eq!(eigvals.len(), n, "spectrum length must match matrix dimension");
+    debug_assert_eq!(
+        eigvals.len(),
+        n,
+        "spectrum length must match matrix dimension"
+    );
     debug_assert_eq!(psi.len(), n, "state length must match matrix dimension");
     // Coefficients c_k = <E_k|ψ> (V is real, so the bra is just the column).
     let mut coeffs = vec![Complex::ZERO; n];

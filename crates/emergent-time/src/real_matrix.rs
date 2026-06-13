@@ -274,7 +274,9 @@ mod tests {
 
     #[test]
     fn eigenvectors_orthonormal() {
-        let m = RealMatrix::from_fn(3, |r, c| ((r + 1) * (c + 1)) as f64 % 5.0 + if r == c { 1.0 } else { 0.0 });
+        let m = RealMatrix::from_fn(3, |r, c| {
+            ((r + 1) * (c + 1)) as f64 % 5.0 + if r == c { 1.0 } else { 0.0 }
+        });
         // symmetrize
         let m = RealMatrix::from_fn(3, |r, c| 0.5 * (m.get(r, c) + m.get(c, r)));
         let (_vals, v) = m.symmetric_eigen();
@@ -336,7 +338,15 @@ mod tests {
         // by O(off) only. Sorted, the extreme values bracket correctly.
         let mut sorted = vals.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert!((sorted[0] - 1.0).abs() < 1e-6, "low eigenvalue {}", sorted[0]);
-        assert!((sorted[2] - 2.0).abs() < 1e-6, "high eigenvalue {}", sorted[2]);
+        assert!(
+            (sorted[0] - 1.0).abs() < 1e-6,
+            "low eigenvalue {}",
+            sorted[0]
+        );
+        assert!(
+            (sorted[2] - 2.0).abs() < 1e-6,
+            "high eigenvalue {}",
+            sorted[2]
+        );
     }
 }

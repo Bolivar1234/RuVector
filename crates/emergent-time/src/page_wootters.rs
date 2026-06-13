@@ -198,13 +198,7 @@ mod tests {
 
     fn sample_h() -> RealMatrix {
         // A non-trivial symmetric 3-level Hamiltonian.
-        RealMatrix::from_fn(3, |r, c| {
-            if r == c {
-                (r as f64) - 1.0
-            } else {
-                0.35
-            }
-        })
+        RealMatrix::from_fn(3, |r, c| if r == c { (r as f64) - 1.0 } else { 0.35 })
     }
 
     #[test]
