@@ -238,6 +238,9 @@ members = [
     "crates/ruvector-graph-condense-wasm",
     # Perception substrate: delta -> boundary -> coherence -> proof -> action
     "crates/ruvector-perception",
+    # Calculus of emergent / relational time (Wheeler-DeWitt, Page-Wootters,
+    # entropic, thermal) + Structural Proper Time for agentic systems.
+    "crates/emergent-time",
 ]
 resolver = "2"
 

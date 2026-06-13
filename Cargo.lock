@@ -2466,6 +2466,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "emergent-time"
+version = "2.2.3"
+dependencies = [
+ "criterion 0.5.1",
+]
+
+[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
