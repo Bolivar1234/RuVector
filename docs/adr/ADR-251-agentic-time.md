@@ -116,7 +116,10 @@ when uncertainty changes meaningfully.
 3. **Replay stability** — same trace + same model versions ⇒ same ticks
    (deterministic; the synthetic generators use a seeded xorshift PRNG).
 4. **Baseline dominance** — Agentic Time must beat at least one simple baseline
-   before controlling production execution.
+   before controlling production execution. *This is a gate, not a current
+   result:* on the synthetic trace it does **not** beat the fair
+   `WindowedDeltaClock` baseline (see **Honest limitations**); the gate is met
+   only on a real trace (M3).
 5. **Explainability** — every tick carries a human-readable reason and a class.
    *Implemented: `AgenticTime::explain → Tick { delta, class, reason, …per-channel }`.*
 
@@ -136,17 +139,24 @@ when uncertainty changes meaningfully.
 | **Agentic Time** `τ_a=f(ΔB,ΔM,ΔR,ΔG,ΔE,ΔP)` | `agentic_time::AgenticTime` |
 | ATI + 7 health states | `agentic_time::{agentic_time_index, classify, AgentHealth}` |
 | Explainable ticks (class + reason) | `agentic_time::{Tick, TickClass}` |
-| Four-clock benchmark (wall/step/token/agentic) | `agentic_time::early_warning_lead` |
+| Clock benchmark (wall/step/token/agentic) | `agentic_time::early_warning_lead` |
+| **Fair baseline** (windowed z-score change-point detector) | `agentic_time::WindowedDeltaClock` |
 
 Benchmark result on the bundled synthetic failing-workflow trace (a healthy
 phase, then a plan-thrash onset where the plan oscillates and contradictions
 climb while progress stalls, culminating in failure): the wall, step-count, and
-token-count clocks give **0** early-warning lead (they are blind to the internal
-collapse), while Agentic Time fires at the thrash onset for a lead of ~40 steps.
-On the structural-clock scenario, structural time gives **2.8× earlier warning**
-than the entropy clock and clears the ≥2× acceptance bar. Compression to a fixed
-tolerance is currently ~1.3×; the ≥5×/95%-retention compression target is a
-stretch goal pending the graph layer.
+token-count clocks give **0** early-warning lead — but, as the **Honest
+limitations** section below details, this is a *coverage gap by construction*
+(they emit a constant rate, so their alarm cannot fire), **not** a measured
+competitive loss. Against the **fair** `WindowedDeltaClock` baseline (a
+rolling-window z-score change-point detector on a single cheap scalar), the
+agentic clock does **not** win on this designed trace — the fair baseline fires at
+least as early. Agentic Time's ~40-step lead and the structural clock's **2.8×**
+figure over the entropy clock are properties of the *constructed* trace (the lead
+scales with how far the planted structural precursor precedes the failure signal),
+not a head-to-head win; that win, if it exists, must be demonstrated on a real
+trace (M3). Compression to a fixed tolerance is currently ~1.3×; the ≥5×/
+95%-retention compression target is a stretch goal pending the graph layer.
 
 ## Acceptance criteria
 
@@ -156,6 +166,78 @@ gives ≥ 2× earlier warning for failure/loop states; trace compression preserv
 ≥ 95% of predictive performance; and every tick has an audit-ready explanation.
 Do **not** adopt if it cannot beat step count, token count, and wall clock, or
 if it creates unstable control loops, or if ticks cannot be explained.
+
+## Honest limitations
+
+The reference crate's M1 hardening surfaced several places where rigor and
+marketing had diverged. These are stated plainly so the implementation is not
+over-read:
+
+1. **Wheeler–DeWitt is constructive, not a discovery.** With the energy-matched
+   clock `H_C = diag(−Eₖ)`, the constraint `Ĵ = H_C ⊗ I + I ⊗ H_R` has a kernel
+   *by construction* (the diagonal `a = b` pairs contribute eigenvalue `−Eₖ + Eₖ
+   = 0`), and the Page–Wootters state is built term-by-term to be annihilated.
+   The original "kernel" tests could not fail for any input — a tautology. The
+   crate now (a) relabels those as *consistency checks* and (b) adds a
+   **discriminating emptiness test** (`generic_clock_yields_empty_physical_space`):
+   for a generic clock Hamiltonian whose spectrum is not `−spectrum(H_R)`, `Ĵ`
+   has **no** eigenvalue within `1e-9` of zero — the physical Hilbert space is
+   empty. That emptiness, not the kernel's existence, is the falsifiable content.
+
+2. **Entropic time here is a β-sweep, not closed-system irreversible dynamics.**
+   The `entropic` module sweeps the inverse temperature `β` of a Gibbs ensemble
+   `ρ = e^{−βH}/Z` and reads off `S(β)`. It is a one-parameter equilibrium family
+   — an *analogue of* a cold-atom mini-universe, not a simulation of one; there is
+   no hidden sector exchanging entropy in real time. The flagship test was
+   tautological (it checked `τ = (S−S₀)/k` arithmetic, true by definition). The
+   crate now keeps that as the *reparametrization-formula* test and adds a
+   discriminating one that verifies the clock rate against the **independently
+   measured** entropy production `dS/dβ` of the real thermal state, and that the
+   entropy curve is genuinely non-trivial (varying, correctly signed).
+
+3. **The benchmark is a coverage-gap demo, not a competitive win.** On the
+   bundled synthetic failing-workflow trace, the wall / step / token clocks give
+   `0` early-warning lead — but that is because they emit a *constant* per-step
+   rate (zero baseline variance ⇒ a `mean + k·σ` alarm cannot fire by
+   construction), i.e. they are strawmen, not measured losers. The crate now adds
+   a **fair baseline** — `WindowedDeltaClock`, a rolling-window z-score
+   change-point detector on a single cheap scalar (token-delta or belief-shift).
+   On the designed trace this fair baseline **fires at least as early as the
+   agentic clock** (belief-shift windowed lead ≈ 60 vs agentic ≈ 40; token-delta
+   windowed trips early on quantization noise). The honest conclusion: **the
+   agentic clock does not beat a fair baseline on synthetic data.** The 2.8×/
+   ~40-step figures are properties of the *constructed* trace (the lead scales
+   with how far the structural precursor was planted ahead of the entropy/failure
+   signal), not a measured competitive advantage. A genuine head-to-head — where
+   the agentic clock's multi-channel composition is expected to win precisely when
+   *no single scalar* carries the signal — requires a **real Ruflo trace vs the
+   fair windowed baseline**, which is **M3 future work** (and is the gate in the
+   Acceptance criteria above).
+
+4. **Page–Wootters scope.** The construction is valid for real-symmetric
+   Hamiltonians; the post-conditioning normalization equals the Born-rule
+   partial-trace weight only for *pure* global states; and it recovers
+   *single-time* conditional states correctly (Page–Wootters 1983; Giovannetti–
+   Lloyd–Maccone 2015) but does **not** address Kuchař's two-time-correlation
+   objection (Kuchař 1992) — multi-time correlators are out of scope for v1.
+
+### Prior art and what is actually new
+
+The agentic-drift detection problem is closest to **concept-drift detection in
+process mining**: ADWIN (Bifet & Gavaldà 2007) and, specifically for process
+behavior, Ostovar et al., *"Detecting Drift from Event Streams of Unpredictable
+Business Processes"* / "concept drift in process mining" (2016), which run
+windowed statistical tests over event streams to flag behavioral change. The fair
+`WindowedDeltaClock` baseline is squarely in that family, and on synthetic data it
+is competitive — as it should be. **What is new here is not the change-point
+detector** but the *physics-grounded composite framing*: treating the agent's
+movement as a **state-manifold arc length** over a weighted multi-channel state
+(belief/memory/retrieval/goal/contradiction/plan, plus structural proper time and
+causal/relational clocks) and exposing it as a **single unified runtime primitive**
+that is simultaneously a control signal, an evaluation signal, and a
+memory-indexing signal. The bet (unproven until M3) is that this composite beats
+single-scalar windowed detectors exactly when no individual observable carries the
+precursor.
 
 ## Non-goals
 

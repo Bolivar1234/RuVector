@@ -1,14 +1,23 @@
-//! Entropic time — the cold-atom toy-universe clock.
+//! Entropic time — a β-swept Gibbs-ensemble clock.
 //!
-//! When a closed system is split into an observed sector and a hidden sector
-//! exchanging entropy, the *change in entropy* of the observed sector defines
-//! an internal time
+//! The internal time of an observed sector can be defined from its *change in
+//! entropy*:
 //!
 //! ```text
 //!   τ_S = (S(λ) - S_0) / k
 //! ```
 //!
-//! where `λ` is a lab control parameter (e.g. the barrier between sectors).
+//! where `λ` is a lab control parameter. **What this module actually models** is
+//! a *temperature sweep* of a Gibbs (thermal) ensemble: `λ` is interpreted as the
+//! inverse temperature `β`, and `S(λ)` is the von Neumann entropy of `ρ = e^{−βH}/Z`.
+//! This is an equilibrium one-parameter family, **not** closed-system irreversible
+//! dynamics — there is no hidden sector exchanging entropy in real time here. It
+//! is the simplest honest demonstrator of the entropic-time *reparametrization*:
+//! it shows how `τ_S` tracks the entropy curve, and how the "speed of internal
+//! time" `dτ_S/dλ` follows entropy production along the sweep. (A genuine
+//! cold-atom mini-universe with irreversible entropy exchange — Barontini et al.,
+//! *Phys. Rev. Research* 2026 — is the physical system this is an analogue *of*,
+//! not what is simulated.)
 //! Derivatives reparametrize as
 //!
 //! ```text
@@ -89,9 +98,11 @@ pub fn gibbs_entropy(h: &RealMatrix, beta: f64) -> f64 {
     entropy_from_spectrum(&probs)
 }
 
-/// Sweep a control parameter `λ ∈ [lo, hi]` (interpreted as inverse temperature),
-/// returning `(λ, S(λ), τ_S(λ))` triples. Demonstrates how the internal clock
-/// runs fast where entropy changes quickly and stalls where it saturates.
+/// Sweep the inverse temperature `λ = β ∈ [lo, hi]` over the Gibbs ensemble,
+/// returning `(λ, S(λ), τ_S(λ))` triples. This is a β-sweep of an equilibrium
+/// state (not closed-system irreversible dynamics); it demonstrates how the
+/// internal clock runs fast where the entropy curve changes quickly and stalls
+/// where it saturates.
 pub fn entropic_time_sweep(
     h: &RealMatrix,
     clock: &EntropicClock,
@@ -140,8 +151,95 @@ mod tests {
     }
 
     #[test]
-    fn tau_tracks_entropy() {
+    fn tau_reparametrization_formula_is_exact() {
+        // Tests the DEFINITION τ_S = (S − S₀)/k as an arithmetic identity. This
+        // is true by construction (it is just the formula evaluated) and cannot
+        // discriminate a correct entropy curve from an incorrect one — it only
+        // checks the reparametrization arithmetic. The discriminating test that
+        // ties the clock to the *measured* entropy curve is below.
         let clock = EntropicClock::new(0.5, 2.0);
         assert!((clock.tau(2.5) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn internal_time_spacing_tracks_measured_entropy_production() {
+        // DISCRIMINATING TEST: verify the reparametrization against the REAL
+        // Gibbs entropy curve S(λ), not against the τ = (S − S₀)/k definition.
+        //
+        // The independence is in the *source* of dS/dλ. The clock's τ values are
+        // one object; the entropy production is measured separately by finite-
+        // differencing `gibbs_entropy(H, β)` — the physical entropy of the actual
+        // thermal state ρ = e^{−βH}/Z — at λ points the clock never stored. We
+        // then assert:
+        //
+        //   1. the clock rate (dτ/dλ from its τ samples) equals rate(measured
+        //      dS/dλ) — i.e. it tracks the *measured* entropy curve;
+        //   2. that entropy curve is physically non-trivial: monotone-rising with
+        //      temperature (β decreasing ⇒ S increasing), with a varying slope,
+        //      not a constant. A constant/flat/anti-correlated S(λ) would fail.
+        //
+        // A wrong entropy implementation (e.g. one that ignored the spectrum, or
+        // returned a constant) would still satisfy the pure-arithmetic
+        // `tau_reparametrization_formula_is_exact` test but would FAIL this one,
+        // because here dS/dλ is recomputed from the real thermal state.
+        let h = RealMatrix::diag(&[0.0, 1.0, 2.0, 3.0]);
+        let k = 1.7;
+        let clock = EntropicClock::new(0.0, k);
+        let (lo, hi, steps) = (0.2_f64, 4.0_f64, 41);
+        let sweep = entropic_time_sweep(&h, &clock, lo, hi, steps);
+        let dlam = (hi - lo) / (steps - 1) as f64;
+        let eps = dlam / 4.0; // independent probe step for measuring dS/dλ
+
+        // The sweep runs lo→hi in β, i.e. hot→cold, so S should DECREASE along it.
+        let s_first = sweep.first().unwrap().1;
+        let s_last = sweep.last().unwrap().1;
+        assert!(
+            s_first - s_last > 0.1,
+            "entropy must fall appreciably as β rises (hot→cold) for the test to bite"
+        );
+
+        let mut slopes = Vec::new();
+        let mut checked = 0;
+        for i in 1..sweep.len() - 1 {
+            let lam = sweep[i].0;
+            let tau_next = sweep[i + 1].2;
+            let tau_prev = sweep[i - 1].2;
+
+            // (1) Internal-time spacing per unit λ from the clock's τ samples.
+            let dtau_dlam_from_clock = (tau_next - tau_prev) / (2.0 * dlam);
+
+            // (2) Entropy production measured INDEPENDENTLY from the physical
+            // thermal state at fresh λ points (not the stored sweep values).
+            let s_plus = gibbs_entropy(&h, lam + eps);
+            let s_minus = gibbs_entropy(&h, lam - eps);
+            let ds_dlam_measured = (s_plus - s_minus) / (2.0 * eps);
+            let rate_from_entropy = clock.rate(ds_dlam_measured);
+
+            // The clock rate tracks the measured entropy production. Both are
+            // centered differences of the same smooth curve at slightly different
+            // step sizes, so they agree to finite-difference order.
+            let tol = 5e-3 + 0.02 * rate_from_entropy.abs();
+            assert!(
+                (dtau_dlam_from_clock - rate_from_entropy).abs() < tol,
+                "at λ={lam:.3}: dτ/dλ from clock = {dtau_dlam_from_clock:.5}, \
+                 rate(independently-measured dS/dλ) = {rate_from_entropy:.5}"
+            );
+            slopes.push(ds_dlam_measured);
+            checked += 1;
+        }
+        assert!(checked > 30, "should have checked the bulk of the sweep");
+
+        // The entropy curve is genuinely non-trivial (varying slope), so the
+        // clock's speed actually changes along the sweep — it is not a constant
+        // reparametrization. Min and max measured slopes differ substantially.
+        let smin = slopes.iter().cloned().fold(f64::INFINITY, f64::min);
+        let smax = slopes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (smax - smin).abs() > 0.05,
+            "entropy production must vary along the sweep (clock speeds up/slows down): \
+             slope range [{smin:.4}, {smax:.4}]"
+        );
+        // And entropy production is negative throughout (S falls as β rises).
+        assert!(smax < 0.0, "dS/dβ must be negative across the sweep");
     }
 }

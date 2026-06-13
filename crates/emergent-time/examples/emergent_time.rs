@@ -170,18 +170,68 @@ fn main() {
         tr.thrash_onset,
         tr.fail_index
     );
-    println!("    {:<14} {:>12}", "clock", "warn-lead");
-    let clocks: [&dyn agentic_time::AgentClock; 4] = [
-        &agentic_time::AgentWallClock,
-        &agentic_time::StepCountClock,
-        &agentic_time::TokenCountClock,
-        &agentic,
+    // Fair baselines: windowed z-score change-point detectors (non-strawman).
+    let token_base = agentic_time::WindowedDeltaClock::token_delta(abw);
+    let belief_base = agentic_time::WindowedDeltaClock::belief_shift(abw);
+    println!("    {:<26} {:>12}", "clock", "warn-lead");
+    let clocks: [(&str, &dyn agentic_time::AgentClock); 6] = [
+        ("wall (constant-rate)", &agentic_time::AgentWallClock),
+        ("step-count (constant-rate)", &agentic_time::StepCountClock),
+        ("token-count (constant-rate)", &agentic_time::TokenCountClock),
+        ("windowed-z[token-delta] FAIR", &token_base),
+        ("windowed-z[belief] FAIR", &belief_base),
+        ("agentic (multi-channel)", &agentic),
     ];
-    for cl in clocks {
+    for (label, cl) in clocks {
         let lead =
             agentic_time::early_warning_lead(cl, &tr.states, tr.fail_index, abw, 4.0);
-        println!("    {:<14} {:>12}", cl.name(), lead);
+        println!("    {label:<26} {lead:>12}");
     }
+    println!(
+        "  NOTE: wall/step/token are constant-rate clocks (zero baseline variance ->"
+    );
+    println!(
+        "        their alarm CANNOT fire); their 0 lead is a coverage gap, not a"
+    );
+    println!(
+        "        measured loss. The windowed-z detectors ARE fair competitors and"
+    );
+    println!(
+        "        on THIS designed trace they fire at least as early as the agentic"
+    );
+    println!(
+        "        clock: the belief-shift detector catches the planted structural"
+    );
+    println!(
+        "        signal (a single-channel z-score already sees it), and the"
+    );
+    println!(
+        "        token-delta detector trips early on quantization noise (tokens are"
+    );
+    println!(
+        "        a near-constant integer stream) -- reported, not hidden."
+    );
+    println!(
+        "  HONEST FRAMING: the agentic clock does NOT beat a fair baseline on this"
+    );
+    println!(
+        "        synthetic trace. The 40-step lead is a property of how far the"
+    );
+    println!(
+        "        structural precursor was planted ahead of failure, NOT a measured"
+    );
+    println!(
+        "        competitive win. The agentic clock's real value -- composing many"
+    );
+    println!(
+        "        weak channels when no single scalar carries the signal -- can only"
+    );
+    println!(
+        "        be substantiated on a REAL trace vs this fair baseline (M3 work;"
+    );
+    println!(
+        "        see ADR-251 'Honest limitations')."
+    );
     // Live health verdict at a window straddling the thrash onset.
     let th = agentic_time::HealthThresholds::default();
     let w0 = tr.thrash_onset.saturating_sub(2);

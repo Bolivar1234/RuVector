@@ -27,6 +27,33 @@
 //! ```
 //!
 //! Evolution is what the rest sector *looks like* conditioned on the clock.
+//!
+//! ## Scope and honest limitations
+//!
+//! 1. **Real-symmetric Hamiltonians only.** This construction (and the whole
+//!    numerical core it rests on) assumes `H_R` is real symmetric: it is
+//!    diagonalized by the real Jacobi eigensolver and the clock is built from its
+//!    real spectrum. Complex-Hermitian `H_R` is out of scope for v1.
+//!
+//! 2. **Born-rule weighting holds only for pure global states.** The
+//!    post-conditioning normalization performed in
+//!    [`PageWootters::conditional_state`] reproduces the Born-rule partial-trace
+//!    weight `‖⟨t|Ψ⟩‖²` **only because the global state `|Ψ⟩` is pure**. For a
+//!    mixed global state the correct conditional object is a conditioned density
+//!    operator, and a single normalized vector would not capture it. Do not read
+//!    the "fidelity = 1.0" result as holding for mixed `|Ψ⟩`.
+//!
+//! 3. **Single-time conditional states only — Kuchař's objection is out of
+//!    scope.** What is recovered here is the *single-time* conditional state
+//!    `ρ_R(t)`, correctly reproducing Schrödinger evolution (Page & Wootters
+//!    1983; Giovannetti, Lloyd & Maccone, *Phys. Rev. D* 91, 084041, 2015). This
+//!    construction does **not** address Kuchař's two-time-correlation objection
+//!    (Kuchař 1992): naive conditioning gives the wrong propagator for
+//!    *two-time* correlation functions `⟨t₂|…|t₁⟩` without the conditional-
+//!    probability (or evolving-constants) machinery. v1 deliberately scopes to
+//!    single-time conditioning; multi-time correlators are future work. So
+//!    "evolution emerges, fidelity 1.0" means *single-time evolution is exactly
+//!    reproduced*, nothing stronger.
 
 use crate::complex::{normalized, Complex};
 use crate::complex_matrix::schrodinger_propagator;

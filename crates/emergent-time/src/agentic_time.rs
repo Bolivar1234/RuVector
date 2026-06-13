@@ -115,6 +115,115 @@ impl AgentClock for TokenCountClock {
     }
 }
 
+/// A **fair, non-strawman baseline**: a rolling-window change-point detector on a
+/// single cheap scalar observable (no physics decomposition, no embeddings).
+///
+/// The wall / step / token clocks emit a *constant* per-step rate, so their
+/// baseline standard deviation is zero and the `mean + k·σ` alarm can never fire
+/// — they are strawmen that cannot alarm by construction. This clock is the
+/// honest competitor: it computes, at each step, the absolute deviation of the
+/// observable from the trailing window mean, normalized by the window's standard
+/// deviation (a z-score / mean+k·std change-point detector). It is exactly the
+/// kind of cheap detector a practitioner would actually deploy on a single signal
+/// (token-delta by default) before reaching for state embeddings, so beating it
+/// — or merely matching it — is the meaningful comparison.
+///
+/// By default the observable is **token-delta** (the strongest plausible cheap
+/// signal that is always available without embeddings). The detector is the same
+/// family as ADWIN / process-mining concept-drift detectors (Ostovar et al.,
+/// 2016): windowed statistics over a scalar stream.
+pub struct WindowedDeltaClock {
+    /// Trailing window length used to estimate the running mean/std.
+    pub window: usize,
+    /// Extracts the scalar observable for a transition `(prev, cur)`.
+    pub observable: fn(&AgentState, &AgentState) -> f64,
+    /// Human-readable name of the observable (for reporting).
+    pub observable_name: &'static str,
+    /// Variance floor (added to the window std) so a near-constant / quantized
+    /// observable does not make the z-score blow up to ∞ and fire spuriously
+    /// early. This is standard practice for deployed z-score change-point
+    /// detectors and is what keeps the baseline *fair* rather than degenerate.
+    pub std_floor: f64,
+}
+
+impl WindowedDeltaClock {
+    /// The default fair baseline: a windowed z-score on **token-delta**. The std
+    /// floor is scaled to the token-delta magnitude (~1 token of quantization
+    /// noise) so the near-constant integer stream does not trip a spurious ∞
+    /// z-score.
+    pub fn token_delta(window: usize) -> Self {
+        WindowedDeltaClock {
+            window,
+            observable: |p, c| c.tokens.saturating_sub(p.tokens) as f64,
+            observable_name: "token-delta",
+            std_floor: 1.0,
+        }
+    }
+
+    /// A fair baseline on the **belief-shift** observable (the cheapest structural
+    /// signal the agentic clock also sees), for an apples-to-apples comparison on
+    /// the same input the physics clock uses.
+    pub fn belief_shift(window: usize) -> Self {
+        WindowedDeltaClock {
+            window,
+            observable: |p, c| l2(&p.belief, &c.belief),
+            observable_name: "belief-shift",
+            std_floor: 1e-6,
+        }
+    }
+
+    /// The raw observable series for a trace (index 0 is a padded 0.0 to align
+    /// with the per-transition increment convention).
+    fn observable_series(&self, trace: &[AgentState]) -> Vec<f64> {
+        let mut out = vec![0.0];
+        for i in 1..trace.len() {
+            out.push((self.observable)(&trace[i - 1], &trace[i]));
+        }
+        out
+    }
+}
+
+impl AgentClock for WindowedDeltaClock {
+    fn name(&self) -> &str {
+        "windowed-baseline"
+    }
+
+    /// The per-step "tick" is the rolling z-score magnitude of the observable:
+    /// how many trailing-window standard deviations the current observable sits
+    /// from the trailing-window mean. This is a true change-point signal, so its
+    /// baseline variance is non-zero and the `mean + k·σ` alarm can actually fire
+    /// — unlike the constant-rate strawmen.
+    fn tick(&self, prev: &AgentState, cur: &AgentState) -> f64 {
+        // A single-transition tick has no trailing window context; the windowed
+        // z-score is only meaningful via `increments`. Fall back to the raw
+        // observable magnitude so a standalone tick is still well defined.
+        (self.observable)(prev, cur).abs()
+    }
+
+    fn increments(&self, trace: &[AgentState]) -> Vec<f64> {
+        let series = self.observable_series(trace);
+        let w = self.window.max(2);
+        let mut out = vec![0.0; trace.len()];
+        for i in 1..trace.len() {
+            // Trailing window of observables strictly before i.
+            let start = i.saturating_sub(w);
+            let win = &series[start..i];
+            if win.len() < 2 {
+                out[i] = 0.0;
+                continue;
+            }
+            let mean = win.iter().sum::<f64>() / win.len() as f64;
+            let var = win.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / win.len() as f64;
+            // Apply the variance floor so a near-constant / quantized observable
+            // can't produce a spurious ∞ z-score and an artificially early alarm.
+            let std = var.sqrt().max(self.std_floor);
+            let dev = (series[i] - mean).abs();
+            out[i] = dev / std;
+        }
+        out
+    }
+}
+
 /// Weights for the six agentic-time channels.
 #[derive(Clone, Copy, Debug)]
 pub struct AgenticWeights {
@@ -184,22 +293,51 @@ pub enum TickClass {
 /// An explainable agentic-time tick: the magnitude, its class, a human-readable
 /// reason, and the per-channel weighted contributions (ADR-251 invariant §31.5:
 /// every tick must have an auditable reason).
+///
+/// ## Contract: `delta` is post-floor, per-channel fields are pre-floor (raw)
+///
+/// The per-channel fields (`belief`, `memory`, `retrieval`, `goal_graph`,
+/// `contradiction`, `plan`) report the **raw weighted contribution** of each
+/// channel *before* the noise floor is subtracted. `delta` is the **post-floor
+/// magnitude**, `delta = max(0, Σ channels − noise_floor)`. Therefore:
+///
+/// * the identity `delta == Σ channels` holds **only when `noise_floor == 0`**;
+/// * with a positive floor and `Σ channels > noise_floor`, `delta` is strictly
+///   smaller than `Σ channels` by exactly `noise_floor`;
+/// * with `Σ channels ≤ noise_floor`, `delta == 0` while the channels stay
+///   non-zero (the movement existed but was below the reporting threshold).
+///
+/// This is deliberate: the per-channel attribution explains *what moved* (an
+/// audit/diagnostic view of raw movement), while `delta` is the *reportable*
+/// internal-time increment after jitter suppression. Consumers that need the
+/// pre-floor total should sum the channels; consumers that need the emitted
+/// increment should read `delta`.
 #[derive(Clone, Debug)]
 pub struct Tick {
+    /// Post-floor internal-time magnitude: `max(0, Σ channels − noise_floor)`.
     pub delta: f64,
     pub class: TickClass,
     pub reason: String,
+    /// Raw (pre-floor) weighted belief contribution.
     pub belief: f64,
+    /// Raw (pre-floor) weighted memory contribution.
     pub memory: f64,
+    /// Raw (pre-floor) weighted retrieval contribution.
     pub retrieval: f64,
+    /// Raw (pre-floor) weighted goal-graph contribution.
     pub goal_graph: f64,
+    /// Raw (pre-floor) weighted contradiction contribution.
     pub contradiction: f64,
+    /// Raw (pre-floor) weighted plan contribution.
     pub plan: f64,
 }
 
 impl AgenticTime {
     /// Compute an explainable tick for a transition. `noise_floor` suppresses
-    /// jitter; contributions are the weighted per-channel movements.
+    /// jitter; the returned per-channel contributions are the **raw (pre-floor)**
+    /// weighted movements, while `Tick::delta` is the **post-floor** magnitude
+    /// `max(0, Σ channels − noise_floor)`. See [`Tick`] for the full contract:
+    /// the identity `delta == Σ channels` holds only when `noise_floor == 0`.
     pub fn explain(&self, p: &AgentState, c: &AgentState, noise_floor: f64) -> Tick {
         let w = &self.weights;
         let belief = w.belief * l2(&p.belief, &c.belief);
@@ -500,7 +638,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agentic_time_warns_earliest_of_four_clocks() {
+    fn agentic_time_beats_constant_rate_strawmen() {
+        // This test documents the COVERAGE GAP the constant-rate clocks have on
+        // the designed trace — it is NOT a competitive win claim. The wall / step
+        // / token clocks emit a constant per-step rate, so their `mean + k·σ`
+        // alarm cannot fire on a trace where the planted signal is structural,
+        // not chronological. The fair baseline is tested separately below.
         let tr = generate_failing_trace(0xA9E1);
         let agentic = AgenticTime::new(AgenticWeights::default());
         let bw = tr.baseline_window;
@@ -510,18 +653,76 @@ mod tests {
         let lead_token = early_warning_lead(&TokenCountClock, &tr.states, tr.fail_index, bw, 4.0);
         let lead_agentic = early_warning_lead(&agentic, &tr.states, tr.fail_index, bw, 4.0);
 
-        // The three dumb clocks are blind to the internal collapse.
+        // The three constant-rate clocks are blind to the internal collapse —
+        // by construction, not because the comparison was rigged: a constant
+        // signal has zero baseline variance.
         assert_eq!(lead_wall, 0);
         assert_eq!(lead_step, 0);
         assert_eq!(lead_token, 0);
-        // Agentic time flags it well before the visible failure.
-        assert!(
-            lead_agentic >= 2 * (lead_token.max(lead_step).max(lead_wall) + 1),
-            "agentic lead {lead_agentic} should be >= 2x the best dumb clock"
-        );
-        // It should fire right around the thrash onset.
+        // Agentic time flags it before the visible failure.
+        assert!(lead_agentic > 0, "agentic clock must fire before failure");
+        // It should fire right around the thrash onset (the planted structural
+        // precursor). The lead magnitude is a PROPERTY OF THE CONSTRUCTED TRACE
+        // (how far the precursor precedes the failure index), not a measured
+        // competitive margin.
         let alarm = alarm_step(&agentic, &tr.states, bw, 4.0).unwrap();
         assert!(alarm <= tr.thrash_onset + 2);
+    }
+
+    #[test]
+    fn fair_windowed_baseline_is_a_real_competitor_not_a_strawman() {
+        // The fair baseline (windowed z-score change-point detector) is NOT a
+        // strawman: its baseline variance is non-zero, so its alarm CAN fire —
+        // and on this designed trace it DOES, at least as early as the agentic
+        // clock. This is the honest, credibility-strengthening result the M1
+        // hardening is meant to surface: the agentic clock does NOT beat a fair
+        // cheap baseline on this synthetic trace. Any genuine competitive claim
+        // must come from a REAL trace (M3), not this constructed one.
+        //
+        // Falsifiable facts asserted here:
+        //   1. both fair windowed detectors actually FIRE (non-strawman);
+        //   2. the belief-shift detector catches the planted structural signal
+        //      with a lead at least as large as the agentic clock's — so the
+        //      agentic clock has NO measured advantage over it here;
+        //   3. the token-delta detector also fires early, but as a quantization-
+        //      noise artifact (tokens are a near-constant integer stream), which
+        //      we document rather than hide — a naive z-score on a quantized
+        //      near-constant signal trips on jitter, it is not "detecting" the
+        //      structural drift.
+        let tr = generate_failing_trace(0xA9E1);
+        let bw = tr.baseline_window;
+        let agentic = AgenticTime::new(AgenticWeights::default());
+
+        let token_base = WindowedDeltaClock::token_delta(bw);
+        let belief_base = WindowedDeltaClock::belief_shift(bw);
+
+        let lead_agentic =
+            early_warning_lead(&agentic, &tr.states, tr.fail_index, bw, 4.0);
+        let lead_token_base =
+            early_warning_lead(&token_base, &tr.states, tr.fail_index, bw, 4.0);
+        let lead_belief_base =
+            early_warning_lead(&belief_base, &tr.states, tr.fail_index, bw, 4.0);
+
+        // (1) Both fair detectors fire — they are real competitors, not strawmen.
+        assert!(
+            lead_token_base > 0 && lead_belief_base > 0,
+            "fair windowed baselines must be able to fire (token={lead_token_base}, \
+             belief={lead_belief_base})"
+        );
+
+        // (2) The belief-shift fair baseline matches or beats the agentic clock
+        // on this designed trace: the agentic clock has NO measured edge here.
+        // (We assert ≥ to lock in the honest "no competitive win" conclusion; if
+        // a future change made the agentic clock beat it on THIS trace, that
+        // would be suspicious — the designed trace plants a single structural
+        // precursor that a one-channel detector already sees.)
+        assert!(
+            lead_belief_base >= lead_agentic,
+            "on this DESIGNED trace the fair belief-shift baseline (lead \
+             {lead_belief_base}) should be at least as early as the agentic clock \
+             (lead {lead_agentic}); the agentic clock is not supposed to beat a \
+             fair baseline on synthetic data — that requires a real trace (M3)"
+        );
     }
 
     #[test]
@@ -561,7 +762,9 @@ mod tests {
             tick.class,
             TickClass::Progress | TickClass::Learning | TickClass::Contradiction | TickClass::Collapse
         ));
-        // Total delta equals the sum of channel contributions (no noise floor).
+        // With noise_floor == 0, the post-floor delta equals the raw channel
+        // sum exactly (this is the *only* floor value for which the identity
+        // holds — see the noise-floor test below).
         let sum = tick.belief
             + tick.memory
             + tick.retrieval
@@ -569,6 +772,58 @@ mod tests {
             + tick.contradiction
             + tick.plan;
         assert!((tick.delta - sum).abs() < 1e-9);
+    }
+
+    #[test]
+    fn explain_delta_is_post_floor_channels_are_pre_floor() {
+        // Regression for the noise-floor contract: per-channel fields are RAW
+        // (pre-floor) weighted contributions, while `delta` is post-floor. The
+        // identity delta == Σ channels must therefore FAIL by exactly the floor
+        // for any noise_floor > 0 when the movement exceeds the floor.
+        let tr = generate_failing_trace(0xA9E1);
+        let agentic = AgenticTime::new(AgenticWeights::default());
+        let o = tr.thrash_onset;
+
+        let floor = 0.1;
+        let tick = agentic.explain(&tr.states[o - 1], &tr.states[o], floor);
+
+        let sum = tick.belief
+            + tick.memory
+            + tick.retrieval
+            + tick.goal_graph
+            + tick.contradiction
+            + tick.plan;
+
+        // The thrash-onset transition is large, so sum > floor and delta is
+        // strictly *less* than the raw channel sum by exactly the floor.
+        assert!(sum > floor, "precondition: movement should exceed the floor");
+        let expected = (sum - floor).max(0.0);
+        assert!(
+            (tick.delta - expected).abs() < 1e-9,
+            "delta {} should equal max(0, sum {} - floor {}) = {}",
+            tick.delta,
+            sum,
+            floor,
+            expected
+        );
+        // And it must NOT equal the raw sum (the bug was reporting them equal).
+        assert!(
+            (tick.delta - sum).abs() > floor / 2.0,
+            "delta must differ from the raw channel sum by ~the floor"
+        );
+
+        // When the movement is below the floor, delta is clamped to 0 while the
+        // channels stay non-zero (movement existed, just below the threshold).
+        let big_floor = sum + 1.0;
+        let clamped = agentic.explain(&tr.states[o - 1], &tr.states[o], big_floor);
+        assert_eq!(clamped.delta, 0.0);
+        let clamped_sum = clamped.belief
+            + clamped.memory
+            + clamped.retrieval
+            + clamped.goal_graph
+            + clamped.contradiction
+            + clamped.plan;
+        assert!(clamped_sum > 0.0, "raw channels stay non-zero under a high floor");
     }
 
     #[test]
