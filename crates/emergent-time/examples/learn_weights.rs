@@ -34,7 +34,7 @@ fn report(mode: FeatureMode, train: &[LabeledTrace], val: &[LabeledTrace], horiz
     let (xtr, ytr) = build_dataset(train, horizon, mode);
     let (xva, yva) = build_dataset(val, horizon, mode);
 
-    let model = LearnedWeights::fit(&xtr, &ytr, mode, 800, 0.3, 1e-3);
+    let model = LearnedWeights::fit(&xtr, &ytr, mode.dim(), 800, 0.3, 1e-3);
     let learned: Vec<f64> = xva.iter().map(|r| model.predict(r)).collect();
     let learned_auc = auc(&learned, &yva);
 

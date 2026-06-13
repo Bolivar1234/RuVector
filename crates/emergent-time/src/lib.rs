@@ -53,6 +53,7 @@ pub mod structural_clock;
 pub mod thermal;
 pub mod weight_learning;
 pub mod wheeler_dewitt;
+pub mod witness;
 
 // Convenience re-exports of the most-used types.
 pub use complex::Complex;

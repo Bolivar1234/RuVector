@@ -102,6 +102,16 @@ impl Rng {
         let v = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
         ((v >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
     }
+    /// Uniform in (0, 1].
+    fn unit01(&mut self) -> f64 {
+        (self.unit() + 1.0) * 0.5 + 1e-12
+    }
+    /// Standard normal via Box–Muller.
+    fn gaussian(&mut self) -> f64 {
+        let u1 = self.unit01();
+        let u2 = self.unit01();
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    }
 }
 
 /// A labelled trace: the agent states plus the failure step (if any).
@@ -227,12 +237,15 @@ pub fn build_dataset(
 /// A fitted logistic-regression scorer over standardized channel features.
 #[derive(Clone, Debug)]
 pub struct LearnedWeights {
-    pub mode: FeatureMode,
+    /// Feature dimensionality.
+    pub dim: usize,
     /// Coefficients in standardized-feature space (interpretable importances).
     pub coef: Vec<f64>,
     pub bias: f64,
-    mean: Vec<f64>,
-    std: Vec<f64>,
+    /// Per-feature training mean (standardization).
+    pub mean: Vec<f64>,
+    /// Per-feature training std (standardization).
+    pub std: Vec<f64>,
 }
 
 fn sigmoid(z: f64) -> f64 {
@@ -240,16 +253,16 @@ fn sigmoid(z: f64) -> f64 {
 }
 
 impl LearnedWeights {
-    /// Fit by L2-regularized logistic regression (batch GD).
+    /// Fit by L2-regularized logistic regression (batch GD) over `dim` features.
     pub fn fit(
         x: &[Vec<f64>],
         y: &[f64],
-        mode: FeatureMode,
+        dim: usize,
         iters: usize,
         lr: f64,
         l2_reg: f64,
     ) -> LearnedWeights {
-        let d = mode.dim();
+        let d = dim;
         let n = x.len().max(1);
         // Standardize columns.
         let mut mean = vec![0.0; d];
@@ -298,7 +311,7 @@ impl LearnedWeights {
         }
 
         LearnedWeights {
-            mode,
+            dim,
             coef,
             bias,
             mean,
@@ -308,7 +321,7 @@ impl LearnedWeights {
 
     /// Predicted failure-approach probability for a raw feature vector.
     pub fn predict(&self, features: &[f64]) -> f64 {
-        let d = self.mode.dim();
+        let d = self.dim;
         let mut acc = self.bias;
         for j in 0..d {
             acc += self.coef[j] * (features[j] - self.mean[j]) / self.std[j];
@@ -321,6 +334,50 @@ impl LearnedWeights {
     pub fn clock_weights(&self) -> Vec<f64> {
         self.coef.iter().map(|c| c.max(0.0)).collect()
     }
+
+    /// Reconstruct a model from persisted parameters (used when loading a sealed
+    /// artifact for verification).
+    pub fn from_params(
+        dim: usize,
+        coef: Vec<f64>,
+        bias: f64,
+        mean: Vec<f64>,
+        std: Vec<f64>,
+    ) -> LearnedWeights {
+        LearnedWeights {
+            dim,
+            coef,
+            bias,
+            mean,
+            std,
+        }
+    }
+}
+
+/// A controlled **diffuse weak-signal** benchmark: `dim` Gaussian features where
+/// the positive class shifts each feature `j` by `mus[j]` standard deviations.
+/// Some channels carry weak signal, some are pure noise (`mu = 0`). This is the
+/// regime the composition thesis targets — no single channel separates the
+/// classes well, but their *weighted* combination does, and because the per-
+/// channel strengths differ, the optimal weights are non-uniform (so learning
+/// beats an equal-weight guess too).
+///
+/// Returns `(X, y)` with `n_per_class` positives and `n_per_class` negatives.
+/// Deterministic in `seed`. This is explicitly a synthetic signal-composition
+/// benchmark, NOT agent traces — it proves the *learner* works when its
+/// assumption (distributed weak signal of varying strength) holds.
+pub fn diffuse_dataset(n_per_class: usize, mus: &[f64], seed: u64) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let d = mus.len();
+    let mut rng = Rng::new(seed);
+    let mut x = Vec::with_capacity(2 * n_per_class);
+    let mut y = Vec::with_capacity(2 * n_per_class);
+    for k in 0..2 * n_per_class {
+        let label = if k % 2 == 0 { 1.0 } else { 0.0 };
+        let row: Vec<f64> = (0..d).map(|j| label * mus[j] + rng.gaussian()).collect();
+        x.push(row);
+        y.push(label);
+    }
+    (x, y)
 }
 
 /// Rank-based ROC AUC (Mann–Whitney). 0.5 = chance, 1.0 = perfect ranking.
@@ -407,7 +464,7 @@ mod tests {
         let (xtr, ytr) = build_dataset(&train, horizon, mode);
         let (xva, yva) = build_dataset(&val, horizon, mode);
 
-        let model = LearnedWeights::fit(&xtr, &ytr, mode, 600, 0.3, 1e-3);
+        let model = LearnedWeights::fit(&xtr, &ytr, mode.dim(), 600, 0.3, 1e-3);
         let scores: Vec<f64> = xva.iter().map(|r| model.predict(r)).collect();
         let learned_auc = auc(&scores, &yva);
 
@@ -430,7 +487,7 @@ mod tests {
         let (xtr, ytr) = build_dataset(&train, horizon, mode);
         let (xva, yva) = build_dataset(&val, horizon, mode);
 
-        let model = LearnedWeights::fit(&xtr, &ytr, mode, 600, 0.3, 1e-3);
+        let model = LearnedWeights::fit(&xtr, &ytr, mode.dim(), 600, 0.3, 1e-3);
         let learned: Vec<f64> = xva.iter().map(|r| model.predict(r)).collect();
         let learned_auc = auc(&learned, &yva);
 
@@ -461,7 +518,7 @@ mod tests {
         let (xtr, ytr) = build_dataset(&train, 12, mode);
         let (xva, yva) = build_dataset(&val, 12, mode);
 
-        let model = LearnedWeights::fit(&xtr, &ytr, mode, 600, 0.3, 1e-3);
+        let model = LearnedWeights::fit(&xtr, &ytr, mode.dim(), 600, 0.3, 1e-3);
         let learned_auc = auc(
             &xva.iter().map(|r| model.predict(r)).collect::<Vec<_>>(),
             &yva,
@@ -481,7 +538,42 @@ mod tests {
     fn clock_weights_are_non_negative() {
         let (train, _val) = split_traces(20, 1.0);
         let (xtr, ytr) = build_dataset(&train, 12, FeatureMode::Full);
-        let model = LearnedWeights::fit(&xtr, &ytr, FeatureMode::Full, 300, 0.3, 1e-3);
+        let model = LearnedWeights::fit(&xtr, &ytr, FeatureMode::Full.dim(), 300, 0.3, 1e-3);
         assert!(model.clock_weights().iter().all(|&w| w >= 0.0));
+    }
+
+    /// In the regime the composition thesis actually targets — signal spread
+    /// weakly across channels of *differing* strength, with pure-noise channels
+    /// present — the learned composition beats BOTH the best single channel AND
+    /// the equal-weight hand-set guess, on a held-out split. This is a clean
+    /// existence proof that the learner earns its keep when its assumption holds.
+    #[test]
+    fn learned_beats_both_baselines_on_diffuse_signal() {
+        // 6 channels: two strong-ish, two weak, two pure noise.
+        let mus = [0.7, 0.6, 0.3, 0.3, 0.0, 0.0];
+        let d = mus.len();
+        let (xtr, ytr) = diffuse_dataset(2000, &mus, 0xD1FF);
+        let (xva, yva) = diffuse_dataset(2000, &mus, 0x5EED);
+
+        let model = LearnedWeights::fit(&xtr, &ytr, d, 400, 0.3, 1e-4);
+        let learned_auc = auc(
+            &xva.iter().map(|r| model.predict(r)).collect::<Vec<_>>(),
+            &yva,
+        );
+
+        // Equal-weight hand-set guess (a fair "just sum the channels" baseline).
+        let equal = vec![1.0; d];
+        let handset_auc = auc(&linear_scores(&xva, &equal), &yva);
+
+        let (_, single_auc) = best_single_channel_auc(&xva, &yva, d);
+
+        assert!(
+            learned_auc > single_auc + 0.02,
+            "learned {learned_auc} should beat best single channel {single_auc}"
+        );
+        assert!(
+            learned_auc > handset_auc + 0.005,
+            "learned {learned_auc} should beat equal-weight handset {handset_auc}"
+        );
     }
 }
