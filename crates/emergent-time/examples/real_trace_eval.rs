@@ -351,17 +351,52 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
 
 /// Extract the `name` of every `tool_use` block on an assistant line.
 fn extract_tool_names(line: &str) -> Vec<String> {
-    let mut names = Vec::new();
     let marker = "\"type\":\"tool_use\"";
+    let name_key = "\"name\":\"";
+    // Tool name and the `tool_use` marker live in the same small object; real
+    // transcripts emit them in EITHER order — historically
+    // `{"type":"tool_use",…,"name":"Bash"}` but current Claude-Code transcripts
+    // emit `{"name":"Bash","type":"tool_use",…}` (name BEFORE type). Searching
+    // only *after* the marker silently misses the name-before-type spelling and
+    // drops the whole step. So we pair each marker to the *nearest* name within a
+    // bounded window, in either direction.
+    const WINDOW: usize = 160;
+
+    // All `"name":"VALUE"` occurrences with the byte offset of the marker key.
+    let mut name_positions: Vec<(usize, String)> = Vec::new();
+    let mut s = 0;
+    while let Some(p) = line[s..].find(name_key) {
+        let abs = s + p;
+        let vstart = abs + name_key.len();
+        if let Some(vend) = line[vstart..].find('"') {
+            name_positions.push((abs, line[vstart..vstart + vend].to_string()));
+            s = vstart + vend + 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut names = Vec::new();
+    let mut claimed = vec![false; name_positions.len()];
     let mut start = 0;
     while let Some(pos) = line[start..].find(marker) {
         let abs = start + pos;
-        // Look for the nearest "name":"..." after this tool_use marker.
-        if let Some(npos) = line[abs..].find("\"name\":\"") {
-            let nstart = abs + npos + "\"name\":\"".len();
-            if let Some(nend) = line[nstart..].find('"') {
-                names.push(line[nstart..nstart + nend].to_string());
+        // Closest unclaimed name within WINDOW of this marker (either side).
+        let mut best: Option<usize> = None;
+        let mut best_dist = usize::MAX;
+        for (i, (npos, _)) in name_positions.iter().enumerate() {
+            if claimed[i] {
+                continue;
             }
+            let dist = if *npos > abs { npos - abs } else { abs - npos };
+            if dist <= WINDOW && dist < best_dist {
+                best_dist = dist;
+                best = Some(i);
+            }
+        }
+        if let Some(i) = best {
+            claimed[i] = true;
+            names.push(name_positions[i].1.clone());
         }
         start = abs + marker.len();
     }
@@ -573,8 +608,18 @@ fn candidate_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn load_traces() -> Vec<RealTrace> {
-    let mut traces = Vec::new();
+/// Outcome of scanning the candidate directories: the parsed traces plus how
+/// many `.jsonl` files were *seen* but produced no usable trace. The latter lets
+/// `main` distinguish "no transcript files at all" from "files present but the
+/// parser could not turn them into a scoreable trace" — an honesty distinction
+/// (a silent parse failure must not masquerade as absence).
+struct LoadOutcome {
+    traces: Vec<RealTrace>,
+    files_seen: usize,
+    parse_failures: usize,
+}
+
+fn load_traces() -> LoadOutcome {
     for dir in candidate_dirs() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -585,16 +630,30 @@ fn load_traces() -> Vec<RealTrace> {
             .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl"))
             .collect();
         paths.sort();
+        if paths.is_empty() {
+            continue;
+        }
+        // First directory that actually contains transcript files wins.
+        let files_seen = paths.len();
+        let mut traces = Vec::new();
+        let mut parse_failures = 0;
         for p in paths {
-            if let Some(t) = parse_session(&p) {
-                traces.push(t);
+            match parse_session(&p) {
+                Some(t) => traces.push(t),
+                None => parse_failures += 1,
             }
         }
-        if !traces.is_empty() {
-            break;
-        }
+        return LoadOutcome {
+            traces,
+            files_seen,
+            parse_failures,
+        };
     }
-    traces
+    LoadOutcome {
+        traces: Vec::new(),
+        files_seen: 0,
+        parse_failures: 0,
+    }
 }
 
 fn main() {
@@ -603,18 +662,42 @@ fn main() {
 
     print_preregistration();
 
-    let traces = load_traces();
+    let LoadOutcome {
+        traces,
+        files_seen,
+        parse_failures,
+    } = load_traces();
     if traces.is_empty() {
-        println!("\n[skip] No real session transcripts found.");
-        println!("       Looked in: ~/.claude/projects/C--Users-ruv-ruvector/*.jsonl");
-        println!("       (or $EMERGENT_TIME_TRACE_DIR). This is expected on CI / a fresh");
-        println!("       checkout without recorded sessions — the harness degrades");
-        println!("       gracefully and exits 0 rather than panicking.\n");
-        println!("       The protocol, adapter, and pre-registered thresholds above are");
+        if files_seen > 0 {
+            // Files were present but none parsed — surface it as a parse failure,
+            // NOT as absence. Masquerading a parser gap as "no data" would hide a
+            // real defect (and inflate confidence in the gate).
+            println!(
+                "\n[skip] Found {files_seen} transcript file(s) but parsed 0 usable trace(s) \
+                 ({parse_failures} parse failure(s))."
+            );
+            println!("       The files exist but did not yield enough tool-issuing steps");
+            println!("       (schema mismatch, or a very short session). This is a PARSE");
+            println!("       gap, not missing data — fix the adapter rather than trusting");
+            println!("       a silent skip.");
+        } else {
+            println!("\n[skip] No real session transcripts found.");
+            println!("       Looked in: ~/.claude/projects/C--Users-ruv-ruvector/*.jsonl");
+            println!("       (or $EMERGENT_TIME_TRACE_DIR). This is expected on CI / a fresh");
+            println!("       checkout without recorded sessions — the harness degrades");
+            println!("       gracefully and exits 0 rather than panicking.");
+        }
+        println!("\n       The protocol, adapter, and pre-registered thresholds above are");
         println!("       the reusable deliverable; supply traces to produce numbers.");
         return;
     }
 
+    if parse_failures > 0 {
+        println!(
+            "\n[note] {parse_failures} of {files_seen} transcript file(s) did not parse \
+             (reported, not hidden)."
+        );
+    }
     println!("\nLoaded {} real session transcript(s).\n", traces.len());
 
     let mut all: Vec<ClockLeads> = Vec::new();
@@ -882,4 +965,36 @@ fn print_summary(all: &[ClockLeads], descriptive_only: usize, total: usize) {
     println!("      the contradiction-free honest variant, but proxy noise is real.");
     println!("    • the event is one operationalization (error cascade) of 'trouble'.");
     println!("    • thresholds were pre-registered and NOT tuned to these outcomes.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_tool_names;
+
+    /// The parser must recover tool names regardless of whether `name` precedes
+    /// or follows the `tool_use` type tag. Current Claude-Code transcripts emit
+    /// name-before-type; the original parser only handled type-before-name and
+    /// silently dropped real steps (which made the whole real-trace gate report
+    /// "no transcripts found" on a transcript that was actually present).
+    #[test]
+    fn extracts_tool_names_in_either_key_order() {
+        // name BEFORE type (the real, current transcript spelling)
+        let name_first = r#"{"content":[{"name":"Bash","type":"tool_use","id":"t1","input":{}}]}"#;
+        assert_eq!(extract_tool_names(name_first), vec!["Bash".to_string()]);
+
+        // type BEFORE name (the historical spelling)
+        let type_first = r#"{"content":[{"type":"tool_use","id":"t1","name":"Grep","input":{}}]}"#;
+        assert_eq!(extract_tool_names(type_first), vec!["Grep".to_string()]);
+
+        // multiple parallel tool_use blocks on one line, name-before-type
+        let multi = r#"[{"name":"Read","type":"tool_use","id":"a"},{"name":"Edit","type":"tool_use","id":"b"}]"#;
+        assert_eq!(
+            extract_tool_names(multi),
+            vec!["Read".to_string(), "Edit".to_string()]
+        );
+
+        // no tool_use → no names
+        let none = r#"{"type":"text","text":"hello name: world"}"#;
+        assert!(extract_tool_names(none).is_empty());
+    }
 }
