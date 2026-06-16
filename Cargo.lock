@@ -8894,6 +8894,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruvector-coherence-hnsw"
+version = "2.2.3"
+dependencies = [
+ "rand 0.8.5",
+ "rand_distr 0.4.3",
+ "rayon",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ruvector-collections"
 version = "2.2.3"
 dependencies = [
