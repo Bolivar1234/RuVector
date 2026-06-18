@@ -65,7 +65,8 @@ impl Sampler {
         let mut work = logits.to_vec();
 
         // Repetition penalty.
-        if (self.cfg.repetition_penalty - 1.0).abs() > f32::EPSILON && self.cfg.repetition_window > 0
+        if (self.cfg.repetition_penalty - 1.0).abs() > f32::EPSILON
+            && self.cfg.repetition_window > 0
         {
             let start = recent.len().saturating_sub(self.cfg.repetition_window);
             for &tok in &recent[start..] {

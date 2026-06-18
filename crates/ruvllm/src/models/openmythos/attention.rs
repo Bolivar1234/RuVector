@@ -107,9 +107,27 @@ impl GqaAttention {
         past: Option<&KvLayerCache>,
     ) -> Result<(Tensor, KvLayerCache)> {
         let (b, seq, _h) = xs.dims3().map_err(cand)?;
-        let q = heads(&self.q_proj.forward(xs).map_err(cand)?, b, seq, self.n_heads, self.head_dim)?;
-        let k = heads(&self.k_proj.forward(xs).map_err(cand)?, b, seq, self.n_kv_heads, self.head_dim)?;
-        let v = heads(&self.v_proj.forward(xs).map_err(cand)?, b, seq, self.n_kv_heads, self.head_dim)?;
+        let q = heads(
+            &self.q_proj.forward(xs).map_err(cand)?,
+            b,
+            seq,
+            self.n_heads,
+            self.head_dim,
+        )?;
+        let k = heads(
+            &self.k_proj.forward(xs).map_err(cand)?,
+            b,
+            seq,
+            self.n_kv_heads,
+            self.head_dim,
+        )?;
+        let v = heads(
+            &self.v_proj.forward(xs).map_err(cand)?,
+            b,
+            seq,
+            self.n_kv_heads,
+            self.head_dim,
+        )?;
 
         let q = apply_rope(&q, cos, sin)?;
         let k_cur = apply_rope(&k, cos, sin)?;
@@ -128,7 +146,10 @@ impl GqaAttention {
         let v_rep = repeat_kv(&v_full, n_rep)?;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let scores = (q.matmul(&k_rep.transpose(2, 3).map_err(cand)?).map_err(cand)? * scale)
+        let scores = (q
+            .matmul(&k_rep.transpose(2, 3).map_err(cand)?)
+            .map_err(cand)?
+            * scale)
             .map_err(cand)?;
         let scores = scores.broadcast_add(mask).map_err(cand)?;
         let probs = ops::softmax_last_dim(&scores).map_err(cand)?;
@@ -141,7 +162,13 @@ impl GqaAttention {
             .reshape((b, seq, self.n_heads * self.head_dim))
             .map_err(cand)?;
         let out = self.o_proj.forward(&ctx).map_err(cand)?;
-        Ok((out, KvLayerCache::Gqa { k: k_full, v: v_full }))
+        Ok((
+            out,
+            KvLayerCache::Gqa {
+                k: k_full,
+                v: v_full,
+            },
+        ))
     }
 }
 
@@ -182,7 +209,8 @@ impl MlaAttention {
         let q_total = cfg.n_heads * qk_head_dim;
 
         let (q_a_proj, q_a_norm, q_proj) = if cfg.q_lora_rank > 0 {
-            let a = candle_nn::linear_no_bias(h, cfg.q_lora_rank, vb.pp("q_a_proj")).map_err(cand)?;
+            let a =
+                candle_nn::linear_no_bias(h, cfg.q_lora_rank, vb.pp("q_a_proj")).map_err(cand)?;
             let n = candle_nn::rms_norm(cfg.q_lora_rank, cfg.rms_norm_eps, vb.pp("q_a_norm"))
                 .map_err(cand)?;
             let b = candle_nn::linear_no_bias(cfg.q_lora_rank, q_total, vb.pp("q_b_proj"))
@@ -193,19 +221,22 @@ impl MlaAttention {
             (None, None, p)
         };
 
-        let kv_a_proj =
-            candle_nn::linear_no_bias(h, cfg.kv_lora_rank + cfg.qk_rope_head_dim, vb.pp("kv_a_proj"))
-                .map_err(cand)?;
-        let kv_a_norm =
-            candle_nn::rms_norm(cfg.kv_lora_rank, cfg.rms_norm_eps, vb.pp("kv_a_norm")).map_err(cand)?;
+        let kv_a_proj = candle_nn::linear_no_bias(
+            h,
+            cfg.kv_lora_rank + cfg.qk_rope_head_dim,
+            vb.pp("kv_a_proj"),
+        )
+        .map_err(cand)?;
+        let kv_a_norm = candle_nn::rms_norm(cfg.kv_lora_rank, cfg.rms_norm_eps, vb.pp("kv_a_norm"))
+            .map_err(cand)?;
         let kv_b_proj = candle_nn::linear_no_bias(
             cfg.kv_lora_rank,
             cfg.n_heads * (cfg.qk_nope_head_dim + cfg.v_head_dim),
             vb.pp("kv_b_proj"),
         )
         .map_err(cand)?;
-        let o_proj =
-            candle_nn::linear_no_bias(cfg.n_heads * cfg.v_head_dim, h, vb.pp("o_proj")).map_err(cand)?;
+        let o_proj = candle_nn::linear_no_bias(cfg.n_heads * cfg.v_head_dim, h, vb.pp("o_proj"))
+            .map_err(cand)?;
 
         Ok(Self {
             q_a_proj,
@@ -252,7 +283,9 @@ impl MlaAttention {
             .contiguous()
             .map_err(cand)?;
         let q_nope = q.narrow(D::Minus1, 0, self.qk_nope).map_err(cand)?;
-        let q_rope = q.narrow(D::Minus1, self.qk_nope, self.qk_rope).map_err(cand)?;
+        let q_rope = q
+            .narrow(D::Minus1, self.qk_nope, self.qk_rope)
+            .map_err(cand)?;
         let q_rope = apply_rope(&q_rope, cos, sin)?;
         let q = Tensor::cat(&[&q_nope, &q_rope], D::Minus1).map_err(cand)?;
 
@@ -262,7 +295,7 @@ impl MlaAttention {
         let k_rope_cur = kv_a
             .narrow(D::Minus1, self.kv_lora_rank, self.qk_rope)
             .map_err(cand)?; // [b, seq, rope]
-        // Apply rope to the shared k_rope as a single head.
+                             // Apply rope to the shared k_rope as a single head.
         let k_rope_cur = k_rope_cur
             .reshape((b, seq, 1, self.qk_rope))
             .map_err(cand)?
@@ -298,7 +331,9 @@ impl MlaAttention {
             .contiguous()
             .map_err(cand)?; // [b, n_heads, kv_len, nope+v]
         let k_nope = kv.narrow(D::Minus1, 0, self.qk_nope).map_err(cand)?;
-        let v = kv.narrow(D::Minus1, self.qk_nope, self.v_head_dim).map_err(cand)?;
+        let v = kv
+            .narrow(D::Minus1, self.qk_nope, self.v_head_dim)
+            .map_err(cand)?;
 
         // Broadcast shared rope keys across heads: [b, kv_len, rope] -> [b, n_heads, kv_len, rope]
         let k_rope_full = k_rope_store
@@ -311,8 +346,8 @@ impl MlaAttention {
         let k = Tensor::cat(&[&k_nope, &k_rope_full], D::Minus1).map_err(cand)?;
 
         let scale = 1.0 / (qk_head_dim as f64).sqrt();
-        let scores = (q.matmul(&k.transpose(2, 3).map_err(cand)?).map_err(cand)? * scale)
-            .map_err(cand)?;
+        let scores =
+            (q.matmul(&k.transpose(2, 3).map_err(cand)?).map_err(cand)? * scale).map_err(cand)?;
         let scores = scores.broadcast_add(mask).map_err(cand)?;
         let probs = ops::softmax_last_dim(&scores).map_err(cand)?;
         let ctx = probs.matmul(&v.contiguous().map_err(cand)?).map_err(cand)?; // [b, n_heads, seq, v_head_dim]

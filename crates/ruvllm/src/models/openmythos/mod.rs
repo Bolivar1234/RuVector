@@ -179,8 +179,8 @@ impl OpenMythos {
     /// deferred to a real checkpoint (substrate requirement); use
     /// [`Self::from_safetensors`] for the f32 path.
     pub fn config_from_gguf(path: &std::path::Path) -> Result<MythosConfig> {
-        let mut file = std::fs::File::open(path)
-            .map_err(|e| RuvLLMError::Gguf(format!("open gguf: {e}")))?;
+        let mut file =
+            std::fs::File::open(path).map_err(|e| RuvLLMError::Gguf(format!("open gguf: {e}")))?;
         let content = candle_core::quantized::gguf_file::Content::read(&mut file)
             .map_err(|e| RuvLLMError::Gguf(format!("read gguf: {e}")))?;
 
@@ -233,7 +233,14 @@ impl OpenMythos {
             AttnType::Gqa => self.cfg.head_dim(),
             AttnType::Mla => self.cfg.qk_rope_head_dim,
         };
-        let (cos, sin) = rope_tables(seq, offset, rope_dim, self.cfg.rope_theta, &self.device, self.dtype)?;
+        let (cos, sin) = rope_tables(
+            seq,
+            offset,
+            rope_dim,
+            self.cfg.rope_theta,
+            &self.device,
+            self.dtype,
+        )?;
         let mask = causal_mask(seq, offset + seq, offset, &self.device, self.dtype)?;
 
         // Prelude.
@@ -352,7 +359,12 @@ impl OpenMythos {
             return Err(RuvLLMError::Generation("empty input".into()));
         }
         let t = Tensor::from_vec(ids.to_vec(), (1, ids.len()), &self.device).map_err(cand)?;
-        let x = self.embed.forward(&t).map_err(cand)?.to_dtype(self.dtype).map_err(cand)?;
+        let x = self
+            .embed
+            .forward(&t)
+            .map_err(cand)?
+            .to_dtype(self.dtype)
+            .map_err(cand)?;
         let pooled = x.mean(1).map_err(cand)?; // [1, dim]
         pooled
             .reshape((self.cfg.dim,))
@@ -367,14 +379,21 @@ impl OpenMythos {
     fn last_logits(&self, logits: &Tensor) -> Result<Vec<f32>> {
         let (_b, seq, _v) = logits.dims3().map_err(cand)?;
         let last = logits.i((0, seq - 1)).map_err(cand)?;
-        last.to_dtype(DType::F32).map_err(cand)?.to_vec1().map_err(cand)
+        last.to_dtype(DType::F32)
+            .map_err(cand)?
+            .to_vec1()
+            .map_err(cand)
     }
 
     /// Argmax over the vocabulary at the last sequence position of `[1, seq, vocab]`.
     fn last_argmax(&self, logits: &Tensor) -> Result<u32> {
         let (_b, seq, _v) = logits.dims3().map_err(cand)?;
         let last = logits.i((0, seq - 1)).map_err(cand)?; // [vocab]
-        let row: Vec<f32> = last.to_dtype(DType::F32).map_err(cand)?.to_vec1().map_err(cand)?;
+        let row: Vec<f32> = last
+            .to_dtype(DType::F32)
+            .map_err(cand)?
+            .to_vec1()
+            .map_err(cand)?;
         let mut best = 0usize;
         let mut best_v = f32::NEG_INFINITY;
         for (i, &v) in row.iter().enumerate() {
@@ -559,7 +578,10 @@ mod tests {
             .zip(last.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
-        assert!(max_diff < 1e-3, "KV-cache decode diverged: max diff {max_diff}");
+        assert!(
+            max_diff < 1e-3,
+            "KV-cache decode diverged: max diff {max_diff}"
+        );
     }
 
     #[test]
@@ -577,7 +599,9 @@ mod tests {
         let cfg = MythosConfig::tiny();
         let m = model(cfg.clone());
         let first = m.generate(&[1, 2, 3], 1, cfg.max_loop_iters, None).unwrap()[0];
-        let out = m.generate(&[1, 2, 3], 10, cfg.max_loop_iters, Some(first)).unwrap();
+        let out = m
+            .generate(&[1, 2, 3], 10, cfg.max_loop_iters, Some(first))
+            .unwrap();
         assert_eq!(out.len(), 1, "should stop immediately on eos");
     }
 
@@ -590,8 +614,12 @@ mod tests {
             seed: 123,
             ..Default::default()
         };
-        let a = m.generate_sampled(&[1, 2, 3], 6, cfg.max_loop_iters, None, sc.clone()).unwrap();
-        let b = m.generate_sampled(&[1, 2, 3], 6, cfg.max_loop_iters, None, sc).unwrap();
+        let a = m
+            .generate_sampled(&[1, 2, 3], 6, cfg.max_loop_iters, None, sc.clone())
+            .unwrap();
+        let b = m
+            .generate_sampled(&[1, 2, 3], 6, cfg.max_loop_iters, None, sc)
+            .unwrap();
         assert_eq!(a, b, "same seed must reproduce the sequence");
         assert!(a.iter().all(|&t| (t as usize) < cfg.vocab_size));
     }
@@ -606,7 +634,13 @@ mod tests {
         let m = OpenMythos::load(vb, cfg.clone()).unwrap();
 
         let ids = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &Device::Cpu).unwrap();
-        let before: Vec<f32> = m.forward(&ids).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        let before: Vec<f32> = m
+            .forward(&ids)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("model.safetensors");
@@ -615,7 +649,13 @@ mod tests {
         let mut meta = BTreeMap::new();
         meta.insert("general.architecture".into(), "openmythos".into());
         let m2 = OpenMythos::from_safetensors(&[path], cfg, &meta, &Device::Cpu).unwrap();
-        let after: Vec<f32> = m2.forward(&ids).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        let after: Vec<f32> = m2
+            .forward(&ids)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
 
         let max_diff = before
             .iter()
@@ -638,7 +678,8 @@ mod tests {
         let mut meta = BTreeMap::new();
         meta.insert("general.architecture".into(), "llama".into());
         assert!(
-            OpenMythos::from_safetensors(&[path], MythosConfig::tiny(), &meta, &Device::Cpu).is_err()
+            OpenMythos::from_safetensors(&[path], MythosConfig::tiny(), &meta, &Device::Cpu)
+                .is_err()
         );
     }
 

@@ -273,65 +273,67 @@ mod candle_bench {
 
         for &seq in &[32usize, 128, 256, 512] {
             let n = seq; // batch=1
-            // Pre-computed random p values (F32, on GPU).
+                         // Pre-computed random p values (F32, on GPU).
             let p_vals: Vec<f32> = (0..n).map(|i| 0.4 + 0.1 * (i % 5) as f32).collect();
             let p_tensor = Tensor::from_vec(p_vals.clone(), (1, seq, 1), &dev).unwrap();
 
             // --- Fused kernel path ---
-            g.bench_with_input(
-                BenchmarkId::new("fused", seq),
-                &seq,
-                |b, _| {
-                    b.iter(|| {
-                        let mut k = FusedActKernel::new(n).unwrap();
-                        for t in 0..n_loops {
-                            let w = k.step(black_box(&p_tensor), 1, seq, threshold, t).unwrap();
-                            black_box(w);
-                            if k.all_halted().unwrap() { break; }
+            g.bench_with_input(BenchmarkId::new("fused", seq), &seq, |b, _| {
+                b.iter(|| {
+                    let mut k = FusedActKernel::new(n).unwrap();
+                    for t in 0..n_loops {
+                        let w = k.step(black_box(&p_tensor), 1, seq, threshold, t).unwrap();
+                        black_box(w);
+                        if k.all_halted().unwrap() {
+                            break;
                         }
-                        black_box(k.depths().unwrap());
-                    })
-                },
-            );
+                    }
+                    black_box(k.depths().unwrap());
+                })
+            });
 
             // --- Tensor-op path (current baseline) ---
-            g.bench_with_input(
-                BenchmarkId::new("tensor_ops", seq),
-                &seq,
-                |b, _| {
-                    use candle_core::Tensor;
-                    b.iter(|| {
-                        let ones = Tensor::ones((1, seq, 1), DType::F32, &dev).unwrap();
-                        let mut cum = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
-                        let mut not_halted = ones.clone();
-                        let mut depth = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
-                        let p = black_box(&p_tensor);
+            g.bench_with_input(BenchmarkId::new("tensor_ops", seq), &seq, |b, _| {
+                use candle_core::Tensor;
+                b.iter(|| {
+                    let ones = Tensor::ones((1, seq, 1), DType::F32, &dev).unwrap();
+                    let mut cum = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
+                    let mut not_halted = ones.clone();
+                    let mut depth = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
+                    let p = black_box(&p_tensor);
 
-                        for t in 0..n_loops {
-                            let p_eff = (p * &not_halted).unwrap();
-                            let new_cum = (&cum + &p_eff).unwrap();
-                            let wh = new_cum.ge(threshold as f64).unwrap()
-                                .to_dtype(DType::F32).unwrap();
-                            let wh = (&wh * &not_halted).unwrap();
-                            let still = (&not_halted - &wh).unwrap();
-                            let rem = (&ones - &cum).unwrap();
-                            let w = (&wh * &rem).unwrap() + (&still * &p_eff).unwrap();
-                            let w = w.unwrap();
-                            black_box(&w);
-                            cum = (&cum + &(&still * &p_eff).unwrap()).unwrap();
-                            not_halted = still;
-                            let step = Tensor::new((t + 1) as f64, &dev).unwrap()
-                                .broadcast_as((1, seq, 1)).unwrap()
-                                .to_dtype(DType::F32).unwrap();
-                            depth = (&depth + &(&wh * &(&step - &depth).unwrap()).unwrap()).unwrap();
+                    for t in 0..n_loops {
+                        let p_eff = (p * &not_halted).unwrap();
+                        let new_cum = (&cum + &p_eff).unwrap();
+                        let wh = new_cum
+                            .ge(threshold as f64)
+                            .unwrap()
+                            .to_dtype(DType::F32)
+                            .unwrap();
+                        let wh = (&wh * &not_halted).unwrap();
+                        let still = (&not_halted - &wh).unwrap();
+                        let rem = (&ones - &cum).unwrap();
+                        let w = (&wh * &rem).unwrap() + (&still * &p_eff).unwrap();
+                        let w = w.unwrap();
+                        black_box(&w);
+                        cum = (&cum + &(&still * &p_eff).unwrap()).unwrap();
+                        not_halted = still;
+                        let step = Tensor::new((t + 1) as f64, &dev)
+                            .unwrap()
+                            .broadcast_as((1, seq, 1))
+                            .unwrap()
+                            .to_dtype(DType::F32)
+                            .unwrap();
+                        depth = (&depth + &(&wh * &(&step - &depth).unwrap()).unwrap()).unwrap();
 
-                            let remaining = not_halted.sum_all().unwrap().to_scalar::<f32>().unwrap();
-                            if remaining < 0.5 { break; }
+                        let remaining = not_halted.sum_all().unwrap().to_scalar::<f32>().unwrap();
+                        if remaining < 0.5 {
+                            break;
                         }
-                        black_box(depth.to_vec3::<f32>().unwrap());
-                    })
-                },
-            );
+                    }
+                    black_box(depth.to_vec3::<f32>().unwrap());
+                })
+            });
         }
 
         g.finish();
@@ -355,21 +357,19 @@ mod candle_bench {
                 .to_dtype(DType::BF16)
                 .unwrap();
 
-            g.bench_with_input(
-                BenchmarkId::new("fused", seq),
-                &seq,
-                |b, _| {
-                    b.iter(|| {
-                        let mut k = FusedActKernel::new(n).unwrap();
-                        for t in 0..n_loops {
-                            let w = k.step(black_box(&p_tensor), 1, seq, threshold, t).unwrap();
-                            black_box(w);
-                            if k.all_halted().unwrap() { break; }
+            g.bench_with_input(BenchmarkId::new("fused", seq), &seq, |b, _| {
+                b.iter(|| {
+                    let mut k = FusedActKernel::new(n).unwrap();
+                    for t in 0..n_loops {
+                        let w = k.step(black_box(&p_tensor), 1, seq, threshold, t).unwrap();
+                        black_box(w);
+                        if k.all_halted().unwrap() {
+                            break;
                         }
-                        black_box(k.depths().unwrap());
-                    })
-                },
-            );
+                    }
+                    black_box(k.depths().unwrap());
+                })
+            });
         }
 
         g.finish();

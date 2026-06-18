@@ -203,7 +203,14 @@ impl FusedActKernel {
             .htod_sync_copy(&vec![0.0f32; n])
             .map_err(|e| RuvLLMError::Model(format!("htod w_out: {e}")))?;
 
-        Ok(Self { dev, cum, not_halted, depth, w_out, n })
+        Ok(Self {
+            dev,
+            cum,
+            not_halted,
+            depth,
+            w_out,
+            n,
+        })
     }
 
     /// Run one ACT iteration.

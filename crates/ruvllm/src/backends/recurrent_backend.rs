@@ -26,7 +26,7 @@ use crate::models::openmythos::{validate_mythos_metadata, MythosConfig, OpenMyth
 use crate::models::sampling::SamplingConfig;
 use crate::tokenizer::RuvTokenizer;
 
-use candle_core::{Device, DType};
+use candle_core::{DType, Device};
 
 /// On-disk checkpoint manifest (`config.json`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -180,7 +180,10 @@ impl LlmBackend for RecurrentBackend {
             .map_err(|e| RuvLLMError::Model(format!("parse config.json: {e}")))?;
 
         let mut meta = BTreeMap::new();
-        meta.insert("general.architecture".to_string(), manifest.architecture.clone());
+        meta.insert(
+            "general.architecture".to_string(),
+            manifest.architecture.clone(),
+        );
         validate_mythos_metadata(&meta)?;
         manifest.model.validate()?;
 

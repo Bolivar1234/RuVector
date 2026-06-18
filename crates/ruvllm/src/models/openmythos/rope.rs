@@ -36,8 +36,16 @@ pub(crate) fn rope_tables(
 /// Apply RoPE to `[b, n, seq, head_dim]` using `[seq, head_dim]` tables.
 pub(crate) fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let (_b, _n, seq, hd) = x.dims4().map_err(cand)?;
-    let cos = cos.narrow(0, 0, seq).map_err(cand)?.reshape((1, 1, seq, hd)).map_err(cand)?;
-    let sin = sin.narrow(0, 0, seq).map_err(cand)?.reshape((1, 1, seq, hd)).map_err(cand)?;
+    let cos = cos
+        .narrow(0, 0, seq)
+        .map_err(cand)?
+        .reshape((1, 1, seq, hd))
+        .map_err(cand)?;
+    let sin = sin
+        .narrow(0, 0, seq)
+        .map_err(cand)?
+        .reshape((1, 1, seq, hd))
+        .map_err(cand)?;
     let rot = rotate_half(x)?;
     (x.broadcast_mul(&cos).map_err(cand)? + rot.broadcast_mul(&sin).map_err(cand)?).map_err(cand)
 }

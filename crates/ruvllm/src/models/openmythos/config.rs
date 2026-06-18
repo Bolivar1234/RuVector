@@ -269,16 +269,14 @@ impl From<MythosCompatibilityError> for RuvLLMError {
 }
 
 /// `general.architecture` values recognized as OpenMythos-compatible.
-pub const MYTHOS_ARCHITECTURES: &[&str] = &[
-    "openmythos",
-    "mythos",
-    "rdt",
-    "recurrent_depth",
-];
+pub const MYTHOS_ARCHITECTURES: &[&str] = &["openmythos", "mythos", "rdt", "recurrent_depth"];
 
 /// Metadata flags that mark a checkpoint as recurrent-depth.
-pub const MYTHOS_RECURRENCE_KEYS: &[&str] =
-    &["mythos.recurrent", "rdt.recurrent", "recurrent_depth.enabled"];
+pub const MYTHOS_RECURRENCE_KEYS: &[&str] = &[
+    "mythos.recurrent",
+    "rdt.recurrent",
+    "recurrent_depth.enabled",
+];
 
 /// Validate that metadata describes an OpenMythos-compatible checkpoint.
 ///
@@ -295,15 +293,16 @@ pub fn validate_mythos_metadata(
         .unwrap_or_default();
 
     let arch_base = arch.split(['-', '.']).next().unwrap_or("");
-    if MYTHOS_ARCHITECTURES.contains(&arch.as_str())
-        || MYTHOS_ARCHITECTURES.contains(&arch_base)
-    {
+    if MYTHOS_ARCHITECTURES.contains(&arch.as_str()) || MYTHOS_ARCHITECTURES.contains(&arch_base) {
         return Ok(());
     }
 
     for key in MYTHOS_RECURRENCE_KEYS {
         if let Some(raw) = meta.get(*key) {
-            if matches!(raw.trim().to_lowercase().as_str(), "true" | "1" | "yes" | "on") {
+            if matches!(
+                raw.trim().to_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            ) {
                 return Ok(());
             }
         }

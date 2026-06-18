@@ -36,7 +36,12 @@ impl LtiInjection {
             .map_err(cand)?
             .clamp(-20.0, 20.0)
             .map_err(cand)?;
-        s.exp().map_err(cand)?.neg().map_err(cand)?.exp().map_err(cand)
+        s.exp()
+            .map_err(cand)?
+            .neg()
+            .map_err(cand)?
+            .exp()
+            .map_err(cand)
     }
 
     pub fn forward(&self, h: &Tensor, e: &Tensor, trans_out: &Tensor) -> Result<Tensor> {
@@ -51,15 +56,16 @@ impl LtiInjection {
 /// per loop iteration (clamped to the last row beyond the training maximum).
 pub struct DepthLora {
     down: Linear,
-    b_mat: Tensor,     // [rank, dim]
-    scale: Tensor,     // [max_loops, rank]
+    b_mat: Tensor, // [rank, dim]
+    scale: Tensor, // [max_loops, rank]
     rank: usize,
     max_rows: usize,
 }
 
 impl DepthLora {
     pub fn load(vb: VarBuilder, cfg: &MythosConfig) -> Result<Self> {
-        let down = candle_nn::linear_no_bias(cfg.dim, cfg.lora_rank, vb.pp("down")).map_err(cand)?;
+        let down =
+            candle_nn::linear_no_bias(cfg.dim, cfg.lora_rank, vb.pp("down")).map_err(cand)?;
         let b_mat = vb.get((cfg.lora_rank, cfg.dim), "b_mat").map_err(cand)?;
         let scale = vb
             .get((cfg.max_loop_iters, cfg.lora_rank), "scale")
@@ -147,7 +153,9 @@ impl RecurrentBlock {
         let device = vb.device().clone();
         let dtype = vb.dtype();
         let loop_embeds = (0..cfg.max_loop_iters)
-            .map(|t| compute_loop_embedding(t, cfg.dim, cfg.loop_dim, cfg.rope_theta, &device, dtype))
+            .map(|t| {
+                compute_loop_embedding(t, cfg.dim, cfg.loop_dim, cfg.rope_theta, &device, dtype)
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             inject_norm: candle_nn::rms_norm(cfg.dim, cfg.rms_norm_eps, vb.pp("inject_norm"))
@@ -209,12 +217,9 @@ impl RecurrentBlock {
         // `cum_f32`:        running probability mass, [b, seq, 1]
         // `not_halted_f32`: 1.0 for tokens still computing, 0.0 for halted, [b, seq, 1]
         // `depth_f32`:      iteration index when each token halted (0 = not yet), [b, seq, 1]
-        let mut cum_f32 =
-            Tensor::zeros((b, seq, 1), DType::F32, &device).map_err(cand)?;
-        let mut not_halted_f32 =
-            Tensor::ones((b, seq, 1), DType::F32, &device).map_err(cand)?;
-        let mut depth_f32 =
-            Tensor::zeros((b, seq, 1), DType::F32, &device).map_err(cand)?;
+        let mut cum_f32 = Tensor::zeros((b, seq, 1), DType::F32, &device).map_err(cand)?;
+        let mut not_halted_f32 = Tensor::ones((b, seq, 1), DType::F32, &device).map_err(cand)?;
+        let mut depth_f32 = Tensor::zeros((b, seq, 1), DType::F32, &device).map_err(cand)?;
         let ones_f32 = Tensor::ones((b, seq, 1), DType::F32, &device).map_err(cand)?;
 
         // KV cache: the final iteration's KV wins (see original design note).
@@ -234,8 +239,7 @@ impl RecurrentBlock {
             h = self.lti.forward(&h, e, &trans_out)?;
 
             // ACT halting — vectorized tensor ops, no per-iteration weight-vector transfer.
-            let p_raw =
-                ops::sigmoid(&self.act_head.forward(&h).map_err(cand)?).map_err(cand)?;
+            let p_raw = ops::sigmoid(&self.act_head.forward(&h).map_err(cand)?).map_err(cand)?;
             let p_f32 = p_raw.to_dtype(DType::F32).map_err(cand)?;
 
             // Effective probability for still-running tokens only.
@@ -271,8 +275,7 @@ impl RecurrentBlock {
 
             // Update ACT state.
             // Cumulative grows only for still-running tokens (frozen on halt).
-            cum_f32 =
-                (&cum_f32 + &(&still_running * &p_eff).map_err(cand)?).map_err(cand)?;
+            cum_f32 = (&cum_f32 + &(&still_running * &p_eff).map_err(cand)?).map_err(cand)?;
             not_halted_f32 = (&not_halted_f32 - &will_halt).map_err(cand)?;
 
             // Record per-token halt iteration for telemetry (on-device, no transfer).
@@ -286,7 +289,7 @@ impl RecurrentBlock {
                 .map_err(cand)?;
             depth_f32 = (&depth_f32
                 + &(&will_halt * &(&step_f32 - &depth_f32).map_err(cand)?).map_err(cand)?)
-            .map_err(cand)?;
+                .map_err(cand)?;
 
             final_t = t + 1;
 
@@ -326,14 +329,16 @@ impl RecurrentBlock {
                 .to_dtype(DType::F32)
                 .map_err(cand)?;
             depth_f32 = (&depth_f32
-                + &(&not_halted_f32 * &(&final_step - &depth_f32).map_err(cand)?)
-                    .map_err(cand)?)
-            .map_err(cand)?;
+                + &(&not_halted_f32 * &(&final_step - &depth_f32).map_err(cand)?).map_err(cand)?)
+                .map_err(cand)?;
         }
 
         // ONE GPU→CPU transfer for telemetry (not in the hot path).
-        let depth_vec: Vec<f32> =
-            depth_f32.reshape((n,)).map_err(cand)?.to_vec1().map_err(cand)?;
+        let depth_vec: Vec<f32> = depth_f32
+            .reshape((n,))
+            .map_err(cand)?
+            .to_vec1()
+            .map_err(cand)?;
         let depth: Vec<usize> = depth_vec.into_iter().map(|d| d as usize).collect();
         telemetry.record(&depth);
 

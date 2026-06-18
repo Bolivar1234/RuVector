@@ -206,7 +206,8 @@ pub const RDT_RECURRENCE_KEYS: &[&str] = &[
 ];
 
 /// `general.architecture` values recognized as natively weight-sharing.
-pub const RDT_ARCHITECTURES: &[&str] = &["rdt", "recurrent_depth", "albert", "universal_transformer"];
+pub const RDT_ARCHITECTURES: &[&str] =
+    &["rdt", "recurrent_depth", "albert", "universal_transformer"];
 
 /// Validate that GGUF metadata describes a weight-sharing (RDT) checkpoint.
 ///
@@ -266,7 +267,10 @@ pub fn validate_rdt_metadata(
 }
 
 fn is_truthy(raw: &str) -> bool {
-    matches!(raw.trim().to_lowercase().as_str(), "true" | "1" | "yes" | "on")
+    matches!(
+        raw.trim().to_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -417,7 +421,11 @@ mod candle_impl {
         /// is handy for diagnostics.
         pub fn compute_halt(&self, hidden_state: &Tensor) -> Result<(Tensor, bool)> {
             let p_halt = self.p_halt(hidden_state)?;
-            let max_p = p_halt.max_all().map_err(cand)?.to_scalar::<f32>().map_err(cand)?;
+            let max_p = p_halt
+                .max_all()
+                .map_err(cand)?
+                .to_scalar::<f32>()
+                .map_err(cand)?;
             Ok((p_halt, max_p >= self.threshold))
         }
     }
@@ -463,9 +471,8 @@ mod candle_impl {
             let gate_proj =
                 candle_nn::linear_no_bias(h, cfg.intermediate_size, mlp.pp("gate_proj"))
                     .map_err(cand)?;
-            let up_proj =
-                candle_nn::linear_no_bias(h, cfg.intermediate_size, mlp.pp("up_proj"))
-                    .map_err(cand)?;
+            let up_proj = candle_nn::linear_no_bias(h, cfg.intermediate_size, mlp.pp("up_proj"))
+                .map_err(cand)?;
             let down_proj =
                 candle_nn::linear_no_bias(cfg.intermediate_size, h, mlp.pp("down_proj"))
                     .map_err(cand)?;
@@ -579,8 +586,7 @@ mod candle_impl {
             let v = repeat_kv(&v_full, self.num_heads / self.num_kv_heads)?;
 
             let scale = 1.0 / (self.head_dim as f64).sqrt();
-            let scores = (q.matmul(&k.transpose(2, 3).map_err(cand)?).map_err(cand)?
-                * scale)
+            let scores = (q.matmul(&k.transpose(2, 3).map_err(cand)?).map_err(cand)? * scale)
                 .map_err(cand)?;
             // Additive causal mask broadcast over [b, n, seq, kv_len].
             let scores = scores.broadcast_add(mask).map_err(cand)?;
@@ -691,7 +697,8 @@ mod candle_impl {
             let (cos, sin) = self.rope_tables(seq, offset)?;
             let mask = self.causal_mask(seq, offset + seq, offset)?;
 
-            let (hidden, kv) = self.recurrent_loop(&xs, &cos, &sin, &mask, cache.kv.as_ref(), b, seq)?;
+            let (hidden, kv) =
+                self.recurrent_loop(&xs, &cos, &sin, &mask, cache.kv.as_ref(), b, seq)?;
             cache.kv = Some(kv);
             cache.seq_len += seq;
 
@@ -767,8 +774,8 @@ mod candle_impl {
 
                 // Freeze halted tokens: hidden = running*candidate + (1-running)*hidden.
                 let running_typed = running_f32.to_dtype(self.dtype).map_err(cand)?;
-                let halted_typed = (running_typed.ones_like().map_err(cand)? - &running_typed)
-                    .map_err(cand)?;
+                let halted_typed =
+                    (running_typed.ones_like().map_err(cand)? - &running_typed).map_err(cand)?;
                 hidden = (candidate.broadcast_mul(&running_typed).map_err(cand)?
                     + hidden.broadcast_mul(&halted_typed).map_err(cand)?)
                 .map_err(cand)?;
@@ -803,8 +810,11 @@ mod candle_impl {
             }
 
             // Single depth sync at the end (not in the hot path).
-            let depth_vec: Vec<f32> =
-                depth_f32.reshape((n,)).map_err(cand)?.to_vec1().map_err(cand)?;
+            let depth_vec: Vec<f32> = depth_f32
+                .reshape((n,))
+                .map_err(cand)?
+                .to_vec1()
+                .map_err(cand)?;
             let depth: Vec<usize> = depth_vec.into_iter().map(|d| d as usize).collect();
             self.telemetry.record(&depth);
 
@@ -830,8 +840,16 @@ mod candle_impl {
             let freqs = positions.matmul(&inv_freq).map_err(cand)?;
             // Duplicate to full head_dim: [seq, head_dim].
             let freqs = Tensor::cat(&[&freqs, &freqs], D::Minus1).map_err(cand)?;
-            let cos = freqs.cos().map_err(cand)?.to_dtype(self.dtype).map_err(cand)?;
-            let sin = freqs.sin().map_err(cand)?.to_dtype(self.dtype).map_err(cand)?;
+            let cos = freqs
+                .cos()
+                .map_err(cand)?
+                .to_dtype(self.dtype)
+                .map_err(cand)?;
+            let sin = freqs
+                .sin()
+                .map_err(cand)?
+                .to_dtype(self.dtype)
+                .map_err(cand)?;
             Ok((cos, sin))
         }
 
@@ -882,7 +900,11 @@ mod candle_impl {
     fn last_argmax(logits: &Tensor) -> Result<u32> {
         let (_b, seq, _v) = logits.dims3().map_err(cand)?;
         let last = logits.i((0, seq - 1)).map_err(cand)?;
-        let row: Vec<f32> = last.to_dtype(DType::F32).map_err(cand)?.to_vec1().map_err(cand)?;
+        let row: Vec<f32> = last
+            .to_dtype(DType::F32)
+            .map_err(cand)?
+            .to_vec1()
+            .map_err(cand)?;
         let mut best = 0usize;
         let mut best_v = f32::NEG_INFINITY;
         for (i, &v) in row.iter().enumerate() {
@@ -898,8 +920,16 @@ mod candle_impl {
     fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
         // cos/sin: [seq, head_dim] -> broadcast over [b, n, seq, head_dim].
         let (_b, _n, seq, hd) = x.dims4().map_err(cand)?;
-        let cos = cos.narrow(0, 0, seq).map_err(cand)?.reshape((1, 1, seq, hd)).map_err(cand)?;
-        let sin = sin.narrow(0, 0, seq).map_err(cand)?.reshape((1, 1, seq, hd)).map_err(cand)?;
+        let cos = cos
+            .narrow(0, 0, seq)
+            .map_err(cand)?
+            .reshape((1, 1, seq, hd))
+            .map_err(cand)?;
+        let sin = sin
+            .narrow(0, 0, seq)
+            .map_err(cand)?
+            .reshape((1, 1, seq, hd))
+            .map_err(cand)?;
         let rotated = rotate_half(x)?;
         let out = (x.broadcast_mul(&cos).map_err(cand)?
             + rotated.broadcast_mul(&sin).map_err(cand)?)
@@ -1005,10 +1035,7 @@ mod tests {
     #[test]
     fn honest_boundary_accepts_recurrence_flag() {
         // A llama-derived RDT fine-tune declares recurrence explicitly.
-        let m = meta(&[
-            ("general.architecture", "llama"),
-            ("rdt.recurrent", "true"),
-        ]);
+        let m = meta(&[("general.architecture", "llama"), ("rdt.recurrent", "true")]);
         assert!(validate_rdt_metadata(&m).is_ok());
 
         let m = meta(&[("recurrent_depth.enabled", "1")]);
@@ -1079,8 +1106,7 @@ mod tests {
             let vb = VarBuilder::zeros(DType::F32, &dev);
             let model = RdtModel::load(vb, cfg.clone()).expect("load");
 
-            let input_ids =
-                Tensor::from_vec(vec![1u32, 2, 3, 4, 5], (1, 5), &dev).unwrap();
+            let input_ids = Tensor::from_vec(vec![1u32, 2, 3, 4, 5], (1, 5), &dev).unwrap();
             let logits = model.forward(&input_ids).expect("forward");
             assert_eq!(logits.dims(), &[1, 5, cfg.vocab_size]);
         }
@@ -1111,8 +1137,7 @@ mod tests {
             let vb = VarBuilder::zeros(DType::F32, &dev);
             let model = RdtModel::load(vb, cfg.clone()).unwrap();
 
-            let input_ids =
-                Tensor::from_vec(vec![1u32, 2, 3, 4, 5, 6], (2, 3), &dev).unwrap();
+            let input_ids = Tensor::from_vec(vec![1u32, 2, 3, 4, 5, 6], (2, 3), &dev).unwrap();
             let logits = model.forward(&input_ids).unwrap();
             assert_eq!(logits.dims(), &[2, 3, cfg.vocab_size]);
             assert_eq!(model.telemetry.stats().samples, 1);
