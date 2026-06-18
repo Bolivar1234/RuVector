@@ -248,6 +248,132 @@ mod candle_bench {
         }
         g.finish();
     }
+
+    // -----------------------------------------------------------------------
+    // Fused ACT kernel benchmarks (requires cuda + fused-act features)
+    //
+    // These measure the ACT state-update kernel in isolation — without the
+    // transformer GEMM — to quantify the per-iteration overhead reduction from
+    // fusing 8 tensor ops into one kernel.  Pre-computed random p values are
+    // fed to the kernel directly, bypassing the ACT head forward pass.
+    //
+    // Run with:
+    //   cargo bench -p ruvllm --features candle,cuda,fused-act --bench recurrent_depth_bench
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "fused-act")]
+    pub fn bench_act_fused_vs_tensor_f32(c: &mut Criterion) {
+        use ruvllm::models::openmythos::act_kernel::FusedActKernel;
+
+        let dev = cuda_device();
+        let threshold = 0.99f32;
+        let n_loops = 8usize;
+
+        let mut g = c.benchmark_group("fused-act/act_step_f32");
+
+        for &seq in &[32usize, 128, 256, 512] {
+            let n = seq; // batch=1
+            // Pre-computed random p values (F32, on GPU).
+            let p_vals: Vec<f32> = (0..n).map(|i| 0.4 + 0.1 * (i % 5) as f32).collect();
+            let p_tensor = Tensor::from_vec(p_vals.clone(), (1, seq, 1), &dev).unwrap();
+
+            // --- Fused kernel path ---
+            g.bench_with_input(
+                BenchmarkId::new("fused", seq),
+                &seq,
+                |b, _| {
+                    b.iter(|| {
+                        let mut k = FusedActKernel::new(n).unwrap();
+                        for t in 0..n_loops {
+                            let w = k.step(black_box(&p_tensor), 1, seq, threshold, t).unwrap();
+                            black_box(w);
+                            if k.all_halted().unwrap() { break; }
+                        }
+                        black_box(k.depths().unwrap());
+                    })
+                },
+            );
+
+            // --- Tensor-op path (current baseline) ---
+            g.bench_with_input(
+                BenchmarkId::new("tensor_ops", seq),
+                &seq,
+                |b, _| {
+                    use candle_core::Tensor;
+                    b.iter(|| {
+                        let ones = Tensor::ones((1, seq, 1), DType::F32, &dev).unwrap();
+                        let mut cum = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
+                        let mut not_halted = ones.clone();
+                        let mut depth = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
+                        let p = black_box(&p_tensor);
+
+                        for t in 0..n_loops {
+                            let p_eff = (p * &not_halted).unwrap();
+                            let new_cum = (&cum + &p_eff).unwrap();
+                            let wh = new_cum.ge(threshold as f64).unwrap()
+                                .to_dtype(DType::F32).unwrap();
+                            let wh = (&wh * &not_halted).unwrap();
+                            let still = (&not_halted - &wh).unwrap();
+                            let rem = (&ones - &cum).unwrap();
+                            let w = (&wh * &rem).unwrap() + (&still * &p_eff).unwrap();
+                            let w = w.unwrap();
+                            black_box(&w);
+                            cum = (&cum + &(&still * &p_eff).unwrap()).unwrap();
+                            not_halted = still;
+                            let step = Tensor::new((t + 1) as f64, &dev).unwrap()
+                                .broadcast_as((1, seq, 1)).unwrap()
+                                .to_dtype(DType::F32).unwrap();
+                            depth = (&depth + &(&wh * &(&step - &depth).unwrap()).unwrap()).unwrap();
+
+                            let remaining = not_halted.sum_all().unwrap().to_scalar::<f32>().unwrap();
+                            if remaining < 0.5 { break; }
+                        }
+                        black_box(depth.to_vec3::<f32>().unwrap());
+                    })
+                },
+            );
+        }
+
+        g.finish();
+    }
+
+    #[cfg(feature = "fused-act")]
+    pub fn bench_act_fused_vs_tensor_bf16(c: &mut Criterion) {
+        use ruvllm::models::openmythos::act_kernel::FusedActKernel;
+
+        let dev = cuda_device();
+        let threshold = 0.99f32;
+        let n_loops = 8usize;
+
+        let mut g = c.benchmark_group("fused-act/act_step_bf16");
+
+        for &seq in &[32usize, 128, 256, 512] {
+            let n = seq;
+            let p_vals: Vec<f32> = (0..n).map(|i| 0.4 + 0.1 * (i % 5) as f32).collect();
+            let p_tensor = Tensor::from_vec(p_vals.clone(), (1, seq, 1), &dev)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+
+            g.bench_with_input(
+                BenchmarkId::new("fused", seq),
+                &seq,
+                |b, _| {
+                    b.iter(|| {
+                        let mut k = FusedActKernel::new(n).unwrap();
+                        for t in 0..n_loops {
+                            let w = k.step(black_box(&p_tensor), 1, seq, threshold, t).unwrap();
+                            black_box(w);
+                            if k.all_halted().unwrap() { break; }
+                        }
+                        black_box(k.depths().unwrap());
+                    })
+                },
+            );
+        }
+
+        g.finish();
+    }
 }
 
 // CPU criterion groups (always registered)
@@ -271,13 +397,24 @@ criterion_group!(
     candle_bench::bench_rdt_forward_cuda_bf16,
 );
 
+// Fused ACT kernel groups (cuda + fused-act)
+#[cfg(all(feature = "candle", feature = "fused-act"))]
+criterion_group!(
+    fused_act_benches,
+    candle_bench::bench_act_fused_vs_tensor_f32,
+    candle_bench::bench_act_fused_vs_tensor_bf16,
+);
+
 // No-op stubs when features are absent
 #[cfg(not(feature = "candle"))]
 criterion_group!(cpu_benches, noop);
 #[cfg(not(feature = "candle"))]
 fn noop(_c: &mut Criterion) {}
 
-#[cfg(all(feature = "candle", feature = "cuda"))]
+#[cfg(all(feature = "candle", feature = "fused-act"))]
+criterion_main!(cpu_benches, cuda_benches, fused_act_benches);
+
+#[cfg(all(feature = "candle", feature = "cuda", not(feature = "fused-act")))]
 criterion_main!(cpu_benches, cuda_benches);
 
 #[cfg(all(feature = "candle", not(feature = "cuda")))]

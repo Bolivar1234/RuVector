@@ -28,6 +28,9 @@ mod attention;
 mod block;
 mod config;
 mod ffn;
+
+#[cfg(all(feature = "cuda", feature = "fused-act"))]
+pub mod act_kernel;
 mod recurrent;
 mod rope;
 
