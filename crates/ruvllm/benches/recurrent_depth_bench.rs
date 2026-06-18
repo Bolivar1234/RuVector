@@ -261,77 +261,62 @@ mod candle_bench {
     //   cargo bench -p ruvllm --features candle,cuda,fused-act --bench recurrent_depth_bench
     // -----------------------------------------------------------------------
 
+    // Measures one ACT state-update step (the inner operation of the halting loop):
+    //   fused_1step  — H2D(p) + 1 CUDA kernel + D2H(w) + scalar early-exit sync
+    //   tensor_1step — 8 candle kernel dispatches + 1 scalar sync
+    //
+    // The kernel is created once per bench group to avoid measuring init overhead.
     #[cfg(feature = "fused-act")]
     pub fn bench_act_fused_vs_tensor_f32(c: &mut Criterion) {
         use ruvllm::models::openmythos::act_kernel::FusedActKernel;
 
         let dev = cuda_device();
         let threshold = 0.99f32;
-        let n_loops = 8usize;
-
         let mut g = c.benchmark_group("fused-act/act_step_f32");
 
         for &seq in &[32usize, 128, 256, 512] {
-            let n = seq; // batch=1
-                         // Pre-computed random p values (F32, on GPU).
+            let n = seq;
             let p_vals: Vec<f32> = (0..n).map(|i| 0.4 + 0.1 * (i % 5) as f32).collect();
-            let p_tensor = Tensor::from_vec(p_vals.clone(), (1, seq, 1), &dev).unwrap();
+            let p_tensor = Tensor::from_vec(p_vals, (1, seq, 1), &dev).unwrap();
 
-            // --- Fused kernel path ---
-            g.bench_with_input(BenchmarkId::new("fused", seq), &seq, |b, _| {
+            // Fused: kernel created once outside the timing loop.
+            let mut k = FusedActKernel::new(n).unwrap();
+            g.bench_with_input(BenchmarkId::new("fused_1step", seq), &seq, |b, _| {
                 b.iter(|| {
-                    let mut k = FusedActKernel::new(n).unwrap();
-                    for t in 0..n_loops {
-                        let w = k.step(black_box(&p_tensor), 1, seq, threshold, t).unwrap();
-                        black_box(w);
-                        if k.all_halted().unwrap() {
-                            break;
-                        }
-                    }
-                    black_box(k.depths().unwrap());
+                    let w = k.step(black_box(&p_tensor), 1, seq, threshold, 0).unwrap();
+                    black_box(w);
                 })
             });
 
-            // --- Tensor-op path (current baseline) ---
-            g.bench_with_input(BenchmarkId::new("tensor_ops", seq), &seq, |b, _| {
-                use candle_core::Tensor;
+            // Tensor-op baseline: measures one pass through the vectorized ACT ops.
+            let ones = Tensor::ones((1, seq, 1), DType::F32, &dev).unwrap();
+            let cum = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
+            let not_halted = ones.clone();
+            let depth = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
+            g.bench_with_input(BenchmarkId::new("tensor_1step", seq), &seq, |b, _| {
                 b.iter(|| {
-                    let ones = Tensor::ones((1, seq, 1), DType::F32, &dev).unwrap();
-                    let mut cum = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
-                    let mut not_halted = ones.clone();
-                    let mut depth = Tensor::zeros((1, seq, 1), DType::F32, &dev).unwrap();
                     let p = black_box(&p_tensor);
-
-                    for t in 0..n_loops {
-                        let p_eff = (p * &not_halted).unwrap();
-                        let new_cum = (&cum + &p_eff).unwrap();
-                        let wh = new_cum
-                            .ge(threshold as f64)
-                            .unwrap()
-                            .to_dtype(DType::F32)
-                            .unwrap();
-                        let wh = (&wh * &not_halted).unwrap();
-                        let still = (&not_halted - &wh).unwrap();
-                        let rem = (&ones - &cum).unwrap();
-                        let w = (&wh * &rem).unwrap() + (&still * &p_eff).unwrap();
-                        let w = w.unwrap();
-                        black_box(&w);
-                        cum = (&cum + &(&still * &p_eff).unwrap()).unwrap();
-                        not_halted = still;
-                        let step = Tensor::new((t + 1) as f64, &dev)
-                            .unwrap()
-                            .broadcast_as((1, seq, 1))
-                            .unwrap()
-                            .to_dtype(DType::F32)
-                            .unwrap();
-                        depth = (&depth + &(&wh * &(&step - &depth).unwrap()).unwrap()).unwrap();
-
-                        let remaining = not_halted.sum_all().unwrap().to_scalar::<f32>().unwrap();
-                        if remaining < 0.5 {
-                            break;
-                        }
-                    }
-                    black_box(depth.to_vec3::<f32>().unwrap());
+                    let p_eff = (p * &not_halted).unwrap();
+                    let new_cum = (&cum + &p_eff).unwrap();
+                    let wh = new_cum
+                        .ge(threshold as f64)
+                        .unwrap()
+                        .to_dtype(DType::F32)
+                        .unwrap();
+                    let wh = (&wh * &not_halted).unwrap();
+                    let still = (&not_halted - &wh).unwrap();
+                    let rem = (&ones - &cum).unwrap();
+                    let w = ((&wh * &rem).unwrap() + (&still * &p_eff).unwrap()).unwrap();
+                    black_box(&w);
+                    let step = Tensor::new(1.0f64, &dev)
+                        .unwrap()
+                        .broadcast_as((1, seq, 1))
+                        .unwrap()
+                        .to_dtype(DType::F32)
+                        .unwrap();
+                    let _d = (&depth + &(&wh * &(&step - &depth).unwrap()).unwrap()).unwrap();
+                    let r = not_halted.sum_all().unwrap().to_scalar::<f32>().unwrap();
+                    black_box(r);
                 })
             });
         }
@@ -345,29 +330,21 @@ mod candle_bench {
 
         let dev = cuda_device();
         let threshold = 0.99f32;
-        let n_loops = 8usize;
-
         let mut g = c.benchmark_group("fused-act/act_step_bf16");
 
         for &seq in &[32usize, 128, 256, 512] {
             let n = seq;
             let p_vals: Vec<f32> = (0..n).map(|i| 0.4 + 0.1 * (i % 5) as f32).collect();
-            let p_tensor = Tensor::from_vec(p_vals.clone(), (1, seq, 1), &dev)
+            let p_tensor = Tensor::from_vec(p_vals, (1, seq, 1), &dev)
                 .unwrap()
                 .to_dtype(DType::BF16)
                 .unwrap();
 
-            g.bench_with_input(BenchmarkId::new("fused", seq), &seq, |b, _| {
+            let mut k = FusedActKernel::new(n).unwrap();
+            g.bench_with_input(BenchmarkId::new("fused_1step", seq), &seq, |b, _| {
                 b.iter(|| {
-                    let mut k = FusedActKernel::new(n).unwrap();
-                    for t in 0..n_loops {
-                        let w = k.step(black_box(&p_tensor), 1, seq, threshold, t).unwrap();
-                        black_box(w);
-                        if k.all_halted().unwrap() {
-                            break;
-                        }
-                    }
-                    black_box(k.depths().unwrap());
+                    let w = k.step(black_box(&p_tensor), 1, seq, threshold, 0).unwrap();
+                    black_box(w);
                 })
             });
         }

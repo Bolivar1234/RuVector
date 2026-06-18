@@ -138,25 +138,35 @@ extern "C" __global__ void act_fused_step_bf16(
 "#;
 
 // ---------------------------------------------------------------------------
-// PTX is compiled and loaded once per process (first call to FusedActKernel::new).
+// PTX compilation is cached globally (expensive); loading into a CudaDevice
+// is cheap and must happen per device instance (each Arc<CudaDevice> carries
+// its own module map).
 // ---------------------------------------------------------------------------
 
-static MODULE_COMPILED: OnceCell<()> = OnceCell::new();
+use cudarc::nvrtc::Ptx;
 
-fn ensure_module_loaded(dev: &Arc<CudaDevice>) -> Result<()> {
-    MODULE_COMPILED
-        .get_or_try_init(|| -> Result<()> {
-            let ptx = compile_ptx(ACT_KERNEL_SRC)
-                .map_err(|e| RuvLLMError::Model(format!("nvrtc compile act_fused: {e}")))?;
-            dev.load_ptx(
-                ptx,
-                "act_fused",
-                &["act_fused_step_f32", "act_fused_step_bf16"],
-            )
-            .map_err(|e| RuvLLMError::Model(format!("cudarc load_ptx: {e}")))?;
-            Ok(())
+static COMPILED_PTX: OnceCell<Ptx> = OnceCell::new();
+
+fn get_or_compile_ptx() -> Result<Ptx> {
+    COMPILED_PTX
+        .get_or_try_init(|| {
+            compile_ptx(ACT_KERNEL_SRC)
+                .map_err(|e| RuvLLMError::Model(format!("nvrtc compile act_fused: {e}")))
         })
-        .map(|_| ())
+        .cloned()
+}
+
+/// Load the compiled PTX into a specific device instance.
+///
+/// Must be called for every new `Arc<CudaDevice>` before launching kernels.
+fn load_ptx_into(dev: &Arc<CudaDevice>) -> Result<()> {
+    let ptx = get_or_compile_ptx()?;
+    dev.load_ptx(
+        ptx,
+        "act_fused",
+        &["act_fused_step_f32", "act_fused_step_bf16"],
+    )
+    .map_err(|e| RuvLLMError::Model(format!("cudarc load_ptx: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +197,7 @@ impl FusedActKernel {
         let dev = CudaDevice::new(0)
             .map_err(|e| RuvLLMError::Model(format!("cudarc CudaDevice::new: {e}")))?;
 
-        ensure_module_loaded(&dev)?;
+        load_ptx_into(&dev)?;
 
         // Initialise state: cum=0, not_halted=1, depth=0, w_out=0.
         let cum = dev
