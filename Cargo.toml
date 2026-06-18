@@ -236,6 +236,8 @@ members = [
     # Calculus of emergent / relational time (Wheeler-DeWitt, Page-Wootters,
     # entropic, thermal) + Structural Proper Time for agentic systems.
     "crates/emergent-time",
+    # PhotonLayer: learned optical-frontend computing simulator (ADR-260)
+    "crates/photonlayer-core",
 ]
 resolver = "2"
 
