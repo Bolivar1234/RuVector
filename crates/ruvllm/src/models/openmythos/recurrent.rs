@@ -96,6 +96,29 @@ impl DepthLora {
     }
 }
 
+/// Sinusoidal loop-index embedding `[1, 1, dim]` (first `loop_dim` channels).
+fn compute_loop_embedding(
+    t: usize,
+    dim: usize,
+    loop_dim: usize,
+    rope_theta: f32,
+    device: &Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    let half = loop_dim / 2;
+    let mut data = vec![0f32; dim];
+    for i in 0..half {
+        let freq = 1.0f32 / rope_theta.powf(2.0 * i as f32 / loop_dim as f32);
+        let angle = t as f32 * freq;
+        data[i] = angle.sin();
+        data[half + i] = angle.cos();
+    }
+    Tensor::from_vec(data, (1, 1, dim), device)
+        .map_err(cand)?
+        .to_dtype(dtype)
+        .map_err(cand)
+}
+
 /// The recurrent block executed repeatedly by the model.
 pub struct RecurrentBlock {
     inject_norm: RmsNorm,
@@ -107,6 +130,9 @@ pub struct RecurrentBlock {
     dim: usize,
     act_threshold: f32,
     rope_theta: f32,
+    /// Precomputed loop-index embeddings `[1, 1, dim]` for `t in 0..max_loops`.
+    /// These are constant across forward passes, so they are built once.
+    loop_embeds: Vec<Tensor>,
 }
 
 /// Output of one recurrent forward: ACT-weighted state plus the updated KV cache
@@ -118,6 +144,11 @@ pub struct RecurrentOut {
 
 impl RecurrentBlock {
     pub fn load(vb: VarBuilder, cfg: &MythosConfig) -> Result<Self> {
+        let device = vb.device().clone();
+        let dtype = vb.dtype();
+        let loop_embeds = (0..cfg.max_loop_iters)
+            .map(|t| compute_loop_embedding(t, cfg.dim, cfg.loop_dim, cfg.rope_theta, &device, dtype))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             inject_norm: candle_nn::rms_norm(cfg.dim, cfg.rms_norm_eps, vb.pp("inject_norm"))
                 .map_err(cand)?,
@@ -129,6 +160,7 @@ impl RecurrentBlock {
             dim: cfg.dim,
             act_threshold: cfg.act_threshold,
             rope_theta: cfg.rope_theta,
+            loop_embeds,
         })
     }
 
@@ -136,20 +168,13 @@ impl RecurrentBlock {
         &self.lti
     }
 
-    /// Sinusoidal loop-index embedding added to the first `loop_dim` channels.
+    /// Sinusoidal loop-index embedding for iteration `t`. Returns the precomputed
+    /// tensor for `t < max_loops`, else computes it on demand (depth extrapolation).
     fn loop_embedding(&self, t: usize, device: &Device, dtype: DType) -> Result<Tensor> {
-        let half = self.loop_dim / 2;
-        let mut data = vec![0f32; self.dim];
-        for i in 0..half {
-            let freq = 1.0f32 / self.rope_theta.powf(2.0 * i as f32 / self.loop_dim as f32);
-            let angle = t as f32 * freq;
-            data[i] = angle.sin();
-            data[half + i] = angle.cos();
+        if let Some(emb) = self.loop_embeds.get(t) {
+            return Ok(emb.clone());
         }
-        Tensor::from_vec(data, (1, 1, self.dim), device)
-            .map_err(cand)?
-            .to_dtype(dtype)
-            .map_err(cand)
+        compute_loop_embedding(t, self.dim, self.loop_dim, self.rope_theta, device, dtype)
     }
 
     /// Run the recurrent loop. `past` is the recurrent KV cache for prior

@@ -57,10 +57,10 @@ impl Ffn {
 /// Fine-grained Mixture-of-Experts with routed + always-on shared experts.
 ///
 /// Routing computes a softmax over experts and keeps the top-`k` per token
-/// (others masked to zero weight, kept weights renormalized). Shared experts
-/// always contribute. The routed path computes each selected expert and sums
-/// the gated outputs — correct and simple; a production deployment would replace
-/// the per-expert loop with a sparse dispatch/gather kernel.
+/// (kept weights renormalized). Shared experts always contribute. Each routed
+/// expert runs only on the tokens routed to it (sparse dispatch via
+/// `index_select` gather + `index_add` scatter), so FFN compute scales with
+/// `top_k`, not `n_experts`.
 pub struct MoeFfn {
     router: Linear,
     routed: Vec<Expert>,
@@ -93,37 +93,49 @@ impl MoeFfn {
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (b, seq, dim) = xs.dims3().map_err(cand)?;
         let n_tok = b * seq;
+        let device = xs.device().clone();
+        let dtype = xs.dtype();
         let flat = xs.reshape((n_tok, dim)).map_err(cand)?;
 
         let logits = self.router.forward(&flat).map_err(cand)?;
         let probs = ops::softmax_last_dim(&logits).map_err(cand)?;
         let rows: Vec<Vec<f32>> = probs.to_vec2().map_err(cand)?;
 
+        // Build per-expert token lists and renormalized top-k weights.
         let n_experts = self.routed.len();
-        let mut weights = vec![0f32; n_tok * n_experts];
+        let mut tok_ids: Vec<Vec<u32>> = vec![Vec::new(); n_experts];
+        let mut tok_w: Vec<Vec<f32>> = vec![Vec::new(); n_experts];
+        let mut order: Vec<usize> = (0..n_experts).collect();
         for (t, row) in rows.iter().enumerate() {
-            let mut idx: Vec<usize> = (0..n_experts).collect();
-            idx.sort_by(|&a, &c| row[c].partial_cmp(&row[a]).unwrap());
-            let keep = &idx[..self.top_k.min(n_experts)];
+            order.sort_by(|&a, &c| row[c].partial_cmp(&row[a]).unwrap());
+            let keep = &order[..self.top_k.min(n_experts)];
             let denom: f32 = keep.iter().map(|&e| row[e]).sum::<f32>().max(1e-9);
             for &e in keep {
-                weights[t * n_experts + e] = row[e] / denom;
+                tok_ids[e].push(t as u32);
+                tok_w[e].push(row[e] / denom);
             }
         }
 
+        // Sparse dispatch: each expert processes only its routed tokens, so FFN
+        // compute scales with top_k rather than n_experts.
         let mut out = flat.zeros_like().map_err(cand)?;
         for (e, expert) in self.routed.iter().enumerate() {
-            let col: Vec<f32> = (0..n_tok).map(|t| weights[t * n_experts + e]).collect();
-            if col.iter().all(|&w| w == 0.0) {
+            let n_e = tok_ids[e].len();
+            if n_e == 0 {
                 continue;
             }
-            let gate = Tensor::from_vec(col, (n_tok, 1), flat.device())
+            let idx = Tensor::from_vec(tok_ids[e].clone(), (n_e,), &device).map_err(cand)?;
+            let gathered = flat.index_select(&idx, 0).map_err(cand)?; // [n_e, dim]
+            let y = expert.forward(&gathered)?;
+            let w = Tensor::from_vec(tok_w[e].clone(), (n_e, 1), &device)
                 .map_err(cand)?
-                .to_dtype(flat.dtype())
+                .to_dtype(dtype)
                 .map_err(cand)?;
-            let y = expert.forward(&flat)?;
-            out = (out + y.broadcast_mul(&gate).map_err(cand)?).map_err(cand)?;
+            let y = y.broadcast_mul(&w).map_err(cand)?;
+            out = out.index_add(&idx, &y, 0).map_err(cand)?;
         }
+
+        // Shared experts always contribute (dense over all tokens).
         for expert in &self.shared {
             out = (out + expert.forward(&flat)?).map_err(cand)?;
         }

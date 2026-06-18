@@ -252,6 +252,11 @@ name = "turbo_quant_bench"
 harness = false
 required-features = ["quantize"]
 
+[[bench]]
+name = "recurrent_depth_bench"
+harness = false
+required-features = ["candle"]
+
 # Test configurations
 [[test]]
 name = "real_model_test"
