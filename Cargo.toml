@@ -238,6 +238,7 @@ members = [
     "crates/emergent-time",
     # PhotonLayer: learned optical-frontend computing simulator (ADR-260)
     "crates/photonlayer-core",
+    "crates/photonlayer-bench",
 ]
 resolver = "2"
 
