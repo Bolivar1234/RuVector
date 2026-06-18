@@ -14,9 +14,13 @@ pub mod baselines;
 pub mod decoder;
 pub mod learn;
 pub mod pipeline;
+pub mod privacy;
 pub mod synthetic;
+pub mod verification;
 
 pub use baselines::{run_classification, run_compression, BenchReport, VariantResult};
 pub use decoder::{frame_features, NearestCentroid};
 pub use learn::{learn_mask, LearnConfig, LearnOutcome};
+pub use privacy::{privacy_leakage, PrivacyReport};
 pub use synthetic::{class_names, make_dataset, Sample, NUM_CLASSES};
+pub use verification::{verify_eer, VerificationReport};
