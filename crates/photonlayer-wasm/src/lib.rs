@@ -341,9 +341,8 @@ mod tests {
         let u = normalize_to_u8(&v);
         assert_eq!(u[0], 0);
         assert_eq!(u[4], 255);
-        for &b in &u {
-            assert!(b <= 255);
-        }
+        // Monotonic non-decreasing mapping (0..=1 -> 0..=255); range is guaranteed by u8.
+        assert!(u.windows(2).all(|w| w[0] <= w[1]));
     }
 
     #[test]
