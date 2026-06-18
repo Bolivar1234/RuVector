@@ -239,6 +239,9 @@ members = [
     # PhotonLayer: learned optical-frontend computing simulator (ADR-260)
     "crates/photonlayer-core",
     "crates/photonlayer-bench",
+    "crates/photonlayer-ruvector",
+    "crates/photonlayer-cli",
+    "crates/photonlayer-wasm",
 ]
 resolver = "2"
 
