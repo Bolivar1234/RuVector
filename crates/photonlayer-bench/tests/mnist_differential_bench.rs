@@ -70,29 +70,33 @@ fn print_table(label: &str, r: &MnistBenchResult) {
     eprintln!("optics        : {0}x{0} field, 28->{1}x{1} digit, AngularSpectrum diffraction", r.grid, r.cell);
     eprintln!("seed          : {:#x}  (mask init + hill-climb stream, fully deterministic)", r.seed);
     eprintln!("train / test  : {} / {} images, balanced across 10 classes (blind test split)", r.train_size, r.test_size);
+    eprintln!("Two masks, two objectives -- A proves task-useful compression (the product");
+    eprintln!("claim); B isolates the differential-detection lever (the mechanism).");
     eprintln!("----------------------------------------------------------------------------");
-    eprintln!("[acceptance]  same tiny centroid decoder, full image vs compressed optical read");
+    eprintln!("[CONFIG A | decoder objective, seed {:#x}]  product/acceptance headline", r.seed);
+    eprintln!("  same tiny centroid decoder, full image vs compressed optical read:");
     eprintln!("    full-image baseline ({:>5} px, {:>5}-param decoder)   {:>7.4}", r.baseline_pixels, r.baseline_decoder_params, r.baseline_acc);
     eprintln!("    optical compressed  ({:>5} px, {:>5}-param decoder)   {:>7.4}", r.optical_sensor_pixels, r.decoder_params, r.optical_acc);
     eprintln!("    optical - baseline                                   {:>+7.4}  (acceptance: >= -0.0200)", r.optical_acc - r.baseline_acc);
+    eprintln!("    learned-mask decoded vs random-mask decoded          {:>+7.4}  (WIN guard)", r.optical_acc - r.random_optical_acc);
+    eprintln!("  optics-only argmax floor on the SAME Config-A mask (no decoder):");
+    eprintln!("    plain argmax I+_k / differential argmax I+ - I-      {:>7.4} / {:.4}", r.optics_only_plain, r.optics_only_differential);
+    eprintln!("    (Config A is trained for the decoder, not argmax, so this lever is small here)");
     eprintln!("----------------------------------------------------------------------------");
-    eprintln!("[differential ablation]  identical trained mask, optics-only argmax (no decoder)");
-    eprintln!("    learned plain  argmax I+_k                           {:>7.4}", r.optics_only_plain);
-    eprintln!("    learned differential argmax I+ - I-                  {:>7.4}", r.optics_only_differential);
-    eprintln!("    differential lever delta                             {:>+7.4}  (diff - plain)", r.optics_only_differential - r.optics_only_plain);
-    eprintln!("    random differential argmax (mask-sensitive)         {:>7.4}", r.random_optics_only_differential);
-    eprintln!("    learned - random (argmax diff, WIN guard)           {:>+7.4}", r.optics_only_differential - r.random_optics_only_differential);
+    eprintln!("[CONFIG B | argmax-differential objective, seed {:#x}]  mechanism isolation", r.config_b_seed);
+    eprintln!("  optics-only differential detection, NO decoder (Li/Ozcan arXiv:1906.03417):");
+    eprintln!("    plain  argmax I+_k                                   {:>7.4}", r.config_b_plain);
+    eprintln!("    differential argmax I+ - I-                          {:>7.4}", r.config_b_differential);
+    eprintln!("    differential lever delta                             {:>+7.4}  (diff - plain)", r.config_b_differential - r.config_b_plain);
+    eprintln!("    random-mask differential argmax (reference)          {:>7.4}", r.random_optics_only_differential);
+    eprintln!("    NOTE: absolute accuracy is single-layer optics-only (no decoder) and modest");
+    eprintln!("    by construction; the +delta isolates the lever, it is NOT a headline accuracy.");
     eprintln!("----------------------------------------------------------------------------");
-    eprintln!("[compressed readout]  learned vs random mask, pooled sensor + tiny decoder");
-    eprintln!("    random-mask decoded                                  {:>7.4}", r.random_optical_acc);
-    eprintln!("    learned-mask decoded                                 {:>7.4}", r.optical_acc);
-    eprintln!("    learned - random (decoded)                           {:>+7.4}", r.optical_acc - r.random_optical_acc);
-    eprintln!("----------------------------------------------------------------------------");
-    eprintln!("compression   : {} input px -> {} optical sensor px = {:.1}x sensor reduction (>= 16x)",
+    eprintln!("compression (A): {} input px -> {} optical sensor px = {:.1}x sensor reduction (>= 16x)",
         r.baseline_pixels, r.optical_sensor_pixels, r.sensor_reduction_x);
-    eprintln!("digital MACs  : {} (optical decoder) vs {} (baseline decoder) = {:.1}x fewer (>= 10x)",
+    eprintln!("digital MACs (A): {} (optical decoder) vs {} (baseline decoder) = {:.1}x fewer (>= 10x)",
         r.optical_macs, r.baseline_macs, r.mac_reduction_x);
-    eprintln!("acceptance    : {}", if r.acceptance_pass() { "PASS" } else { "FAIL" });
+    eprintln!("acceptance (A): {}", if r.acceptance_pass() { "PASS" } else { "FAIL" });
     eprintln!("============================================================================\n");
 }
 
@@ -135,6 +139,18 @@ fn mnist_differential_smoke() {
     // Compression is structural (1024 -> 64), so it must always hold.
     assert!(r.sensor_reduction_x >= 16.0, "sensor reduction {:.1}x below 16x", r.sensor_reduction_x);
     assert!(r.mac_reduction_x >= 10.0, "MAC reduction {:.1}x below 10x", r.mac_reduction_x);
+    // Config B (argmax-differential objective) is REPORTED at smoke scale but not
+    // asserted: the differential-vs-plain lever is a full-scale phenomenon
+    // (~+13pp at 600 iters / 4000 train) and is noisy at the few-iteration smoke
+    // budget, so the full test owns its margin assertion (kept honest, not forced
+    // green here). Config B must at least beat the random-mask reference, which is
+    // robust even at smoke scale.
+    assert!(
+        r.config_b_differential >= r.random_optics_only_differential + 0.02,
+        "Config B differential argmax {:.4} did not beat random-mask reference {:.4} by >= 0.02",
+        r.config_b_differential,
+        r.random_optics_only_differential
+    );
 }
 
 #[test]
@@ -166,6 +182,16 @@ fn mnist_differential_full() {
     //  2. Structural compression bars (these hold by construction).
     assert!(r.sensor_reduction_x >= 16.0, "sensor reduction {:.1}x < 16x", r.sensor_reduction_x);
     assert!(r.mac_reduction_x >= 10.0, "MAC reduction {:.1}x < 10x", r.mac_reduction_x);
+    //  3. Config B isolates the differential lever: a mask trained for the
+    //     argmax-differential objective reads more accurately with the
+    //     differential readout (I+ - I-) than the plain readout (I+). Measured
+    //     ~+13pp at this scale; assert a conservative positive margin.
+    assert!(
+        r.config_b_differential >= r.config_b_plain + 0.05,
+        "Config B differential argmax {:.4} did not beat plain argmax {:.4} by >= 0.05 (the lever)",
+        r.config_b_differential,
+        r.config_b_plain
+    );
 
     // Reported, NOT hard-asserted (honest research outcomes that single-layer
     // hill-climbed optics may or may not reach): the within-2pp-of-baseline
