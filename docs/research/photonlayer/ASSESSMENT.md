@@ -6,7 +6,33 @@
 > back ends* for low-latency, low-power, privacy-preserving, compact sensing.
 
 Companion to ADR-260 (optical computing simulator) and ADR-261 (mask exchange & determinism).
-Measured numbers in this doc come from `photonlayer-bench` (`more_data_bench`, see the README table).
+Measured numbers in this doc come from `photonlayer-bench` (`more_data_bench` + `mnist_differential_bench`).
+
+## Measured on real data (MNIST, M2)
+
+Deterministic run (seed `0x6e157`; 4000 train / 2000 blind test, balanced 10-class; public MNIST IDX;
+`cargo test -p photonlayer-bench --release --test mnist_differential_bench mnist_differential_full -- --ignored`):
+
+| | sensor px | decoder params | blind-test acc |
+|---|---:|---:|---:|
+| full-image baseline (same tiny centroid decoder) | 1024 | 10 240 | **75.40%** |
+| **optical compressed** (learned mask + pooled read) | **64** | **640** | **74.20%** |
+| Δ vs baseline | — | — | **−1.20 pp** |
+
+→ **16.0× fewer sensor pixels and 16.0× fewer digital MACs at −1.2 pp accuracy.** Learned mask beats a
+random mask by **+9.25 pp** decoded. The differential-detection lever (Li/Ozcan `I⁺−I⁻`) is isolated in a
+second mask trained for that objective (+~13 pp differential-vs-plain at ~30% absolute, optics-only).
+
+### Honest positioning (use verbatim; no slop)
+
+> *A task-trained single optical layer with a tiny digital decoder, classifying MNIST within ~1–2 pp of a
+> **matched** full-image tiny-decoder baseline while using ≥16× fewer sensor pixels and ≥10× fewer digital
+> MACs. This is **competitive single-layer optical compression** — trading a small, quantified accuracy
+> margin for large sensor- and compute-savings — **not a new accuracy SOTA**; the multi-layer ~97–99 %
+> D2NN / optoelectronic regime is explicitly out of scope.*
+
+**Must avoid** (overclaim): "beats SOTA", "state-of-the-art MNIST" (real SOTA > 99.7 %), "outperforms
+D2NNs" (different task), any bare "≥16×/≥10×" without naming the matched baseline, "near-lossless".
 
 ## Why it's differentiated
 
@@ -14,7 +40,8 @@ The unique angle is **not** "optical neural network" — it's **auditable optica
 task-useful sensing**. Most optical-AI narratives overclaim; PhotonLayer's wedge is:
 
 1. **Task-first** — mask trained for the downstream objective, not generic reconstruction.
-2. **Compression-first** — flagship 16×16 → 4 sensor pixels (64× pixel reduction; measured ~99% vs ~74% random).
+2. **Compression-first** — real-data MNIST: 1024 → 64 sensor pixels (16× reduction) at −1.2 pp vs a matched
+   full-image baseline; synthetic flagship reaches 16×16 → 4 (64× reduction). Both measured, both deterministic.
 3. **Privacy by physics** — verify/classify from a measurement that need not look like the scene.
 4. **Deterministic receipts** — reproducible, BLAKE3-bound; suitable for regulated experiments and audit trails.
 5. **Rust-native** — embedded, WASM, deterministic benchmarking, eventual hardware control.
@@ -98,7 +125,20 @@ Near-term wedge: software + simulation + benchmark receipts. Long-term value: ha
 
 ## References
 
+Closest architectural comparisons (cite these for positioning):
+
+- Wirth-Singh et al., **Compressed Meta-Optical Encoder for Image Classification**, arXiv:**2406.06534** (2024) /
+  *Adv. Photonics Nexus* 4(2):026009 (2025) — the direct architectural twin: optical encoder + small digital
+  back end, MNIST ~93.4% hybrid, ~17.3M → 85.8K MACs, a few pp below its own CNN baseline. **Primary comparison.**
+- Bezzam, Vetterli, Simeoni, arXiv:**2206.01429** (2022) — few-pixel anchor (~87.5% MNIST at a 12-pixel learned mask).
+- Lin et al., **All-optical machine learning using diffractive deep neural networks**, *Science* 361:1004 (2018),
+  arXiv:1804.08711 — the 5-layer D2NN (~91.75% MNIST) we are explicitly **not** competing with.
+- Li, Ozcan et al., arXiv:1906.03417 — differential detection (`I⁺−I⁻`) as the diffractive readout (the M2 lever).
+- Wang/Zhu/Fu, arXiv:**2507.17374** (2025) — single-layer all-optical 98.59%; **contrast only** (different objective,
+  we do not claim to beat it).
+
+Background:
+
 - Optical neural networks: progress and challenges — *Light: Science & Applications* (Nature, 2024).
 - Metaoptics merging computational optics and electronics — PMC/NIH.
 - Privacy-Aware Meta-Optics for Person Detection — *ACS Photonics* (2026).
-- Target-depth sensing with metasurface-encoder integrated optoelectronic neural network — arXiv:2604.25160.
