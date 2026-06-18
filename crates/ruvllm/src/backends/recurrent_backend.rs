@@ -379,4 +379,66 @@ mod tests {
         assert_eq!(back.model, MythosConfig::tiny());
         assert_eq!(back.architecture, "openmythos");
     }
+
+    /// Write a loadable checkpoint dir (config.json + model.safetensors) and
+    /// return its path-owning TempDir plus the config used.
+    fn write_checkpoint(arch: &str) -> (tempfile::TempDir, MythosConfig) {
+        let cfg = MythosConfig::tiny();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Weights from a VarMap (names match the module hierarchy on load).
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+        let _ = OpenMythos::load(vb, cfg.clone()).unwrap();
+        varmap.save(dir.path().join("model.safetensors")).unwrap();
+
+        // Manifest.
+        let manifest = CheckpointManifest {
+            architecture: arch.to_string(),
+            model: cfg.clone(),
+            eos_token_id: None,
+        };
+        std::fs::write(
+            dir.path().join("config.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        (dir, cfg)
+    }
+
+    #[test]
+    fn load_model_from_disk_then_generate() {
+        let (dir, cfg) = write_checkpoint("openmythos");
+        let mut b = RecurrentBackend::new();
+        b.load_model(dir.path().to_str().unwrap(), ModelConfig::default())
+            .expect("load_model");
+        assert!(b.is_model_loaded());
+        assert_eq!(b.model_info().unwrap().vocab_size, cfg.vocab_size);
+
+        let params = GenerateParams {
+            max_tokens: 4,
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let out = b.generate_token_ids(&[1, 2, 3], &params).unwrap();
+        assert_eq!(out.len(), 4);
+    }
+
+    #[test]
+    fn load_model_rejects_non_mythos_architecture() {
+        // Honest boundary enforced through the full disk loader.
+        let (dir, _cfg) = write_checkpoint("llama");
+        let mut b = RecurrentBackend::new();
+        let err = b.load_model(dir.path().to_str().unwrap(), ModelConfig::default());
+        assert!(err.is_err());
+        assert!(!b.is_model_loaded());
+    }
+
+    #[test]
+    fn load_model_requires_directory() {
+        let mut b = RecurrentBackend::new();
+        assert!(b
+            .load_model("/nonexistent/path/to/model", ModelConfig::default())
+            .is_err());
+    }
 }
