@@ -13,15 +13,30 @@ Measured numbers in this doc come from `photonlayer-bench` (`more_data_bench` + 
 Deterministic run (seed `0x6e157`; 4000 train / 2000 blind test, balanced 10-class; public MNIST IDX;
 `cargo test -p photonlayer-bench --release --test mnist_differential_bench mnist_differential_full -- --ignored`):
 
+**Config A — the product claim (decoder objective, seed `0x6e157`):**
+
 | | sensor px | decoder params | blind-test acc |
 |---|---:|---:|---:|
 | full-image baseline (same tiny centroid decoder) | 1024 | 10 240 | **75.40%** |
-| **optical compressed** (learned mask + pooled read) | **64** | **640** | **74.20%** |
-| Δ vs baseline | — | — | **−1.20 pp** |
+| **optical compressed** (learned mask + pooled read) | **64** | **640** | **73.05%** |
+| Δ vs baseline | — | — | **−2.35 pp** |
 
-→ **16.0× fewer sensor pixels and 16.0× fewer digital MACs at −1.2 pp accuracy.** Learned mask beats a
-random mask by **+9.25 pp** decoded. The differential-detection lever (Li/Ozcan `I⁺−I⁻`) is isolated in a
-second mask trained for that objective (+~13 pp differential-vs-plain at ~30% absolute, optics-only).
+→ **16.0× fewer sensor pixels and 16.0× fewer digital MACs.** Learned mask beats a random mask by
+**+8.10 pp** decoded (the value of learning the optics is real). The compression claim is the headline.
+
+**Config B — the mechanism (argmax-diff objective, seed `0x6e15c`, NO decoder):** isolates the
+Li/Ozcan differential-detection lever — plain argmax `I⁺` 18.40% vs differential argmax `I⁺−I⁻`
+34.90% = **+16.50 pp** lever (absolute acc is modest by construction; the delta isolates the lever,
+not a headline accuracy).
+
+**Honest margin + the ceiling.** On the bit-exact *pre-optimization* FFT core, Config A was **−1.20 pp
+(acceptance PASS)**. The OPT-B twiddle-table change (a determinism *improvement* — it removes FFT
+float-drift) shifted all FFT paths, moving the converged Config A to **−2.35 pp**, just outside the
+−2 pp line. A training-budget sweep proves this is an **optimizer ceiling, not a budget issue**
+(1500→−2.35, 3000→−2.15, 4500→−2.20 pp; block hill-climbing has converged). Closing the last ~2 pp —
+and reaching ~85–89 % — requires **analytic gradient descent** through the diffraction operator
+(`Propagator::backward_into` with `conj(H)`), the documented roadmap keystone. We report the true
+single-mask number; we do not assert a PASS the method cannot reach.
 
 ### Honest positioning (use verbatim; no slop)
 
@@ -40,8 +55,9 @@ The unique angle is **not** "optical neural network" — it's **auditable optica
 task-useful sensing**. Most optical-AI narratives overclaim; PhotonLayer's wedge is:
 
 1. **Task-first** — mask trained for the downstream objective, not generic reconstruction.
-2. **Compression-first** — real-data MNIST: 1024 → 64 sensor pixels (16× reduction) at −1.2 pp vs a matched
-   full-image baseline; synthetic flagship reaches 16×16 → 4 (64× reduction). Both measured, both deterministic.
+2. **Compression-first** — real-data MNIST: 1024 → 64 sensor pixels (16× reduction) at −2.35 pp vs a matched
+   full-image baseline (converged single-mask hill-climb); synthetic flagship reaches 16×16 → 4 (64× reduction).
+   Both measured, both deterministic; gradient descent is the documented path to close the residual gap.
 3. **Privacy by physics** — verify/classify from a measurement that need not look like the scene.
 4. **Deterministic receipts** — reproducible, BLAKE3-bound; suitable for regulated experiments and audit trails.
 5. **Rust-native** — embedded, WASM, deterministic benchmarking, eventual hardware control.
