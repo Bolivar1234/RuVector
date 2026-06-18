@@ -8,7 +8,7 @@
 use crate::complex::Complex;
 use crate::config::{OpticalConfig, PropagationMode};
 use crate::error::{PhotonError, Result};
-use crate::fft::{fft_2d, fftshift_2d, is_pow2};
+use crate::fft::{checkerboard_premultiply, fft_2d, is_pow2};
 use crate::field::OpticalField;
 use core::f32::consts::PI;
 
@@ -47,8 +47,11 @@ pub fn propagate(field: &OpticalField, config: &OpticalConfig) -> Result<Optical
 fn fraunhofer(field: &OpticalField) -> Result<OpticalField> {
     let (w, h) = (field.width, field.height);
     let mut data = field.data.clone();
+    // fftshift(FFT(x)) == FFT((-1)^(x+y) · x): premultiply by a ±1 checkerboard
+    // before the transform instead of shifting quadrants after it. Exact ±1.0
+    // negation -> bit-identical to `fft_2d` + `fftshift_2d`, but no shift alloc.
+    checkerboard_premultiply(&mut data, w, h);
     fft_2d(&mut data, w, h, false);
-    fftshift_2d(&mut data, w, h);
     // Normalize so total power stays in a sane range for downstream metrics.
     let norm = 1.0 / (w as f32 * h as f32).sqrt();
     for c in &mut data {
@@ -181,8 +184,10 @@ impl Propagator {
         }
         match &self.kind {
             PropKind::Fraunhofer => {
+                // OPT-A: ±1 checkerboard premultiply folds the post-FFT fftshift
+                // into the input (shift theorem) — bit-identical, no shift alloc.
+                checkerboard_premultiply(data, w, h);
                 fft_2d(data, w, h, false);
-                fftshift_2d(data, w, h);
                 let norm = 1.0 / (w as f32 * h as f32).sqrt();
                 for c in data.iter_mut() {
                     *c = c.scale(norm);
