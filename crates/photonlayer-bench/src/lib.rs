@@ -12,7 +12,10 @@
 
 pub mod baselines;
 pub mod decoder;
+pub mod diffdetect;
 pub mod learn;
+pub mod mnist;
+pub mod mnist_bench;
 pub mod pipeline;
 pub mod privacy;
 pub mod synthetic;
@@ -20,7 +23,10 @@ pub mod verification;
 
 pub use baselines::{run_classification, run_compression, BenchReport, VariantResult};
 pub use decoder::{frame_features, NearestCentroid};
+pub use diffdetect::{DiffDetector, Region};
 pub use learn::{learn_mask, LearnConfig, LearnOutcome};
+pub use mnist::{load_test, load_train, subset, MnistError, RawMnist, MNIST_CLASSES};
+pub use mnist_bench::{run_mnist_differential, MnistBenchConfig, MnistBenchResult};
 pub use privacy::{privacy_leakage, PrivacyReport};
 pub use synthetic::{class_names, make_dataset, Sample, NUM_CLASSES};
 pub use verification::{verify_eer, VerificationReport};
