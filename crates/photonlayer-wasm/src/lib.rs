@@ -124,12 +124,20 @@ pub fn run_trace(
     config_json: &str,
 ) -> Result<TraceResult, String> {
     // Parse / build config.
+    // Bound untrusted image dimensions up front to block DoS / overflow.
+    let max = photonlayer_core::config::MAX_GRID_DIM;
+    if width == 0 || height == 0 || width > max || height > max {
+        return Err(format!("image dimensions must be in 1..={max}"));
+    }
+
     let config: OpticalConfig = if config_json.trim().is_empty() {
         OpticalConfig::demo(width, height)
     } else {
         serde_json::from_str(config_json)
             .map_err(|e| format!("config parse error: {e}"))?
     };
+    // Validate the (untrusted) config before it drives any allocation/FFT.
+    config.validate().map_err(|e| format!("invalid config: {e}"))?;
 
     // Build input image.
     let img = InputImage::from_gray_u8(width, height, image_bytes)

@@ -93,4 +93,83 @@ impl OpticalConfig {
     pub fn distance_m(&self) -> f32 {
         self.propagation_mm * 1e-3
     }
+
+    /// Validate an (untrusted) config before it drives any allocation or FFT.
+    ///
+    /// This is the security choke point (ADR-260 boundary hardening): a
+    /// malicious `config_json` from the browser/WASM path could otherwise
+    /// request absurd grid dimensions — causing an allocation DoS or, on
+    /// 32-bit `wasm32` (`usize == u32`), a `width * height` overflow. We cap
+    /// dimensions, require power-of-two grids, and reject non-finite or
+    /// non-physical optical parameters.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        use crate::error::PhotonError;
+        use crate::fft::is_pow2;
+
+        if !is_pow2(self.width) || self.width > MAX_GRID_DIM {
+            return Err(PhotonError::InvalidConfig(format!(
+                "width {} must be a power of two in 1..={MAX_GRID_DIM}",
+                self.width
+            )));
+        }
+        if !is_pow2(self.height) || self.height > MAX_GRID_DIM {
+            return Err(PhotonError::InvalidConfig(format!(
+                "height {} must be a power of two in 1..={MAX_GRID_DIM}",
+                self.height
+            )));
+        }
+        if !(self.wavelength_nm.is_finite() && self.wavelength_nm > 0.0) {
+            return Err(PhotonError::InvalidConfig("wavelength_nm must be finite and > 0".into()));
+        }
+        if !(self.pixel_pitch_um.is_finite() && self.pixel_pitch_um > 0.0) {
+            return Err(PhotonError::InvalidConfig("pixel_pitch_um must be finite and > 0".into()));
+        }
+        if !self.propagation_mm.is_finite() {
+            return Err(PhotonError::InvalidConfig("propagation_mm must be finite".into()));
+        }
+        let d = &self.detector;
+        if !(d.shot_noise_photons.is_finite()
+            && d.read_noise_std.is_finite()
+            && d.saturation.is_finite())
+        {
+            return Err(PhotonError::InvalidConfig("detector noise/saturation must be finite".into()));
+        }
+        if d.binning == 0 {
+            return Err(PhotonError::InvalidConfig("detector.binning must be >= 1".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Maximum grid side length accepted from an untrusted config. 4096*4096 fits
+/// comfortably in a 32-bit `usize`, so no dimension product can overflow.
+pub const MAX_GRID_DIM: usize = 4096;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_config_is_valid() {
+        assert!(OpticalConfig::demo(32, 32).validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_and_non_pow2_and_nonfinite() {
+        let mut c = OpticalConfig::demo(32, 32);
+        c.width = 8192; // > MAX_GRID_DIM
+        assert!(c.validate().is_err());
+
+        let mut c = OpticalConfig::demo(32, 32);
+        c.height = 30; // not power of two
+        assert!(c.validate().is_err());
+
+        let mut c = OpticalConfig::demo(32, 32);
+        c.wavelength_nm = f32::NAN;
+        assert!(c.validate().is_err());
+
+        let mut c = OpticalConfig::demo(32, 32);
+        c.detector.binning = 0;
+        assert!(c.validate().is_err());
+    }
 }

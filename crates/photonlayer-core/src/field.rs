@@ -66,6 +66,14 @@ impl OpticalField {
         if !is_pow2(grid_h) {
             return Err(PhotonError::NotPowerOfTwo(grid_h));
         }
+        // Cap grid size before allocating, to block DoS / usize overflow from
+        // an untrusted config (ADR-260 boundary hardening).
+        if grid_w > crate::config::MAX_GRID_DIM || grid_h > crate::config::MAX_GRID_DIM {
+            return Err(PhotonError::InvalidConfig(format!(
+                "grid {grid_w}x{grid_h} exceeds MAX_GRID_DIM={}",
+                crate::config::MAX_GRID_DIM
+            )));
+        }
         if img.width > grid_w || img.height > grid_h {
             return Err(PhotonError::InvalidConfig(format!(
                 "image {}x{} larger than grid {}x{}",
