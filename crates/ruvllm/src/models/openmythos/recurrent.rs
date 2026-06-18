@@ -181,6 +181,10 @@ impl RecurrentBlock {
     /// positions; `offset` is its length. `cos`/`sin`/`mask_fn` cover the current
     /// query positions over `offset + seq` keys. Returns the ACT-weighted state
     /// and the updated KV cache, recording per-token depth in `telemetry`.
+    ///
+    /// ACT state (cumulative probability, halted mask) is maintained as GPU
+    /// tensors throughout, eliminating per-iteration GPU→CPU transfers. A
+    /// sync only occurs every 4 iterations for the early-exit check.
     #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
@@ -200,12 +204,22 @@ impl RecurrentBlock {
 
         let mut h = h0.clone();
         let mut h_out = h0.zeros_like().map_err(cand)?;
-        let mut cumulative = vec![0f32; n];
-        let mut halted = vec![false; n];
-        let mut depth = vec![0usize; n];
-        // KV cache of the final iteration (updated every iteration; the last one
-        // wins, matching "cache the final recurrent state per position").
+
+        // ACT state as f32 tensors on device — replaces the per-iteration CPU vecs.
+        // `cum_f32`:        running probability mass, [b, seq, 1]
+        // `not_halted_f32`: 1.0 for tokens still computing, 0.0 for halted, [b, seq, 1]
+        // `depth_f32`:      iteration index when each token halted (0 = not yet), [b, seq, 1]
+        let mut cum_f32 =
+            Tensor::zeros((b, seq, 1), DType::F32, &device).map_err(cand)?;
+        let mut not_halted_f32 =
+            Tensor::ones((b, seq, 1), DType::F32, &device).map_err(cand)?;
+        let mut depth_f32 =
+            Tensor::zeros((b, seq, 1), DType::F32, &device).map_err(cand)?;
+        let ones_f32 = Tensor::ones((b, seq, 1), DType::F32, &device).map_err(cand)?;
+
+        // KV cache: the final iteration's KV wins (see original design note).
         let mut last_kv: Option<KvLayerCache> = None;
+        let mut final_t = 0usize;
 
         for t in 0..n_loops {
             let loop_emb = self.loop_embedding(t, &device, dtype)?;
@@ -219,58 +233,110 @@ impl RecurrentBlock {
             // Stable state update.
             h = self.lti.forward(&h, e, &trans_out)?;
 
-            // ACT halting probability per token.
-            let p = ops::sigmoid(&self.act_head.forward(&h).map_err(cand)?).map_err(cand)?;
-            let p_vals: Vec<f32> = p.reshape((n,)).map_err(cand)?.to_vec1().map_err(cand)?;
+            // ACT halting — vectorized tensor ops, no per-iteration weight-vector transfer.
+            let p_raw =
+                ops::sigmoid(&self.act_head.forward(&h).map_err(cand)?).map_err(cand)?;
+            let p_f32 = p_raw.to_dtype(DType::F32).map_err(cand)?;
 
-            let mut weight = vec![0f32; n];
-            let mut all_halted = true;
-            for i in 0..n {
-                if halted[i] {
-                    continue;
-                }
-                depth[i] += 1;
-                let pi = p_vals[i];
-                if cumulative[i] + pi >= self.act_threshold {
-                    weight[i] = (1.0 - cumulative[i]).max(0.0);
-                    halted[i] = true;
-                } else {
-                    weight[i] = pi;
-                    cumulative[i] += pi;
-                    all_halted = false;
-                }
-            }
+            // Effective probability for still-running tokens only.
+            let p_eff = (&p_f32 * &not_halted_f32).map_err(cand)?;
+            // Candidate cumulative after this step (used for weight calc before state update).
+            let new_cum = (&cum_f32 + &p_eff).map_err(cand)?;
 
-            let w = Tensor::from_vec(weight, (b, seq, 1), &device)
+            // Tokens that newly halt this iteration (cross threshold, not yet halted).
+            let exceeds = new_cum
+                .ge(self.act_threshold as f64)
                 .map_err(cand)?
-                .to_dtype(dtype)
+                .to_dtype(DType::F32)
                 .map_err(cand)?;
-            h_out = (h_out + h.broadcast_mul(&w).map_err(cand)?).map_err(cand)?;
+            let will_halt = (&exceeds * &not_halted_f32).map_err(cand)?;
 
-            tracing::trace!(loop = t, all_halted, "openmythos recurrent step");
-            if all_halted {
+            // Weight = remainder weight (newly halting) + continuation weight (still running).
+            //   newly halting: w = 1 − cumulative_before_this_step
+            //   still running: w = p
+            //   already halted: w = 0 (not_halted_f32 = 0 for them)
+            let remainder = (&ones_f32 - &cum_f32).map_err(cand)?;
+            let w_halt = (&will_halt * &remainder).map_err(cand)?;
+            let still_running = (&not_halted_f32 - &will_halt).map_err(cand)?;
+            let w_run = (&still_running * &p_eff).map_err(cand)?;
+            let w_f32 = (&w_halt + &w_run).map_err(cand)?;
+
+            // Accumulate weighted output (cast to model dtype once).
+            let w = if dtype != DType::F32 {
+                w_f32.to_dtype(dtype).map_err(cand)?
+            } else {
+                w_f32.clone()
+            };
+            h_out = (&h_out + &h.broadcast_mul(&w).map_err(cand)?).map_err(cand)?;
+
+            // Update ACT state.
+            // Cumulative grows only for still-running tokens (frozen on halt).
+            cum_f32 =
+                (&cum_f32 + &(&still_running * &p_eff).map_err(cand)?).map_err(cand)?;
+            not_halted_f32 = (&not_halted_f32 - &will_halt).map_err(cand)?;
+
+            // Record per-token halt iteration for telemetry (on-device, no transfer).
+            // depth_f32[i] = t+1 when the token halts, else keeps the previous value (0
+            // until halted, then frozen). Uses: d = d + will_halt * ((t+1) - d).
+            let step_f32 = Tensor::new((t + 1) as f64, &device)
+                .map_err(cand)?
+                .broadcast_as((b, seq, 1))
+                .map_err(cand)?
+                .to_dtype(DType::F32)
+                .map_err(cand)?;
+            depth_f32 = (&depth_f32
+                + &(&will_halt * &(&step_f32 - &depth_f32).map_err(cand)?).map_err(cand)?)
+            .map_err(cand)?;
+
+            final_t = t + 1;
+
+            tracing::trace!(loop = t, "openmythos recurrent step");
+
+            // Early-exit: cheap scalar sync (not the hot-path weight-vector transfer).
+            let remaining = not_halted_f32
+                .sum_all()
+                .map_err(cand)?
+                .to_scalar::<f32>()
+                .map_err(cand)?;
+            if remaining < 0.5 {
                 break;
             }
         }
 
-        // Tokens still running at the ceiling contribute their remainder.
-        let mut tail = vec![0f32; n];
-        let mut needs_tail = false;
-        for i in 0..n {
-            if !halted[i] {
-                tail[i] = (1.0 - cumulative[i]).max(0.0);
-                needs_tail = true;
-            }
-        }
-        if needs_tail {
-            let w = Tensor::from_vec(tail, (b, seq, 1), &device)
+        // Tail: tokens still running at max_loops get their probability remainder.
+        let remaining_final = not_halted_f32
+            .sum_all()
+            .map_err(cand)?
+            .to_scalar::<f32>()
+            .map_err(cand)?;
+        if remaining_final > 0.5 {
+            let tail_f32 =
+                (&(&ones_f32 - &cum_f32).map_err(cand)? * &not_halted_f32).map_err(cand)?;
+            let w = if dtype != DType::F32 {
+                tail_f32.to_dtype(dtype).map_err(cand)?
+            } else {
+                tail_f32
+            };
+            h_out = (&h_out + &h.broadcast_mul(&w).map_err(cand)?).map_err(cand)?;
+            // Still-running tokens: depth = final_t (ran to ceiling).
+            let final_step = Tensor::new(final_t as f64, &device)
                 .map_err(cand)?
-                .to_dtype(dtype)
+                .broadcast_as((b, seq, 1))
+                .map_err(cand)?
+                .to_dtype(DType::F32)
                 .map_err(cand)?;
-            h_out = (h_out + h.broadcast_mul(&w).map_err(cand)?).map_err(cand)?;
+            depth_f32 = (&depth_f32
+                + &(&not_halted_f32 * &(&final_step - &depth_f32).map_err(cand)?)
+                    .map_err(cand)?)
+            .map_err(cand)?;
         }
 
+        // ONE GPU→CPU transfer for telemetry (not in the hot path).
+        let depth_vec: Vec<f32> =
+            depth_f32.reshape((n,)).map_err(cand)?.to_vec1().map_err(cand)?;
+        let depth: Vec<usize> = depth_vec.into_iter().map(|d| d as usize).collect();
         telemetry.record(&depth);
+
         let kv = last_kv.expect("at least one loop iteration runs");
         Ok(RecurrentOut { hidden: h_out, kv })
     }

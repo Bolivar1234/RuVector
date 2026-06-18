@@ -747,11 +747,16 @@ mod candle_impl {
             b: usize,
             seq: usize,
         ) -> Result<(Tensor, (Tensor, Tensor))> {
+            let n = b * seq;
             let mut hidden = xs.clone();
-            // `running[t] == 1.0` while token t still loops, else 0.0.
-            let mut running = vec![1.0f32; b * seq];
-            // Realized depth (block applications) per token.
-            let mut depth = vec![0usize; b * seq];
+
+            // GPU-resident ACT state — eliminates per-iteration to_vec1()/from_vec() transfers.
+            // `running_f32`:  1.0 for still-running tokens, 0.0 for halted, [b, seq, 1]
+            // `depth_f32`:    count of iterations each token was running, [b, seq, 1]
+            let mut running_f32 =
+                Tensor::ones((b, seq, 1), DType::F32, &self.device).map_err(cand)?;
+            let mut depth_f32 =
+                Tensor::zeros((b, seq, 1), DType::F32, &self.device).map_err(cand)?;
             let mut last_kv: Option<(Tensor, Tensor)> = None;
 
             let max_loops = self.cfg.max_loops;
@@ -760,57 +765,49 @@ mod candle_impl {
                 let (candidate, kv) = block.forward_cached(&hidden, cos, sin, mask, past)?;
                 last_kv = Some(kv);
 
-                // Fast path: while every token is still running (common early
-                // iterations) skip the freeze-mask tensor math entirely.
-                let all_running = running.iter().all(|&r| r > 0.5);
-                hidden = if all_running {
-                    candidate
-                } else {
-                    let running_mask = Tensor::from_vec(running.clone(), (b, seq, 1), &self.device)
-                        .map_err(cand)?
-                        .to_dtype(self.dtype)
-                        .map_err(cand)?;
-                    let halted_mask = ((running_mask.ones_like().map_err(cand)?) - &running_mask)
-                        .map_err(cand)?;
-                    (candidate.broadcast_mul(&running_mask).map_err(cand)?
-                        + hidden.broadcast_mul(&halted_mask).map_err(cand)?)
-                    .map_err(cand)?
-                };
-
-                // Count this iteration for tokens that were running.
-                for (d, r) in depth.iter_mut().zip(running.iter()) {
-                    if *r > 0.5 {
-                        *d += 1;
-                    }
-                }
-
-                // Compute p_halt on the updated hidden state and apply the
-                // per-token halting decision.
-                let p_halt = self.halting_router.p_halt(&hidden)?;
-                let p_vals: Vec<f32> = p_halt
-                    .reshape((b * seq,))
-                    .map_err(cand)?
-                    .to_vec1()
+                // Freeze halted tokens: hidden = running*candidate + (1-running)*hidden.
+                let running_typed = running_f32.to_dtype(self.dtype).map_err(cand)?;
+                let halted_typed = (running_typed.ones_like().map_err(cand)? - &running_typed)
                     .map_err(cand)?;
+                hidden = (candidate.broadcast_mul(&running_typed).map_err(cand)?
+                    + hidden.broadcast_mul(&halted_typed).map_err(cand)?)
+                .map_err(cand)?;
 
-                let mut any_running = false;
-                for (r, p) in running.iter_mut().zip(p_vals.iter()) {
-                    if *r > 0.5 {
-                        if *p >= self.cfg.halt_threshold {
-                            *r = 0.0; // token halts after this iteration
-                        } else {
-                            any_running = true;
-                        }
-                    }
-                }
+                // Depth: increment per-token count for tokens that were running this step.
+                depth_f32 = (&depth_f32 + &running_f32).map_err(cand)?;
 
-                tracing::trace!(step, any_running, "rdt loop iteration");
+                // Halting decision — fully on device, no weight-vector transfer.
+                let p_halt = self.halting_router.p_halt(&hidden)?;
+                let p_halt_f32 = p_halt.to_dtype(DType::F32).map_err(cand)?;
+                let should_halt = p_halt_f32
+                    .ge(self.cfg.halt_threshold as f64)
+                    .map_err(cand)?
+                    .to_dtype(DType::F32)
+                    .map_err(cand)?;
+                // Newly halted = was running AND p_halt >= threshold.
+                let newly_halted = (&should_halt * &running_f32).map_err(cand)?;
+                running_f32 = (&running_f32 - &newly_halted).map_err(cand)?;
+
+                tracing::trace!(step, "rdt loop iteration");
+
+                // Early-exit: one scalar sync (cheap vs. the eliminated weight-vector transfers).
+                let any_running = running_f32
+                    .sum_all()
+                    .map_err(cand)?
+                    .to_scalar::<f32>()
+                    .map_err(cand)?
+                    > 0.5;
                 if !any_running {
                     break;
                 }
             }
 
+            // Single depth sync at the end (not in the hot path).
+            let depth_vec: Vec<f32> =
+                depth_f32.reshape((n,)).map_err(cand)?.to_vec1().map_err(cand)?;
+            let depth: Vec<usize> = depth_vec.into_iter().map(|d| d as usize).collect();
             self.telemetry.record(&depth);
+
             let kv = last_kv.expect("at least one loop iteration runs");
             Ok((hidden, kv))
         }
