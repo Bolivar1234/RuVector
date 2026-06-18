@@ -98,7 +98,12 @@ impl MoeFfn {
         let flat = xs.reshape((n_tok, dim)).map_err(cand)?;
 
         let logits = self.router.forward(&flat).map_err(cand)?;
-        let probs = ops::softmax_last_dim(&logits).map_err(cand)?;
+        // Cast to F32 before to_vec2: softmax output may be BF16/F16 when the
+        // model runs in reduced precision, but the routing CPU scatter requires f32.
+        let probs = ops::softmax_last_dim(&logits)
+            .map_err(cand)?
+            .to_dtype(candle_core::DType::F32)
+            .map_err(cand)?;
         let rows: Vec<Vec<f32>> = probs.to_vec2().map_err(cand)?;
 
         // Build per-expert token lists and renormalized top-k weights.
