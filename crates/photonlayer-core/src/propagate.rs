@@ -66,19 +66,17 @@ enum TransferKind {
     AngularSpectrum,
 }
 
-fn transfer_fn(field: &OpticalField, config: &OpticalConfig, kind: TransferKind) -> Result<OpticalField> {
-    let (w, h) = (field.width, field.height);
+/// Build the config-only transfer function H (length `w*h`, row-major). H depends
+/// solely on (w, h, λ, z, d, kind) — never on the field — so it can be computed
+/// once and reused across many propagations (see [`Propagator`]).
+fn transfer_kernel(w: usize, h: usize, config: &OpticalConfig, kind: TransferKind) -> Vec<Complex> {
     let lambda = config.wavelength_m();
     let z = config.distance_m();
     let d = config.pixel_pitch_m();
-
     let fx = fftfreq(w, d);
     let fy = fftfreq(h, d);
-
-    let mut data = field.data.clone();
-    fft_2d(&mut data, w, h, false);
-
     let k = 2.0 * PI / lambda;
+    let mut hk = vec![Complex::ZERO; w * h];
     for row in 0..h {
         for col in 0..w {
             let fxx = fx[col];
@@ -86,8 +84,7 @@ fn transfer_fn(field: &OpticalField, config: &OpticalConfig, kind: TransferKind)
             let h_val = match kind {
                 TransferKind::Fresnel => {
                     // Drop constant exp(i k z); keep quadratic phase.
-                    let phase = -PI * lambda * z * (fxx * fxx + fyy * fyy);
-                    Complex::from_phase(phase)
+                    Complex::from_phase(-PI * lambda * z * (fxx * fxx + fyy * fyy))
                 }
                 TransferKind::AngularSpectrum => {
                     let arg = 1.0 - (lambda * fxx).powi(2) - (lambda * fyy).powi(2);
@@ -99,17 +96,108 @@ fn transfer_fn(field: &OpticalField, config: &OpticalConfig, kind: TransferKind)
                     }
                 }
             };
-            let idx = row * w + col;
-            data[idx] = data[idx] * h_val;
+            hk[row * w + col] = h_val;
+        }
+    }
+    hk
+}
+
+/// Apply a precomputed transfer kernel: forward FFT → ×H → inverse FFT.
+fn apply_transfer(field: &OpticalField, w: usize, h: usize, hk: &[Complex]) -> OpticalField {
+    let mut data = field.data.clone();
+    fft_2d(&mut data, w, h, false);
+    for (dv, hv) in data.iter_mut().zip(hk.iter()) {
+        *dv = *dv * *hv;
+    }
+    fft_2d(&mut data, w, h, true);
+    OpticalField { width: w, height: h, data }
+}
+
+fn transfer_fn(field: &OpticalField, config: &OpticalConfig, kind: TransferKind) -> Result<OpticalField> {
+    let (w, h) = (field.width, field.height);
+    let hk = transfer_kernel(w, h, config, kind);
+    Ok(apply_transfer(field, w, h, &hk))
+}
+
+/// A precomputed propagation operator. Build once per `(config, width, height)`
+/// and reuse across many fields — the config-only transfer function is computed
+/// a single time instead of on every call. This is the hot path in mask-learning
+/// loops (thousands of propagations share one config). Output is bit-identical to
+/// the free [`propagate`] function.
+pub struct Propagator {
+    width: usize,
+    height: usize,
+    kind: PropKind,
+}
+
+enum PropKind {
+    Fraunhofer,
+    /// Precomputed transfer function H (length `width*height`).
+    Transfer(Vec<Complex>),
+}
+
+impl Propagator {
+    /// Precompute the operator for a fixed grid + config.
+    pub fn new(width: usize, height: usize, config: &OpticalConfig) -> Result<Self> {
+        if !is_pow2(width) {
+            return Err(PhotonError::NotPowerOfTwo(width));
+        }
+        if !is_pow2(height) {
+            return Err(PhotonError::NotPowerOfTwo(height));
+        }
+        let kind = match config.propagation {
+            PropagationMode::Fraunhofer => PropKind::Fraunhofer,
+            PropagationMode::Fresnel => {
+                PropKind::Transfer(transfer_kernel(width, height, config, TransferKind::Fresnel))
+            }
+            PropagationMode::AngularSpectrum => PropKind::Transfer(transfer_kernel(
+                width,
+                height,
+                config,
+                TransferKind::AngularSpectrum,
+            )),
+        };
+        Ok(Self { width, height, kind })
+    }
+
+    /// Propagate a field through the precomputed operator.
+    pub fn propagate(&self, field: &OpticalField) -> Result<OpticalField> {
+        if field.width != self.width || field.height != self.height {
+            return Err(PhotonError::NotPowerOfTwo(field.width));
+        }
+        match &self.kind {
+            PropKind::Fraunhofer => fraunhofer(field),
+            PropKind::Transfer(hk) => Ok(apply_transfer(field, self.width, self.height, hk)),
         }
     }
 
-    fft_2d(&mut data, w, h, true);
-    Ok(OpticalField {
-        width: w,
-        height: h,
-        data,
-    })
+    /// **In-place** propagation — forward FFT → ×H → inverse FFT, mutating `data`
+    /// directly (no per-call field clone). Bit-identical to [`Propagator::propagate`];
+    /// this is the batch hot path (mask-learning loops over many samples).
+    pub fn propagate_into(&self, data: &mut [Complex]) -> Result<()> {
+        let (w, h) = (self.width, self.height);
+        if data.len() != w * h {
+            return Err(PhotonError::NotPowerOfTwo(data.len()));
+        }
+        match &self.kind {
+            PropKind::Fraunhofer => {
+                fft_2d(data, w, h, false);
+                fftshift_2d(data, w, h);
+                let norm = 1.0 / (w as f32 * h as f32).sqrt();
+                for c in data.iter_mut() {
+                    *c = c.scale(norm);
+                }
+            }
+            PropKind::Transfer(hk) => {
+                fft_2d(data, w, h, false);
+                for (dv, hv) in data.iter_mut().zip(hk.iter()) {
+                    *dv = *dv * *hv;
+                }
+                fft_2d(data, w, h, true);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
