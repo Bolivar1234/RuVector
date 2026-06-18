@@ -274,7 +274,7 @@ fn is_truthy(raw: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Snapshot of recurrent-depth statistics over recorded forward passes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DepthStats {
     /// Number of recorded forward passes.
     pub samples: usize,
@@ -361,6 +361,12 @@ impl DepthTelemetry {
         inner.maxes.clear();
         inner.mins.clear();
     }
+
+    /// Serialize the aggregate [`DepthStats`] to a JSON string for audit
+    /// dashboards (`bench/system-audit.mjs` tracks `mean_inference_depth`).
+    pub fn report_json(&self) -> String {
+        serde_json::to_string(&self.stats()).unwrap_or_else(|_| "{}".to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +374,7 @@ impl DepthTelemetry {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "candle")]
-pub use candle_impl::{HaltingRouter, RdtModel, SharedBlock};
+pub use candle_impl::{HaltingRouter, RdtCache, RdtModel, SharedBlock};
 
 #[cfg(feature = "candle")]
 mod candle_impl {
@@ -491,17 +497,32 @@ mod candle_impl {
             sin: &Tensor,
             mask: &Tensor,
         ) -> Result<Tensor> {
+            let (out, _kv) = self.forward_cached(xs, cos, sin, mask, None)?;
+            Ok(out)
+        }
+
+        /// Cached pass: `past` is the prior (rotated) K/V; returns the block
+        /// output and the *full* (past + current) K/V for the caller to store.
+        pub fn forward_cached(
+            &self,
+            xs: &Tensor,
+            cos: &Tensor,
+            sin: &Tensor,
+            mask: &Tensor,
+            past: Option<&(Tensor, Tensor)>,
+        ) -> Result<(Tensor, (Tensor, Tensor))> {
             let (b, seq, _h) = xs.dims3().map_err(cand)?;
 
             // --- Attention sub-layer (pre-norm + residual) ---
             let normed = self.input_norm.forward(xs).map_err(cand)?;
-            let attn_out = self.attention(&normed, cos, sin, mask, b, seq)?;
+            let (attn_out, kv) = self.attention(&normed, cos, sin, mask, past, b, seq)?;
             let xs = (xs + attn_out).map_err(cand)?;
 
             // --- MLP sub-layer (pre-norm + residual) ---
             let normed = self.post_attn_norm.forward(&xs).map_err(cand)?;
             let mlp_out = self.mlp(&normed)?;
-            (xs + mlp_out).map_err(cand)
+            let out = (xs + mlp_out).map_err(cand)?;
+            Ok((out, kv))
         }
 
         fn attention(
@@ -510,9 +531,10 @@ mod candle_impl {
             cos: &Tensor,
             sin: &Tensor,
             mask: &Tensor,
+            past: Option<&(Tensor, Tensor)>,
             b: usize,
             seq: usize,
-        ) -> Result<Tensor> {
+        ) -> Result<(Tensor, (Tensor, Tensor))> {
             let q = self.q_proj.forward(xs).map_err(cand)?;
             let k = self.k_proj.forward(xs).map_err(cand)?;
             let v = self.v_proj.forward(xs).map_err(cand)?;
@@ -541,17 +563,26 @@ mod candle_impl {
                 .map_err(cand)?;
 
             let q = apply_rope(&q, cos, sin)?;
-            let k = apply_rope(&k, cos, sin)?;
+            let k_cur = apply_rope(&k, cos, sin)?;
+
+            // Concatenate with past (already-rotated) keys/values.
+            let (k_full, v_full) = match past {
+                Some((pk, pv)) => (
+                    Tensor::cat(&[pk, &k_cur], 2).map_err(cand)?,
+                    Tensor::cat(&[pv, &v], 2).map_err(cand)?,
+                ),
+                None => (k_cur, v),
+            };
 
             // GQA: repeat kv heads to match query heads.
-            let k = repeat_kv(&k, self.num_heads / self.num_kv_heads)?;
-            let v = repeat_kv(&v, self.num_heads / self.num_kv_heads)?;
+            let k = repeat_kv(&k_full, self.num_heads / self.num_kv_heads)?;
+            let v = repeat_kv(&v_full, self.num_heads / self.num_kv_heads)?;
 
             let scale = 1.0 / (self.head_dim as f64).sqrt();
             let scores = (q.matmul(&k.transpose(2, 3).map_err(cand)?).map_err(cand)?
                 * scale)
                 .map_err(cand)?;
-            // Additive causal mask broadcast over [b, n, seq, seq].
+            // Additive causal mask broadcast over [b, n, seq, kv_len].
             let scores = scores.broadcast_add(mask).map_err(cand)?;
             let probs = ops::softmax_last_dim(&scores).map_err(cand)?;
 
@@ -563,7 +594,8 @@ mod candle_impl {
                 .map_err(cand)?
                 .reshape((b, seq, self.num_heads * self.head_dim))
                 .map_err(cand)?;
-            self.o_proj.forward(&ctx).map_err(cand)
+            let out = self.o_proj.forward(&ctx).map_err(cand)?;
+            Ok((out, (k_full, v_full)))
         }
 
         fn mlp(&self, xs: &Tensor) -> Result<Tensor> {
@@ -643,17 +675,58 @@ mod candle_impl {
         /// Internally embeds the tokens and drives the recurrent loop with
         /// per-token adaptive halting before the final norm + LM head.
         pub fn forward(&self, input_ids: &Tensor) -> Result<Tensor> {
+            let mut cache = RdtCache::new();
+            self.forward_cached(input_ids, &mut cache)
+        }
+
+        /// Forward that reads and updates `cache` for incremental decode.
+        /// Processes the `seq` new positions in `input_ids` against the cached
+        /// prefix and returns logits `[batch, seq, vocab]`.
+        pub fn forward_cached(&self, input_ids: &Tensor, cache: &mut RdtCache) -> Result<Tensor> {
             let (b, seq) = input_ids.dims2().map_err(cand)?;
+            let offset = cache.seq_len;
             let xs = self.embed_tokens.forward(input_ids).map_err(cand)?;
             let xs = xs.to_dtype(self.dtype).map_err(cand)?;
 
-            let (cos, sin) = self.rope_tables(seq)?;
-            let mask = self.causal_mask(seq)?;
+            let (cos, sin) = self.rope_tables(seq, offset)?;
+            let mask = self.causal_mask(seq, offset + seq, offset)?;
 
-            let hidden = self.recurrent_loop(&xs, &cos, &sin, &mask, b, seq)?;
+            let (hidden, kv) = self.recurrent_loop(&xs, &cos, &sin, &mask, cache.kv.as_ref(), b, seq)?;
+            cache.kv = Some(kv);
+            cache.seq_len += seq;
 
             let normed = self.ln_f.forward(&hidden).map_err(cand)?;
             self.lm_head.forward(&normed).map_err(cand)
+        }
+
+        /// Greedy autoregressive generation from a single-sequence prompt.
+        /// Returns the newly generated token ids; stops early on `eos`.
+        pub fn generate(
+            &self,
+            prompt_ids: &[u32],
+            max_new_tokens: usize,
+            eos: Option<u32>,
+        ) -> Result<Vec<u32>> {
+            if prompt_ids.is_empty() {
+                return Err(RuvLLMError::Generation("empty prompt".into()));
+            }
+            let mut cache = RdtCache::new();
+            let prompt = Tensor::from_vec(prompt_ids.to_vec(), (1, prompt_ids.len()), &self.device)
+                .map_err(cand)?;
+            let logits = self.forward_cached(&prompt, &mut cache)?;
+            let mut next = last_argmax(&logits)?;
+
+            let mut out = Vec::with_capacity(max_new_tokens);
+            for _ in 0..max_new_tokens {
+                out.push(next);
+                if Some(next) == eos {
+                    break;
+                }
+                let step = Tensor::from_vec(vec![next], (1, 1), &self.device).map_err(cand)?;
+                let logits = self.forward_cached(&step, &mut cache)?;
+                next = last_argmax(&logits)?;
+            }
+            Ok(out)
         }
 
         /// The deep recurrent loop with per-token adaptive halting.
@@ -662,39 +735,47 @@ mod candle_impl {
         /// per-token `p_halt`. Tokens crossing `halt_threshold` halt: their
         /// hidden state is frozen for subsequent iterations while still-running
         /// tokens keep computing. The loop ends when every token has halted or
-        /// `max_loops` is reached. Realized per-token depth is recorded in
-        /// [`Self::telemetry`].
+        /// `max_loops` is reached. Returns the final hidden state and the
+        /// final-iteration K/V (for the decode cache); records depth in telemetry.
         fn recurrent_loop(
             &self,
             xs: &Tensor,
             cos: &Tensor,
             sin: &Tensor,
             mask: &Tensor,
+            past: Option<&(Tensor, Tensor)>,
             b: usize,
             seq: usize,
-        ) -> Result<Tensor> {
+        ) -> Result<(Tensor, (Tensor, Tensor))> {
             let mut hidden = xs.clone();
             // `running[t] == 1.0` while token t still loops, else 0.0.
             let mut running = vec![1.0f32; b * seq];
             // Realized depth (block applications) per token.
             let mut depth = vec![0usize; b * seq];
+            let mut last_kv: Option<(Tensor, Tensor)> = None;
 
             let max_loops = self.cfg.max_loops;
             for step in 0..max_loops {
                 let block = &self.shared_blocks[step % self.shared_blocks.len()];
-                let candidate = block.forward(&hidden, cos, sin, mask)?;
+                let (candidate, kv) = block.forward_cached(&hidden, cos, sin, mask, past)?;
+                last_kv = Some(kv);
 
-                // Freeze halted tokens: keep `hidden` where halted, take
-                // `candidate` where running.
-                let running_mask = Tensor::from_vec(running.clone(), (b, seq, 1), &self.device)
+                // Fast path: while every token is still running (common early
+                // iterations) skip the freeze-mask tensor math entirely.
+                let all_running = running.iter().all(|&r| r > 0.5);
+                hidden = if all_running {
+                    candidate
+                } else {
+                    let running_mask = Tensor::from_vec(running.clone(), (b, seq, 1), &self.device)
+                        .map_err(cand)?
+                        .to_dtype(self.dtype)
+                        .map_err(cand)?;
+                    let halted_mask = ((running_mask.ones_like().map_err(cand)?) - &running_mask)
+                        .map_err(cand)?;
+                    (candidate.broadcast_mul(&running_mask).map_err(cand)?
+                        + hidden.broadcast_mul(&halted_mask).map_err(cand)?)
                     .map_err(cand)?
-                    .to_dtype(self.dtype)
-                    .map_err(cand)?;
-                let halted_mask = ((running_mask.ones_like().map_err(cand)?) - &running_mask)
-                    .map_err(cand)?;
-                hidden = (candidate.broadcast_mul(&running_mask).map_err(cand)?
-                    + hidden.broadcast_mul(&halted_mask).map_err(cand)?)
-                .map_err(cand)?;
+                };
 
                 // Count this iteration for tokens that were running.
                 for (d, r) in depth.iter_mut().zip(running.iter()) {
@@ -730,11 +811,13 @@ mod candle_impl {
             }
 
             self.telemetry.record(&depth);
-            Ok(hidden)
+            let kv = last_kv.expect("at least one loop iteration runs");
+            Ok((hidden, kv))
         }
 
-        /// Precompute RoPE cos/sin tables for `seq` positions: `[seq, head_dim]`.
-        fn rope_tables(&self, seq: usize) -> Result<(Tensor, Tensor)> {
+        /// RoPE cos/sin tables for `seq` positions at absolute offset
+        /// `offset..offset+seq`: `[seq, head_dim]`.
+        fn rope_tables(&self, seq: usize, offset: usize) -> Result<(Tensor, Tensor)> {
             let head_dim = self.cfg.head_dim();
             let half = head_dim / 2;
             let theta = self.cfg.rope_theta as f64;
@@ -743,7 +826,7 @@ mod candle_impl {
                 .map(|i| (1.0 / theta.powf(2.0 * i as f64 / head_dim as f64)) as f32)
                 .collect();
             let inv_freq = Tensor::from_vec(inv_freq, (1, half), &self.device).map_err(cand)?;
-            let positions: Vec<f32> = (0..seq).map(|p| p as f32).collect();
+            let positions: Vec<f32> = (0..seq).map(|p| (p + offset) as f32).collect();
             let positions = Tensor::from_vec(positions, (seq, 1), &self.device).map_err(cand)?;
 
             // [seq, half]
@@ -755,19 +838,63 @@ mod candle_impl {
             Ok((cos, sin))
         }
 
-        /// Additive causal mask `[seq, seq]` (0 above/at diagonal, -inf above).
-        fn causal_mask(&self, seq: usize) -> Result<Tensor> {
-            let mut data = vec![0f32; seq * seq];
-            for i in 0..seq {
-                for j in (i + 1)..seq {
-                    data[i * seq + j] = f32::NEG_INFINITY;
+        /// Additive causal mask `[q_len, kv_len]`. Query `i` (absolute
+        /// `offset + i`) may attend to key positions `<= offset + i`.
+        fn causal_mask(&self, q_len: usize, kv_len: usize, offset: usize) -> Result<Tensor> {
+            let mut data = vec![0f32; q_len * kv_len];
+            for i in 0..q_len {
+                let allowed = offset + i;
+                for j in 0..kv_len {
+                    if j > allowed {
+                        data[i * kv_len + j] = f32::NEG_INFINITY;
+                    }
                 }
             }
-            Tensor::from_vec(data, (seq, seq), &self.device)
+            Tensor::from_vec(data, (q_len, kv_len), &self.device)
                 .map_err(cand)?
                 .to_dtype(self.dtype)
                 .map_err(cand)
         }
+    }
+
+    /// Incremental KV cache for RDT decode (final-iteration K/V of the shared
+    /// block, concatenated across decode steps).
+    #[derive(Default)]
+    pub struct RdtCache {
+        kv: Option<(Tensor, Tensor)>,
+        seq_len: usize,
+    }
+
+    impl RdtCache {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        pub fn len(&self) -> usize {
+            self.seq_len
+        }
+        pub fn is_empty(&self) -> bool {
+            self.seq_len == 0
+        }
+        pub fn reset(&mut self) {
+            self.kv = None;
+            self.seq_len = 0;
+        }
+    }
+
+    /// Argmax over vocab at the last sequence position of `[1, seq, vocab]`.
+    fn last_argmax(logits: &Tensor) -> Result<u32> {
+        let (_b, seq, _v) = logits.dims3().map_err(cand)?;
+        let last = logits.i((0, seq - 1)).map_err(cand)?;
+        let row: Vec<f32> = last.to_dtype(DType::F32).map_err(cand)?.to_vec1().map_err(cand)?;
+        let mut best = 0usize;
+        let mut best_v = f32::NEG_INFINITY;
+        for (i, &v) in row.iter().enumerate() {
+            if v > best_v {
+                best_v = v;
+                best = i;
+            }
+        }
+        Ok(best as u32)
     }
 
     /// Apply rotary position embeddings to `[b, n, seq, head_dim]`.
@@ -927,7 +1054,7 @@ mod tests {
     #[cfg(feature = "candle")]
     mod candle_tests {
         use super::*;
-        use candle_core::{DType, Device, Tensor};
+        use candle_core::{DType, Device, IndexOp, Tensor};
         use candle_nn::VarBuilder;
 
         fn tiny_cfg() -> RdtConfig {
@@ -1016,6 +1143,65 @@ mod tests {
             let logits = model.forward(&input_ids).unwrap();
             let flat: Vec<f32> = logits.flatten_all().unwrap().to_vec1().unwrap();
             assert!(flat.iter().all(|x| x.is_finite()), "logits must be finite");
+        }
+
+        #[test]
+        fn generate_produces_tokens() {
+            let dev = Device::Cpu;
+            let cfg = tiny_cfg();
+            let vb = VarBuilder::zeros(DType::F32, &dev);
+            let model = RdtModel::load(vb, cfg.clone()).unwrap();
+            let out = model.generate(&[1, 2, 3], 5, None).unwrap();
+            assert_eq!(out.len(), 5);
+            assert!(out.iter().all(|&t| (t as usize) < cfg.vocab_size));
+        }
+
+        #[test]
+        fn cached_decode_matches_full_at_single_loop() {
+            // At max_loops=1 the recurrent caching is exact (single iteration),
+            // so incremental decode must match a full forward. Use random
+            // weights so the check is non-degenerate.
+            use candle_nn::VarMap;
+            let dev = Device::Cpu;
+            let mut cfg = tiny_cfg();
+            cfg.max_loops = 1;
+            let varmap = VarMap::new();
+            let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+            let model = RdtModel::load(vb, cfg.clone()).unwrap();
+
+            let ids = vec![3u32, 7, 1, 9, 4];
+            let full_ids = Tensor::from_vec(ids.clone(), (1, ids.len()), &dev).unwrap();
+            let full = model.forward(&full_ids).unwrap();
+            let full_last: Vec<f32> = full.i((0, ids.len() - 1)).unwrap().to_vec1().unwrap();
+
+            let mut cache = RdtCache::new();
+            let mut last: Vec<f32> = vec![];
+            for (k, &tok) in ids.iter().enumerate() {
+                let step = Tensor::from_vec(vec![tok], (1, 1), &dev).unwrap();
+                let logits = model.forward_cached(&step, &mut cache).unwrap();
+                assert_eq!(cache.len(), k + 1);
+                last = logits.i((0, 0)).unwrap().to_vec1().unwrap();
+            }
+            let max_diff = full_last
+                .iter()
+                .zip(last.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(max_diff < 1e-3, "RDT KV-cache decode diverged: {max_diff}");
+        }
+
+        #[test]
+        fn telemetry_report_json_roundtrips() {
+            let dev = Device::Cpu;
+            let cfg = tiny_cfg();
+            let vb = VarBuilder::zeros(DType::F32, &dev);
+            let model = RdtModel::load(vb, cfg).unwrap();
+            let ids = Tensor::from_vec(vec![1u32, 2, 3], (1, 3), &dev).unwrap();
+            let _ = model.forward(&ids).unwrap();
+            let json = model.telemetry.report_json();
+            assert!(json.contains("mean_inference_depth"));
+            let parsed: DepthStats = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.samples, 1);
         }
     }
 }

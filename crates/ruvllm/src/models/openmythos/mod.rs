@@ -45,6 +45,7 @@ use candle_nn::{Module, RmsNorm, VarBuilder};
 
 use crate::error::{Result, RuvLLMError};
 use crate::models::rdt::DepthTelemetry;
+use crate::models::sampling::{Sampler, SamplingConfig};
 
 use block::TransformerBlock;
 use recurrent::RecurrentBlock;
@@ -304,6 +305,68 @@ impl OpenMythos {
         Ok(out)
     }
 
+    /// Autoregressive generation with configurable sampling
+    /// (temperature / top-k / top-p / repetition penalty). `n_loops` is the
+    /// recurrent depth per token. Stops early on `eos`.
+    pub fn generate_sampled(
+        &self,
+        prompt_ids: &[u32],
+        max_new_tokens: usize,
+        n_loops: usize,
+        eos: Option<u32>,
+        sampling: SamplingConfig,
+    ) -> Result<Vec<u32>> {
+        if prompt_ids.is_empty() {
+            return Err(RuvLLMError::Generation("empty prompt".into()));
+        }
+        let mut sampler = Sampler::new(sampling);
+        let mut cache = MythosCache::new(&self.cfg);
+        let mut history: Vec<u32> = prompt_ids.to_vec();
+
+        let prompt = Tensor::from_vec(prompt_ids.to_vec(), (1, prompt_ids.len()), &self.device)
+            .map_err(cand)?;
+        let logits = self.forward_cached(&prompt, &mut cache, n_loops)?;
+        let mut next = sampler.sample(&self.last_logits(&logits)?, &history);
+
+        let mut out = Vec::with_capacity(max_new_tokens);
+        for _ in 0..max_new_tokens {
+            out.push(next);
+            history.push(next);
+            if Some(next) == eos {
+                break;
+            }
+            let step = Tensor::from_vec(vec![next], (1, 1), &self.device).map_err(cand)?;
+            let logits = self.forward_cached(&step, &mut cache, n_loops)?;
+            next = sampler.sample(&self.last_logits(&logits)?, &history);
+        }
+        Ok(out)
+    }
+
+    /// Mean-pooled token embedding `[dim]` for `ids` — a lightweight sentence
+    /// embedding from the input embedding layer.
+    pub fn embed_pooled(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        if ids.is_empty() {
+            return Err(RuvLLMError::Generation("empty input".into()));
+        }
+        let t = Tensor::from_vec(ids.to_vec(), (1, ids.len()), &self.device).map_err(cand)?;
+        let x = self.embed.forward(&t).map_err(cand)?.to_dtype(self.dtype).map_err(cand)?;
+        let pooled = x.mean(1).map_err(cand)?; // [1, dim]
+        pooled
+            .reshape((self.cfg.dim,))
+            .map_err(cand)?
+            .to_dtype(DType::F32)
+            .map_err(cand)?
+            .to_vec1()
+            .map_err(cand)
+    }
+
+    /// Last-position logits row `[vocab]` as host floats.
+    fn last_logits(&self, logits: &Tensor) -> Result<Vec<f32>> {
+        let (_b, seq, _v) = logits.dims3().map_err(cand)?;
+        let last = logits.i((0, seq - 1)).map_err(cand)?;
+        last.to_dtype(DType::F32).map_err(cand)?.to_vec1().map_err(cand)
+    }
+
     /// Argmax over the vocabulary at the last sequence position of `[1, seq, vocab]`.
     fn last_argmax(&self, logits: &Tensor) -> Result<u32> {
         let (_b, seq, _v) = logits.dims3().map_err(cand)?;
@@ -513,5 +576,113 @@ mod tests {
         let first = m.generate(&[1, 2, 3], 1, cfg.max_loop_iters, None).unwrap()[0];
         let out = m.generate(&[1, 2, 3], 10, cfg.max_loop_iters, Some(first)).unwrap();
         assert_eq!(out.len(), 1, "should stop immediately on eos");
+    }
+
+    #[test]
+    fn generate_sampled_is_in_vocab_and_deterministic_when_seeded() {
+        let cfg = MythosConfig::tiny();
+        let m = rand_model(cfg.clone());
+        let sc = crate::models::sampling::SamplingConfig {
+            temperature: 0.8,
+            seed: 123,
+            ..Default::default()
+        };
+        let a = m.generate_sampled(&[1, 2, 3], 6, cfg.max_loop_iters, None, sc.clone()).unwrap();
+        let b = m.generate_sampled(&[1, 2, 3], 6, cfg.max_loop_iters, None, sc).unwrap();
+        assert_eq!(a, b, "same seed must reproduce the sequence");
+        assert!(a.iter().all(|&t| (t as usize) < cfg.vocab_size));
+    }
+
+    // ---- checkpoint save / load round-trip (#2) ----
+
+    #[test]
+    fn safetensors_round_trip_preserves_logits() {
+        let cfg = MythosConfig::tiny();
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+        let m = OpenMythos::load(vb, cfg.clone()).unwrap();
+
+        let ids = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &Device::Cpu).unwrap();
+        let before: Vec<f32> = m.forward(&ids).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.safetensors");
+        varmap.save(&path).unwrap();
+
+        let mut meta = BTreeMap::new();
+        meta.insert("general.architecture".into(), "openmythos".into());
+        let m2 = OpenMythos::from_safetensors(&[path], cfg, &meta, &Device::Cpu).unwrap();
+        let after: Vec<f32> = m2.forward(&ids).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+
+        let max_diff = before
+            .iter()
+            .zip(after.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(max_diff < 1e-5, "round-trip logits diverged: {max_diff}");
+    }
+
+    #[test]
+    fn from_safetensors_rejects_non_mythos_metadata() {
+        // Honest boundary still applies to the loader.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.safetensors");
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+        let _ = OpenMythos::load(vb, MythosConfig::tiny()).unwrap();
+        varmap.save(&path).unwrap();
+
+        let mut meta = BTreeMap::new();
+        meta.insert("general.architecture".into(), "llama".into());
+        assert!(
+            OpenMythos::from_safetensors(&[path], MythosConfig::tiny(), &meta, &Device::Cpu).is_err()
+        );
+    }
+
+    // ---- training: gradients flow and loss decreases (#9) ----
+
+    #[test]
+    fn train_step_reduces_loss() {
+        use candle_nn::{AdamW, Optimizer, ParamsAdamW};
+
+        // Dense FFN so every parameter on the path receives gradient.
+        let mut cfg = MythosConfig::tiny();
+        cfg.use_moe = false;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+        let m = OpenMythos::load(vb, cfg.clone()).unwrap();
+
+        // Tiny memorization task: reproduce a fixed token sequence.
+        let ids = vec![1u32, 5, 9, 13];
+        let input = Tensor::from_vec(ids.clone(), (1, ids.len()), &Device::Cpu).unwrap();
+        let targets = Tensor::from_vec(ids.clone(), (ids.len(),), &Device::Cpu).unwrap();
+
+        let mut opt = AdamW::new(
+            varmap.all_vars(),
+            ParamsAdamW {
+                lr: 1e-2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut first = None;
+        let mut last = 0f32;
+        for step in 0..25 {
+            let logits = m.forward(&input).unwrap();
+            let logits2d = logits.reshape((ids.len(), cfg.vocab_size)).unwrap();
+            let loss = candle_nn::loss::cross_entropy(&logits2d, &targets).unwrap();
+            opt.backward_step(&loss).unwrap();
+            let lv = loss.to_scalar::<f32>().unwrap();
+            if step == 0 {
+                first = Some(lv);
+            }
+            last = lv;
+        }
+        let first = first.unwrap();
+        assert!(
+            last < first * 0.9,
+            "training did not reduce loss: {first} -> {last}"
+        );
     }
 }

@@ -64,10 +64,14 @@ pub mod openmythos;
 pub mod rdt;
 pub mod ruvltra;
 pub mod ruvltra_medium;
+pub mod sampling;
 
 // Re-export OpenMythos types (Rust/Candle port of kyegomez/OpenMythos)
 #[cfg(feature = "candle")]
 pub use openmythos::{MythosConfig, OpenMythos};
+
+// Re-export sampling utilities
+pub use sampling::{Sampler, SamplingConfig};
 
 // Re-export Recurrent-Depth Transformer types (ADR-latest)
 pub use rdt::{

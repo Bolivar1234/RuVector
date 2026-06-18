@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use crate::error::{Result, RuvLLMError};
 
 /// Attention variant used by every transformer block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AttnType {
     /// Grouped-Query Attention (`n_kv_heads < n_heads`).
     Gqa,
@@ -15,7 +16,7 @@ pub enum AttnType {
 
 /// Configuration for an OpenMythos model. Defaults mirror the reference
 /// `MythosConfig`; [`MythosConfig::tiny`] is a scaled-down test config.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MythosConfig {
     pub vocab_size: usize,
     pub dim: usize,
