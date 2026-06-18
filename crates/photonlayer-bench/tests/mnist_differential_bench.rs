@@ -153,6 +153,37 @@ fn mnist_differential_smoke() {
     );
 }
 
+// Optimizer-ceiling evidence: sweeping the Config-A training budget does NOT
+// recover the -2pp acceptance line on the drift-corrected (post-cbcd0eb2) core.
+// Measured (seed 0x6e157): iters 1500 -> -2.35pp, 3000 -> -2.15pp, 4500 -> -2.20pp.
+// The block hill-climber has converged; the remaining gap is an OPTIMIZER limit,
+// not a training-budget limit. Closing it (and reaching ~85-89%) needs analytic
+// gradient descent through the diffraction operator — see the roadmap. Kept as a
+// permanent, documented #[ignore] experiment.
+#[test]
+#[ignore = "Config-A iteration sweep — documents the hill-climb optimizer ceiling"]
+fn mnist_config_a_iteration_sweep() {
+    use photonlayer_bench::mnist_bench::run_mnist_config_a;
+    let dir = default_cache_dir();
+    let base = MnistBenchConfig::default();
+    let Some((train, test)) = load_subsets(&dir, 400, 200, base.cell, base.grid) else {
+        panic!("MNIST cache not found at {}", dir.display());
+    };
+    eprintln!("\n[Config-A iteration sweep] block={} sigma={} seed={:#x}", base.block, base.sigma, base.seed);
+    for &iters in &[1500usize, 3000, 4500] {
+        let bcfg = MnistBenchConfig { iterations: iters, ..base };
+        let t0 = std::time::Instant::now();
+        let (baseline, optical, sensor_x, mac_x) = run_mnist_config_a(&train, &test, &bcfg);
+        let dt = t0.elapsed().as_secs_f32();
+        let pass = optical >= baseline - 0.02 && sensor_x >= 16.0 && mac_x >= 10.0;
+        eprintln!(
+            "  iters={:>5}: baseline={:.4} optical={:.4} delta={:+.4} sensor={:.0}x mac={:.0}x -> {} ({:.0}s)",
+            iters, baseline, optical, optical - baseline, sensor_x, mac_x,
+            if pass { "PASS" } else { "fail" }, dt
+        );
+    }
+}
+
 #[test]
 #[ignore = "heavy real-data run; see file header for the documented command"]
 fn mnist_differential_full() {

@@ -241,6 +241,42 @@ fn train_mask(
     mask
 }
 
+/// Config-A-only fast path for tuning the training budget: trains the decoder-
+/// objective mask and returns `(baseline_acc, optical_acc, sensor_reduction_x,
+/// mac_reduction_x)` without retraining Config B. Used by the iteration sweep.
+pub fn run_mnist_config_a(
+    train: &[Sample],
+    test: &[Sample],
+    bcfg: &MnistBenchConfig,
+) -> (f32, f32, f32, f32) {
+    let cfg = OpticalConfig::demo(bcfg.grid, bcfg.grid);
+    let sensor = bcfg.sensor;
+    let mask = train_mask(bcfg, bcfg.seed, |m| {
+        let (f, l) = optical_feature_set(train, m, &cfg, sensor);
+        let dec = NearestCentroid::fit(&f, &l, MNIST_CLASSES);
+        dec.accuracy(&f, &l)
+    });
+    let (optical_acc, _) = decode_optical_acc(train, test, &mask, &cfg, sensor);
+    let baseline_acc = {
+        let bf = |samples: &[Sample]| -> (Vec<Vec<f32>>, Vec<usize>) {
+            let f = samples
+                .iter()
+                .map(|s| pool_features(&s.image.pixels, s.image.width, s.image.height, bcfg.grid))
+                .collect();
+            (f, samples.iter().map(|s| s.label).collect())
+        };
+        let (tr_f, tr_l) = bf(train);
+        let (te_f, te_l) = bf(test);
+        NearestCentroid::fit(&tr_f, &tr_l, MNIST_CLASSES).accuracy(&te_f, &te_l)
+    };
+    let baseline_pixels = bcfg.grid * bcfg.grid;
+    let optical_sensor_pixels = sensor * sensor;
+    let sensor_x = baseline_pixels as f32 / optical_sensor_pixels as f32;
+    let mac_x =
+        (MNIST_CLASSES * baseline_pixels) as f32 / (MNIST_CLASSES * optical_sensor_pixels) as f32;
+    (baseline_acc, optical_acc, sensor_x, mac_x)
+}
+
 /// Train two masks with two objectives, then run the full acceptance comparison
 /// + differential-detection ablation on each. Determinism: every mask is born
 /// from a stated seed and the optimizer is seeded, so the whole run is bit-
