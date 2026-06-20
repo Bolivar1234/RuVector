@@ -6,6 +6,7 @@ use candle_nn::{ops, Linear, Module, VarBuilder};
 use super::config::MythosConfig;
 use super::rope::cand;
 use crate::error::Result;
+use crate::models::quantized::{QuantType, QuantizedLinear};
 
 /// A single SwiGLU expert: `down(silu(gate(x)) * up(x))`.
 pub struct Expert {
@@ -27,6 +28,35 @@ impl Expert {
         let g = ops::silu(&self.gate.forward(xs).map_err(cand)?).map_err(cand)?;
         let u = self.up.forward(xs).map_err(cand)?;
         self.down.forward(&(g * u).map_err(cand)?).map_err(cand)
+    }
+
+    /// Post-training quantize this expert's weights into a [`QuantizedExpert`].
+    pub fn quantize(&self, qt: QuantType) -> Result<QuantizedExpert> {
+        Ok(QuantizedExpert {
+            gate: QuantizedLinear::from_linear(&self.gate, qt)?,
+            up: QuantizedLinear::from_linear(&self.up, qt)?,
+            down: QuantizedLinear::from_linear(&self.down, qt)?,
+        })
+    }
+}
+
+/// A SwiGLU expert with block-quantized weights (low-memory inference).
+pub struct QuantizedExpert {
+    gate: QuantizedLinear,
+    up: QuantizedLinear,
+    down: QuantizedLinear,
+}
+
+impl QuantizedExpert {
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let g = ops::silu(&self.gate.forward(xs)?).map_err(cand)?;
+        let u = self.up.forward(xs)?;
+        self.down.forward(&(g * u).map_err(cand)?)
+    }
+
+    /// Total quantized weight storage in bytes.
+    pub fn size_bytes(&self) -> usize {
+        self.gate.size_bytes() + self.up.size_bytes() + self.down.size_bytes()
     }
 }
 
@@ -145,5 +175,38 @@ impl MoeFfn {
             out = (out + expert.forward(&flat)?).map_err(cand)?;
         }
         out.reshape((b, seq, dim)).map_err(cand)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::quantized::dense_bytes;
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::{VarBuilder, VarMap};
+
+    #[test]
+    fn quantized_expert_approximates_dense_and_saves_memory() {
+        let (dim, inter) = (64usize, 64usize);
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+        let expert = Expert::load(vb, dim, inter).unwrap();
+
+        let xs = Tensor::randn(0f32, 1.0, (4, dim), &Device::Cpu).unwrap();
+        let dense: Vec<f32> = expert.forward(&xs).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+
+        let q = expert.quantize(QuantType::Q8_0).unwrap();
+        let qy: Vec<f32> = q.forward(&xs).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        assert!(qy.iter().all(|x| x.is_finite()));
+
+        // Relative L2 error should be small for Q8_0.
+        let num: f32 = dense.iter().zip(qy.iter()).map(|(a, b)| (a - b).powi(2)).sum();
+        let den: f32 = dense.iter().map(|a| a * a).sum::<f32>().max(1e-9);
+        let rel_l2 = (num / den).sqrt();
+        assert!(rel_l2 < 0.15, "quantized expert rel-L2 too high: {rel_l2}");
+
+        // Memory: Q8_0 (~1 byte/weight) well under f32 (4 bytes/weight).
+        let dense_bytes_total = dense_bytes(inter, dim) * 2 + dense_bytes(dim, inter);
+        assert!(q.size_bytes() < dense_bytes_total / 3, "insufficient memory savings");
     }
 }

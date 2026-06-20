@@ -61,6 +61,8 @@
 //! ```
 
 pub mod openmythos;
+#[cfg(feature = "candle")]
+pub mod quantized;
 pub mod rdt;
 pub mod ruvltra;
 pub mod ruvltra_medium;
@@ -69,6 +71,10 @@ pub mod sampling;
 // Re-export OpenMythos types (Rust/Candle port of kyegomez/OpenMythos)
 #[cfg(feature = "candle")]
 pub use openmythos::{MythosConfig, OpenMythos};
+
+// Re-export quantization primitives
+#[cfg(feature = "candle")]
+pub use quantized::{QuantType, QuantizedLinear};
 
 // Re-export sampling utilities
 pub use sampling::{Sampler, SamplingConfig};
