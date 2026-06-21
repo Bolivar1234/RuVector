@@ -176,7 +176,7 @@ export class AnthropicProvider implements LLMProvider {
    * Stream a conversation
    */
   async *stream(messages: Message[], options?: StreamOptions): AsyncGenerator<Token, Completion, void> {
-    const response = await this.makeStreamRequest('/v1/messages', {
+    const response = this.makeStreamRequest('/v1/messages', {
       model: this.model,
       max_tokens: options?.maxTokens ?? MODEL_INFO[this.model].maxTokens,
       temperature: options?.temperature ?? 1.0,
@@ -221,9 +221,9 @@ export class AnthropicProvider implements LLMProvider {
   /**
    * Count tokens in text
    */
-  async countTokens(text: string): Promise<number> {
+  countTokens(text: string): Promise<number> {
     // Approximate token count (Claude uses ~4 chars per token on average)
-    return Math.ceil(text.length / 4);
+    return Promise.resolve(Math.ceil(text.length / 4));
   }
 
   /**
@@ -371,7 +371,7 @@ export class AnthropicProvider implements LLMProvider {
         const { done, value } = await reader.read();
         if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
+        buffer += decoder.decode(value as Uint8Array | undefined, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
 

@@ -180,7 +180,7 @@ export class CapacityManager {
     // 3. Process reactive scaling for each region
     const scalingActions: ScalingAction[] = [];
 
-    for (const [region, capacity] of this.regionCapacities) {
+    for (const region of this.regionCapacities.keys()) {
       // Get current metrics (in production, fetch from monitoring)
       const metrics = await this.getCurrentMetrics(region);
 
@@ -294,7 +294,7 @@ export class CapacityManager {
     capacity.availableInstances = capacity.maxInstances - capacity.currentInstances;
 
     // Update budget
-    await this.updateBudgetCosts();
+    this.updateBudgetCosts();
 
     await this.notifyHook(
       `SCALED: ${region} ${oldInstances} -> ${capacity.currentInstances} instances (${reason})`
@@ -331,7 +331,7 @@ export class CapacityManager {
   /**
    * Update budget costs based on current capacity
    */
-  private async updateBudgetCosts(): Promise<void> {
+  private updateBudgetCosts(): void {
     let totalHourlyCost = 0;
 
     for (const capacity of this.regionCapacities.values()) {
@@ -465,11 +465,11 @@ export class CapacityManager {
   /**
    * Get current metrics for a region (mock - would fetch from monitoring in production)
    */
-  private async getCurrentMetrics(region: string): Promise<ScalingMetrics> {
+  private getCurrentMetrics(region: string): Promise<ScalingMetrics> {
     const capacity = this.regionCapacities.get(region)!;
 
     // Mock metrics - in production, fetch from Cloud Monitoring
-    return {
+    return Promise.resolve({
       region,
       timestamp: new Date(),
       cpuUtilization: 0.5 + Math.random() * 0.3, // 50-80%
@@ -479,7 +479,7 @@ export class CapacityManager {
       errorRate: 0.001 + Math.random() * 0.004, // 0.1-0.5%
       p99Latency: 30 + Math.random() * 20, // 30-50ms
       currentInstances: capacity.currentInstances
-    };
+    });
   }
 
   /**
@@ -515,7 +515,7 @@ if (require.main === module) {
   const manager = new CapacityManager();
 
   // Run orchestration
-  manager.orchestrate().then(plan => {
+  void manager.orchestrate().then(plan => {
     console.log('\n=== Capacity Plan ===');
     console.log(`Timestamp: ${plan.timestamp.toISOString()}`);
     console.log(`Total Instances: ${plan.totalInstances}`);

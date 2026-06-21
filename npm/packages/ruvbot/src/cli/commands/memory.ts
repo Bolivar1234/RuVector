@@ -8,7 +8,6 @@
 
 import { Command } from 'commander';
 import chalk from 'chalk';
-import ora from 'ora';
 
 export function createMemoryCommand(): Command {
   const memory = new Command('memory');
@@ -19,17 +18,17 @@ export function createMemoryCommand(): Command {
     .command('stats')
     .description('Show memory configuration')
     .option('--json', 'Output as JSON')
-    .action(async (options) => {
+    .action((options: { json?: boolean }) => {
       try {
         // Get stats from environment/config
         const stats = {
           configured: true,
-          dimensions: parseInt(process.env.RUVBOT_EMBEDDING_DIM || '384', 10),
-          maxVectors: parseInt(process.env.RUVBOT_MAX_VECTORS || '100000', 10),
+          dimensions: parseInt(process.env.RUVBOT_EMBEDDING_DIM ?? '384', 10),
+          maxVectors: parseInt(process.env.RUVBOT_MAX_VECTORS ?? '100000', 10),
           indexType: 'HNSW',
-          hnswM: parseInt(process.env.RUVBOT_HNSW_M || '16', 10),
-          efConstruction: parseInt(process.env.RUVBOT_HNSW_EF_CONSTRUCTION || '200', 10),
-          memoryPath: process.env.RUVBOT_MEMORY_PATH || './data/memory',
+          hnswM: parseInt(process.env.RUVBOT_HNSW_M ?? '16', 10),
+          efConstruction: parseInt(process.env.RUVBOT_HNSW_EF_CONSTRUCTION ?? '200', 10),
+          memoryPath: process.env.RUVBOT_MEMORY_PATH ?? './data/memory',
         };
 
         if (options.json) {
@@ -47,8 +46,8 @@ export function createMemoryCommand(): Command {
         console.log(`Memory Path:     ${chalk.cyan(stats.memoryPath)}`);
         console.log('─'.repeat(40));
         console.log(chalk.gray('\nNote: Start RuvBot server for full memory operations'));
-      } catch (error: any) {
-        console.error(chalk.red(`Stats failed: ${error.message}`));
+      } catch (error: unknown) {
+        console.error(chalk.red(`Stats failed: ${error instanceof Error ? error.message : String(error)}`));
         process.exit(1);
       }
     });
@@ -60,9 +59,10 @@ export function createMemoryCommand(): Command {
     .requiredOption('-c, --content <content>', 'Content to store')
     .option('-t, --tags <tags>', 'Comma-separated tags')
     .option('-i, --importance <importance>', 'Importance score (0-1)', '0.5')
-    .action(async (options) => {
+    .action((options: { content: string; tags?: string; importance: string }) => {
       console.log(chalk.yellow('\n⚠ Memory store requires a running RuvBot server'));
       console.log(chalk.gray('\nTo store memory programmatically:'));
+      const tagList = (options.tags ?? '').split(',').map((t: string) => `'${t.trim()}'`).join(', ');
       console.log(chalk.cyan(`
   import { RuvBot } from '@ruvector/ruvbot';
 
@@ -70,15 +70,16 @@ export function createMemoryCommand(): Command {
   await bot.start();
 
   const entry = await bot.memory.store('${options.content}', {
-    tags: [${(options.tags || '').split(',').map((t: string) => `'${t.trim()}'`).join(', ')}],
+    tags: [${tagList}],
     importance: ${options.importance}
   });
 `));
       console.log(chalk.gray('Or use the REST API:'));
+      const tagListJson = (options.tags ?? '').split(',').map((t: string) => `"${t.trim()}"`).join(', ');
       console.log(chalk.cyan(`
   curl -X POST http://localhost:3000/api/memory \\
     -H "Content-Type: application/json" \\
-    -d '{"content": "${options.content}", "tags": [${(options.tags || '').split(',').map((t: string) => `"${t.trim()}"`).join(', ')}]}'
+    -d '{"content": "${options.content}", "tags": [${tagListJson}]}'
 `));
     });
 
@@ -89,7 +90,7 @@ export function createMemoryCommand(): Command {
     .requiredOption('-q, --query <query>', 'Search query')
     .option('-l, --limit <limit>', 'Maximum results', '10')
     .option('--threshold <threshold>', 'Similarity threshold (0-1)', '0.5')
-    .action(async (options) => {
+    .action((options: { query: string; limit: string; threshold: string }) => {
       console.log(chalk.yellow('\n⚠ Memory search requires a running RuvBot server'));
       console.log(chalk.gray('\nTo search memory programmatically:'));
       console.log(chalk.cyan(`
@@ -110,7 +111,7 @@ export function createMemoryCommand(): Command {
     .description('Export memory to file (requires running server)')
     .requiredOption('-o, --output <path>', 'Output file path')
     .option('--format <format>', 'Format: json, jsonl', 'json')
-    .action(async (options) => {
+    .action((options: { output: string; format: string }) => {
       console.log(chalk.yellow('\n⚠ Memory export requires a running RuvBot server'));
       console.log(chalk.gray('\nTo export memory:'));
       console.log(chalk.cyan(`
@@ -124,7 +125,7 @@ export function createMemoryCommand(): Command {
     .command('import')
     .description('Import memory from file (requires running server)')
     .requiredOption('-i, --input <path>', 'Input file path')
-    .action(async (options) => {
+    .action((options: { input: string }) => {
       console.log(chalk.yellow('\n⚠ Memory import requires a running RuvBot server'));
       console.log(chalk.gray('\nTo import memory:'));
       console.log(chalk.cyan(`
@@ -139,7 +140,7 @@ export function createMemoryCommand(): Command {
     .command('clear')
     .description('Clear all memory (DANGEROUS - requires running server)')
     .option('-y, --yes', 'Skip confirmation')
-    .action(async (options) => {
+    .action((options: { yes?: boolean }) => {
       if (!options.yes) {
         console.log(chalk.red('\n⚠ DANGER: This will clear ALL memory entries!'));
         console.log(chalk.yellow('Use --yes flag to confirm'));
@@ -157,7 +158,7 @@ export function createMemoryCommand(): Command {
   memory
     .command('info')
     .description('Show memory system information')
-    .action(async () => {
+    .action(() => {
       console.log(chalk.bold('\n🧠 RuvBot Memory System\n'));
       console.log('─'.repeat(50));
       console.log(chalk.cyan('Features:'));

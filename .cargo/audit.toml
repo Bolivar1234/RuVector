@@ -57,4 +57,12 @@ ignore = [
     # We never install a custom logger in the rand call path. Awaiting
     # transitive upgrade across the workspace.
     "RUSTSEC-2026-0097",
+
+    # imageproc 0.25.0 — three soundness notices (improper bounds checks in
+    # image sampling). Used only in examples/scipix behind the optional
+    # `preprocess` feature; not compiled into any production binary. No fixed
+    # upstream release available yet. Re-evaluate on imageproc 0.26+.
+    "RUSTSEC-2026-0115",
+    "RUSTSEC-2026-0116",
+    "RUSTSEC-2026-0117",
 ]

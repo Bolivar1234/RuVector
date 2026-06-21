@@ -12,7 +12,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { URL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import pino from 'pino';
 import { RuvBot, createRuvBot } from './RuvBot.js';
 import { createAIDefenceGuard, type AIDefenceConfig } from './security/AIDefenceGuard.js';
@@ -77,7 +77,7 @@ async function parseBody(req: IncomingMessage): Promise<Record<string, unknown> 
       }
       const rawBody = Buffer.concat(chunks).toString('utf-8');
       try {
-        const body = JSON.parse(rawBody);
+        const body = JSON.parse(rawBody) as Record<string, unknown>;
         resolve(body);
       } catch (parseError) {
         logger.error({
@@ -160,7 +160,7 @@ function getChatUIPath(): string {
 // Route Handlers
 // ============================================================================
 
-async function handleRoot(ctx: RequestContext): Promise<void> {
+function handleRoot(ctx: RequestContext): Promise<void> {
   const { res } = ctx;
   const chatUIPath = getChatUIPath();
 
@@ -193,9 +193,10 @@ async function handleRoot(ctx: RequestContext): Promise<void> {
       </html>
     `);
   }
+  return Promise.resolve();
 }
 
-async function handleHealth(ctx: RequestContext): Promise<void> {
+function handleHealth(ctx: RequestContext): Promise<void> {
   const { res } = ctx;
   sendJSON(res, 200, {
     status: 'healthy',
@@ -203,22 +204,24 @@ async function handleHealth(ctx: RequestContext): Promise<void> {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     timestamp: new Date().toISOString(),
   });
+  return Promise.resolve();
 }
 
-async function handleReady(ctx: RequestContext): Promise<void> {
+function handleReady(ctx: RequestContext): Promise<void> {
   const { res } = ctx;
   if (bot?.getStatus().isRunning) {
     sendJSON(res, 200, { status: 'ready' });
   } else {
     sendError(res, 503, 'Service not ready', 'NOT_READY');
   }
+  return Promise.resolve();
 }
 
-async function handleStatus(ctx: RequestContext): Promise<void> {
+function handleStatus(ctx: RequestContext): Promise<void> {
   const { res } = ctx;
   if (!bot) {
     sendError(res, 503, 'Bot not initialized', 'NOT_INITIALIZED');
-    return;
+    return Promise.resolve();
   }
 
   const status = bot.getStatus();
@@ -251,13 +254,14 @@ async function handleStatus(ctx: RequestContext): Promise<void> {
       hasGoogleAIKey,
     },
   });
+  return Promise.resolve();
 }
 
-async function handleSkills(ctx: RequestContext): Promise<void> {
+function handleSkills(ctx: RequestContext): Promise<void> {
   const { res } = ctx;
   if (!chatEnhancer) {
     sendJSON(res, 200, { skills: [], message: 'ChatEnhancer not initialized' });
-    return;
+    return Promise.resolve();
   }
 
   const skills = chatEnhancer.getAvailableSkills();
@@ -280,9 +284,10 @@ async function handleSkills(ctx: RequestContext): Promise<void> {
       'summarize our conversation',
     ],
   });
+  return Promise.resolve();
 }
 
-async function handleModels(ctx: RequestContext): Promise<void> {
+function handleModels(ctx: RequestContext): Promise<void> {
   const { res } = ctx;
   sendJSON(res, 200, {
     models: [
@@ -307,6 +312,7 @@ async function handleModels(ctx: RequestContext): Promise<void> {
     ],
     default: 'google/gemini-2.5-pro-preview-05-06',
   });
+  return Promise.resolve();
 }
 
 async function handleCreateAgent(ctx: RequestContext): Promise<void> {
@@ -321,25 +327,26 @@ async function handleCreateAgent(ctx: RequestContext): Promise<void> {
   }
 
   const config: AgentConfig = {
-    id: (body.id as string) || randomUUID(),
-    name: body.name as string,
-    model: (body.model as string) || 'claude-3-haiku-20240307',
-    systemPrompt: body.systemPrompt as string,
-    temperature: body.temperature as number,
-    maxTokens: body.maxTokens as number,
+    id: typeof body.id === 'string' ? body.id : randomUUID(),
+    name: body.name,
+    model: typeof body.model === 'string' ? body.model : 'claude-3-haiku-20240307',
+    systemPrompt: body.systemPrompt as string | undefined,
+    temperature: body.temperature as number | undefined,
+    maxTokens: body.maxTokens as number | undefined,
   };
 
   const agent = await bot.spawnAgent(config);
   sendJSON(res, 201, agent);
 }
 
-async function handleListAgents(ctx: RequestContext): Promise<void> {
+function handleListAgents(ctx: RequestContext): Promise<void> {
   const { res } = ctx;
   if (!bot) {
     sendError(res, 503, 'Bot not initialized', 'NOT_INITIALIZED');
-    return;
+    return Promise.resolve();
   }
   sendJSON(res, 200, { agents: bot.listAgents() });
+  return Promise.resolve();
 }
 
 async function handleCreateSession(ctx: RequestContext): Promise<void> {
@@ -354,7 +361,7 @@ async function handleCreateSession(ctx: RequestContext): Promise<void> {
   }
 
   try {
-    const session = await bot.createSession(body.agentId as string, {
+    const session = await bot.createSession(body.agentId, {
       userId: body.userId as string,
       channelId: body.channelId as string,
       platform: body.platform as 'slack' | 'discord' | 'api',
@@ -367,13 +374,14 @@ async function handleCreateSession(ctx: RequestContext): Promise<void> {
   }
 }
 
-async function handleListSessions(ctx: RequestContext): Promise<void> {
+function handleListSessions(ctx: RequestContext): Promise<void> {
   const { res } = ctx;
   if (!bot) {
     sendError(res, 503, 'Bot not initialized', 'NOT_INITIALIZED');
-    return;
+    return Promise.resolve();
   }
   sendJSON(res, 200, { sessions: bot.listSessions() });
+  return Promise.resolve();
 }
 
 async function handleChat(ctx: RequestContext): Promise<void> {
@@ -394,7 +402,7 @@ async function handleChat(ctx: RequestContext): Promise<void> {
   }
 
   // Validate input with AIDefence if enabled
-  let messageContent = body.message as string;
+  const messageContent = body.message;
   let inputBlocked = false;
   if (aiDefence) {
     const analysisResult = await aiDefence.analyze(messageContent);
@@ -669,18 +677,19 @@ async function startServer(): Promise<void> {
   });
 
   // Graceful shutdown
-  const shutdown = async (signal: string): Promise<void> => {
+  const shutdown = (signal: string): void => {
     logger.info({ signal }, 'Received shutdown signal');
 
-    server.close(async () => {
+    server.close(() => {
       logger.info('HTTP server closed');
 
-      if (bot) {
-        await bot.stop();
+      const stopBot = bot ? bot.stop() : Promise.resolve();
+      stopBot.then(() => {
         logger.info('RuvBot stopped');
-      }
-
-      process.exit(0);
+        process.exit(0);
+      }).catch(() => {
+        process.exit(0);
+      });
     });
 
     // Force exit after timeout

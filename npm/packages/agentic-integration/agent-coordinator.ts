@@ -69,7 +69,7 @@ export class AgentCoordinator extends EventEmitter {
 
   constructor(private config: CoordinatorConfig) {
     super();
-    this.initializeCoordinator();
+    void this.initializeCoordinator();
   }
 
   /**
@@ -102,7 +102,7 @@ export class AgentCoordinator extends EventEmitter {
   /**
    * Register a new agent in the coordination system
    */
-  async registerAgent(registration: AgentRegistration): Promise<void> {
+  registerAgent(registration: AgentRegistration): Promise<void> {
     console.log(`[AgentCoordinator] Registering agent: ${registration.agentId} in ${registration.region}`);
 
     // Check if region has capacity
@@ -111,7 +111,7 @@ export class AgentCoordinator extends EventEmitter {
     );
 
     if (regionAgents.length >= this.config.maxAgentsPerRegion) {
-      throw new Error(`Region ${registration.region} has reached max agent capacity`);
+      return Promise.reject(new Error(`Region ${registration.region} has reached max agent capacity`));
     }
 
     this.agents.set(registration.agentId, registration);
@@ -140,6 +140,7 @@ export class AgentCoordinator extends EventEmitter {
     this.emit('agent:registered', registration);
 
     console.log(`[AgentCoordinator] Agent ${registration.agentId} registered successfully`);
+    return Promise.resolve();
   }
 
   /**
@@ -172,7 +173,7 @@ export class AgentCoordinator extends EventEmitter {
   /**
    * Submit a task for distributed execution
    */
-  async submitTask(task: Omit<Task, 'id' | 'retries' | 'createdAt'>): Promise<string> {
+  submitTask(task: Omit<Task, 'id' | 'retries' | 'createdAt'>): Promise<string> {
     const fullTask: Task = {
       ...task,
       id: `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -187,14 +188,14 @@ export class AgentCoordinator extends EventEmitter {
 
     this.emit('task:submitted', fullTask);
 
-    return fullTask.id;
+    return Promise.resolve(fullTask.id);
   }
 
   /**
    * Insert task into queue maintaining priority order
    */
   private insertTaskByPriority(task: Task): void {
-    let insertIndex = this.taskQueue.findIndex(t => t.priority < task.priority);
+    const insertIndex = this.taskQueue.findIndex(t => t.priority < task.priority);
     if (insertIndex === -1) {
       this.taskQueue.push(task);
     } else {
@@ -249,29 +250,29 @@ export class AgentCoordinator extends EventEmitter {
   /**
    * Select best agent for task based on load balancing strategy
    */
-  private async selectAgent(task: Task): Promise<AgentRegistration | null> {
+  private selectAgent(task: Task): Promise<AgentRegistration | null> {
     const availableAgents = Array.from(this.agents.values()).filter(agent => {
       const metrics = this.agentMetrics.get(agent.agentId);
       return metrics?.healthy && (!task.region || agent.region === task.region);
     });
 
-    if (availableAgents.length === 0) return null;
+    if (availableAgents.length === 0) return Promise.resolve(null);
 
     switch (this.config.loadBalancingStrategy) {
       case 'round-robin':
-        return this.selectAgentRoundRobin(availableAgents, task);
+        return Promise.resolve(this.selectAgentRoundRobin(availableAgents, task));
 
       case 'least-connections':
-        return this.selectAgentLeastConnections(availableAgents);
+        return Promise.resolve(this.selectAgentLeastConnections(availableAgents));
 
       case 'weighted':
-        return this.selectAgentWeighted(availableAgents);
+        return Promise.resolve(this.selectAgentWeighted(availableAgents));
 
       case 'adaptive':
-        return this.selectAgentAdaptive(availableAgents);
+        return Promise.resolve(this.selectAgentAdaptive(availableAgents));
 
       default:
-        return availableAgents[0];
+        return Promise.resolve(availableAgents[0]);
     }
   }
 
@@ -422,23 +423,25 @@ export class AgentCoordinator extends EventEmitter {
   /**
    * Handle task failure
    */
-  private async handleTaskFailure(task: Task, error: any): Promise<void> {
+  private handleTaskFailure(task: Task, error: unknown): Promise<void> {
     this.activeTasks.delete(task.id);
 
+    const errorMessage = error instanceof Error ? error.message : String(error);
     this.emit('task:failed', {
       taskId: task.id,
-      error: error.message,
+      error: errorMessage,
       retries: task.retries,
     });
 
     // Could implement dead letter queue here
     console.error(`[AgentCoordinator] Task ${task.id} failed permanently:`, error);
+    return Promise.resolve();
   }
 
   /**
    * Redistribute task to another agent (failover)
    */
-  private async redistributeTask(task: Task): Promise<void> {
+  private redistributeTask(task: Task): Promise<void> {
     console.log(`[AgentCoordinator] Redistributing task ${task.id}`);
 
     // Remove region preference to allow any region
@@ -446,6 +449,7 @@ export class AgentCoordinator extends EventEmitter {
     this.insertTaskByPriority(redistributedTask);
 
     this.emit('task:redistributed', { taskId: task.id });
+    return Promise.resolve();
   }
 
   /**
@@ -491,7 +495,7 @@ export class AgentCoordinator extends EventEmitter {
   /**
    * Perform health checks on all agents
    */
-  private async performHealthChecks(): Promise<void> {
+  private performHealthChecks(): void {
     const now = Date.now();
 
     for (const [agentId, metrics] of this.agentMetrics.entries()) {

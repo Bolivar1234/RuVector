@@ -32,8 +32,24 @@ impl VectorDB {
 
         let index = Arc::new(HnswIndex::new(hnsw_config));
 
+        // Issue #430: rebuild the in-memory HNSW from persisted vectors. Without
+        // this step a fresh `HnswIndex::new` is created on every open, so all
+        // previously-inserted vectors are invisible to search after restart
+        // (search returns 0 results despite `get_all_ids` listing them).
+        let stored_ids = storage.get_all_ids()?;
+        let total_vectors = stored_ids.len();
+        if !stored_ids.is_empty() {
+            let mut entries = Vec::with_capacity(stored_ids.len());
+            for id in &stored_ids {
+                if let Some(vector) = storage.get(id)? {
+                    entries.push((id.clone(), vector));
+                }
+            }
+            index.insert_batch(entries)?;
+        }
+
         let stats = Arc::new(RwLock::new(VectorDbStats {
-            total_vectors: 0,
+            total_vectors,
             index_size_bytes: 0,
             storage_size_bytes: 0,
             avg_query_latency_us: 0.0,
@@ -299,5 +315,65 @@ mod tests {
         // Delete
         assert!(db.delete("test1").unwrap());
         assert_eq!(db.count().unwrap(), 0);
+    }
+
+    /// Issue #430: search must return persisted vectors after the VectorDB is
+    /// reopened. Before the fix, `VectorDB::new` always created an empty
+    /// in-memory HNSW, so `search` returned 0 results despite the storage
+    /// containing the vectors.
+    #[test]
+    fn test_index_rebuilt_from_storage_on_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rebuild.db");
+
+        // Write a handful of vectors with the first DB instance.
+        {
+            let db = VectorDB::builder()
+                .dimensions(4)
+                .storage_path(&path)
+                .build()
+                .unwrap();
+            for i in 0..5u32 {
+                let v = vec![i as f32, (i * 2) as f32, (i * 3) as f32, (i * 5) as f32];
+                db.insert(VectorEntry {
+                    id: format!("v{i}"),
+                    vector: v,
+                    metadata: std::collections::HashMap::new(),
+                    timestamp: 0,
+                })
+                .unwrap();
+            }
+        } // drop closes the storage handle.
+
+        // Reopen against the same on-disk path — index must be rebuilt.
+        let db = VectorDB::builder()
+            .dimensions(4)
+            .storage_path(&path)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            db.count().unwrap(),
+            5,
+            "storage.count() should report persisted vectors"
+        );
+
+        let q = SearchQuery {
+            vector: vec![2.0, 4.0, 6.0, 10.0], // matches v2 exactly
+            k: 3,
+            filters: None,
+            threshold: None,
+            ef_search: None,
+        };
+        let results = db.search(q).unwrap();
+        assert!(
+            !results.is_empty(),
+            "regression of #430: search returned 0 results after reopening; \
+             index was not rebuilt from storage"
+        );
+        assert_eq!(
+            results[0].id, "v2",
+            "exact-match query should return v2 as top hit"
+        );
     }
 }

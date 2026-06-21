@@ -30,36 +30,34 @@ export function createAgentCommand(): Command {
     .description('Spawn a new agent')
     .option('-t, --type <type>', 'Agent type (worker type)', 'optimize')
     .option('--json', 'Output as JSON')
-    .action(async (options) => {
+    .action((options: { type: string; json?: boolean }) => {
       const spinner = ora(`Spawning ${options.type} agent...`).start();
+      const coordinator = new SwarmCoordinator();
 
-      try {
-        const workerType = options.type as WorkerType;
-        if (!VALID_WORKER_TYPES.includes(workerType)) {
-          spinner.fail(chalk.red(`Invalid worker type: ${options.type}`));
-          console.log(chalk.gray(`Valid types: ${VALID_WORKER_TYPES.join(', ')}`));
+      coordinator.start()
+        .then(() => coordinator.spawnAgent(options.type as WorkerType))
+        .then((spawnedAgent) => {
+          spinner.stop();
+
+          if (!VALID_WORKER_TYPES.includes(options.type as WorkerType)) {
+            spinner.fail(chalk.red(`Invalid worker type: ${options.type}`));
+            console.log(chalk.gray(`Valid types: ${VALID_WORKER_TYPES.join(', ')}`));
+            process.exit(1);
+          }
+
+          if (options.json) {
+            console.log(JSON.stringify(spawnedAgent, null, 2));
+            return;
+          }
+
+          console.log(chalk.green(`✓ Agent spawned: ${chalk.cyan(spawnedAgent.id)}`));
+          console.log(chalk.gray(`  Type: ${spawnedAgent.type}`));
+          console.log(chalk.gray(`  Status: ${spawnedAgent.status}`));
+        })
+        .catch((error: unknown) => {
+          spinner.fail(chalk.red(`Spawn failed: ${error instanceof Error ? error.message : String(error)}`));
           process.exit(1);
-        }
-
-        const coordinator = new SwarmCoordinator();
-        await coordinator.start();
-
-        const spawnedAgent = await coordinator.spawnAgent(workerType);
-
-        spinner.stop();
-
-        if (options.json) {
-          console.log(JSON.stringify(spawnedAgent, null, 2));
-          return;
-        }
-
-        console.log(chalk.green(`✓ Agent spawned: ${chalk.cyan(spawnedAgent.id)}`));
-        console.log(chalk.gray(`  Type: ${spawnedAgent.type}`));
-        console.log(chalk.gray(`  Status: ${spawnedAgent.status}`));
-      } catch (error: any) {
-        spinner.fail(chalk.red(`Spawn failed: ${error.message}`));
-        process.exit(1);
-      }
+        });
     });
 
   // List command
@@ -67,7 +65,7 @@ export function createAgentCommand(): Command {
     .command('list')
     .description('List running agents')
     .option('--json', 'Output as JSON')
-    .action(async (options) => {
+    .action((options: { json?: boolean }) => {
       try {
         const coordinator = new SwarmCoordinator();
         const agents = coordinator.getAgents();
@@ -101,8 +99,8 @@ export function createAgentCommand(): Command {
         }
 
         console.log('─'.repeat(70));
-      } catch (error: any) {
-        console.error(chalk.red(`List failed: ${error.message}`));
+      } catch (error: unknown) {
+        console.error(chalk.red(`List failed: ${error instanceof Error ? error.message : String(error)}`));
         process.exit(1);
       }
     });
@@ -112,23 +110,23 @@ export function createAgentCommand(): Command {
     .command('stop')
     .description('Stop an agent')
     .argument('<id>', 'Agent ID')
-    .action(async (id) => {
+    .action((id: string) => {
       const spinner = ora(`Stopping agent ${id}...`).start();
+      const coordinator = new SwarmCoordinator();
 
-      try {
-        const coordinator = new SwarmCoordinator();
-        const removed = await coordinator.removeAgent(id);
-
-        if (removed) {
-          spinner.succeed(chalk.green(`Agent ${id} stopped`));
-        } else {
-          spinner.fail(chalk.red(`Agent ${id} not found`));
+      coordinator.removeAgent(id)
+        .then((removed) => {
+          if (removed) {
+            spinner.succeed(chalk.green(`Agent ${id} stopped`));
+          } else {
+            spinner.fail(chalk.red(`Agent ${id} not found`));
+            process.exit(1);
+          }
+        })
+        .catch((error: unknown) => {
+          spinner.fail(chalk.red(`Stop failed: ${error instanceof Error ? error.message : String(error)}`));
           process.exit(1);
-        }
-      } catch (error: any) {
-        spinner.fail(chalk.red(`Stop failed: ${error.message}`));
-        process.exit(1);
-      }
+        });
     });
 
   // Status command
@@ -137,7 +135,7 @@ export function createAgentCommand(): Command {
     .description('Show agent/swarm status')
     .argument('[id]', 'Agent ID (optional)')
     .option('--json', 'Output as JSON')
-    .action(async (id, options) => {
+    .action((id: string | undefined, options: { json?: boolean }) => {
       try {
         const coordinator = new SwarmCoordinator();
 
@@ -186,8 +184,8 @@ export function createAgentCommand(): Command {
           console.log(`Failed:         ${chalk.red(status.failedTasks)}`);
           console.log('─'.repeat(40));
         }
-      } catch (error: any) {
-        console.error(chalk.red(`Status failed: ${error.message}`));
+      } catch (error: unknown) {
+        console.error(chalk.red(`Status failed: ${error instanceof Error ? error.message : String(error)}`));
         process.exit(1);
       }
     });
@@ -203,28 +201,27 @@ export function createAgentCommand(): Command {
     .option('--max-agents <max>', 'Maximum agents', '8')
     .option('--strategy <strategy>', 'Coordination strategy: specialized, balanced, adaptive', 'specialized')
     .option('--consensus <consensus>', 'Consensus algorithm: raft, byzantine, gossip, crdt', 'raft')
-    .action(async (options) => {
+    .action((options: { topology: string; maxAgents: string; strategy: string; consensus: string }) => {
       const spinner = ora('Initializing swarm...').start();
+      const coordinator = new SwarmCoordinator({
+        topology: options.topology as 'hierarchical' | 'mesh' | 'hierarchical-mesh' | 'adaptive',
+        maxAgents: parseInt(options.maxAgents, 10),
+        strategy: options.strategy as 'specialized' | 'balanced' | 'adaptive',
+        consensus: options.consensus as 'raft' | 'byzantine' | 'gossip' | 'crdt',
+      });
 
-      try {
-        const coordinator = new SwarmCoordinator({
-          topology: options.topology as any,
-          maxAgents: parseInt(options.maxAgents, 10),
-          strategy: options.strategy as any,
-          consensus: options.consensus as any,
+      coordinator.start()
+        .then(() => {
+          spinner.succeed(chalk.green('Swarm initialized'));
+          console.log(chalk.gray(`  Topology: ${options.topology}`));
+          console.log(chalk.gray(`  Max Agents: ${options.maxAgents}`));
+          console.log(chalk.gray(`  Strategy: ${options.strategy}`));
+          console.log(chalk.gray(`  Consensus: ${options.consensus}`));
+        })
+        .catch((error: unknown) => {
+          spinner.fail(chalk.red(`Init failed: ${error instanceof Error ? error.message : String(error)}`));
+          process.exit(1);
         });
-
-        await coordinator.start();
-
-        spinner.succeed(chalk.green('Swarm initialized'));
-        console.log(chalk.gray(`  Topology: ${options.topology}`));
-        console.log(chalk.gray(`  Max Agents: ${options.maxAgents}`));
-        console.log(chalk.gray(`  Strategy: ${options.strategy}`));
-        console.log(chalk.gray(`  Consensus: ${options.consensus}`));
-      } catch (error: any) {
-        spinner.fail(chalk.red(`Init failed: ${error.message}`));
-        process.exit(1);
-      }
     });
 
   // Swarm status
@@ -232,7 +229,7 @@ export function createAgentCommand(): Command {
     .command('status')
     .description('Show swarm status')
     .option('--json', 'Output as JSON')
-    .action(async (options) => {
+    .action((options: { json?: boolean }) => {
       try {
         const coordinator = new SwarmCoordinator();
         const status = coordinator.getStatus();
@@ -252,8 +249,8 @@ export function createAgentCommand(): Command {
         console.log(`Pending Tasks: ${chalk.yellow(status.pendingTasks)}`);
         console.log(`Completed:     ${chalk.green(status.completedTasks)}`);
         console.log('─'.repeat(50));
-      } catch (error: any) {
-        console.error(chalk.red(`Status failed: ${error.message}`));
+      } catch (error: unknown) {
+        console.error(chalk.red(`Status failed: ${error instanceof Error ? error.message : String(error)}`));
         process.exit(1);
       }
     });
@@ -266,31 +263,30 @@ export function createAgentCommand(): Command {
     .requiredOption('--task <task>', 'Task type')
     .option('--content <content>', 'Task content')
     .option('--priority <priority>', 'Priority: low, normal, high, critical', 'normal')
-    .action(async (options) => {
+    .action((options: { worker: string; task: string; content?: string; priority: string }) => {
       const spinner = ora('Dispatching task...').start();
+      const coordinator = new SwarmCoordinator();
 
-      try {
-        const coordinator = new SwarmCoordinator();
-        await coordinator.start();
-
-        const task = await coordinator.dispatch({
+      coordinator.start()
+        .then(() => coordinator.dispatch({
           worker: options.worker as WorkerType,
           task: {
             type: options.task,
-            content: options.content || {},
+            content: options.content ?? {},
           },
-          priority: options.priority as any,
+          priority: options.priority as 'low' | 'normal' | 'high' | 'critical',
+        }))
+        .then((task) => {
+          spinner.succeed(chalk.green(`Task dispatched: ${task.id}`));
+          console.log(chalk.gray(`  Worker: ${task.worker}`));
+          console.log(chalk.gray(`  Type: ${task.type}`));
+          console.log(chalk.gray(`  Priority: ${task.priority}`));
+          console.log(chalk.gray(`  Status: ${task.status}`));
+        })
+        .catch((error: unknown) => {
+          spinner.fail(chalk.red(`Dispatch failed: ${error instanceof Error ? error.message : String(error)}`));
+          process.exit(1);
         });
-
-        spinner.succeed(chalk.green(`Task dispatched: ${task.id}`));
-        console.log(chalk.gray(`  Worker: ${task.worker}`));
-        console.log(chalk.gray(`  Type: ${task.type}`));
-        console.log(chalk.gray(`  Priority: ${task.priority}`));
-        console.log(chalk.gray(`  Status: ${task.status}`));
-      } catch (error: any) {
-        spinner.fail(chalk.red(`Dispatch failed: ${error.message}`));
-        process.exit(1);
-      }
     });
 
   return agent;

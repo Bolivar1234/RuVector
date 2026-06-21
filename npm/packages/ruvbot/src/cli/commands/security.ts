@@ -25,7 +25,7 @@ export function createSecurityCommand(): Command {
     .argument('<input>', 'Text to scan (use quotes for multi-word)')
     .option('--strict', 'Use strict security configuration')
     .option('--json', 'Output as JSON')
-    .action(async (input, options) => {
+    .action(async (input: string, options: { strict?: boolean; json?: boolean }) => {
       const spinner = ora('Scanning for threats...').start();
 
       try {
@@ -67,8 +67,8 @@ export function createSecurityCommand(): Command {
         }
 
         console.log('─'.repeat(50));
-      } catch (error: any) {
-        spinner.fail(chalk.red(`Scan failed: ${error.message}`));
+      } catch (error: unknown) {
+        spinner.fail(chalk.red(`Scan failed: ${error instanceof Error ? error.message : String(error)}`));
         process.exit(1);
       }
     });
@@ -80,7 +80,7 @@ export function createSecurityCommand(): Command {
     .option('-l, --limit <limit>', 'Number of entries to show', '20')
     .option('--threats-only', 'Show only entries with threats')
     .option('--json', 'Output as JSON')
-    .action(async (options) => {
+    .action(async (options: { limit: string; threatsOnly?: boolean; json?: boolean }) => {
       try {
         const guard = new AIDefenceGuard({ enableAuditLog: true });
         const log = guard.getAuditLog();
@@ -117,8 +117,8 @@ export function createSecurityCommand(): Command {
         }
 
         console.log('─'.repeat(70));
-      } catch (error: any) {
-        console.error(chalk.red(`Audit failed: ${error.message}`));
+      } catch (error: unknown) {
+        console.error(chalk.red(`Audit failed: ${error instanceof Error ? error.message : String(error)}`));
         process.exit(1);
       }
     });
@@ -128,7 +128,7 @@ export function createSecurityCommand(): Command {
     .command('test')
     .description('Test security with sample attack patterns')
     .option('--verbose', 'Show detailed results')
-    .action(async (options) => {
+    .action(async (options: { verbose?: boolean }) => {
       console.log(chalk.bold('\n🧪 Security Test Suite\n'));
       console.log('─'.repeat(60));
 
@@ -199,7 +199,7 @@ export function createSecurityCommand(): Command {
     .description('Show/update security configuration')
     .option('--preset <preset>', 'Apply preset: strict, default, permissive')
     .option('--json', 'Output as JSON')
-    .action(async (options) => {
+    .action((options: { preset?: string; json?: boolean }) => {
       if (options.preset) {
         let config;
         switch (options.preset) {
@@ -248,7 +248,7 @@ export function createSecurityCommand(): Command {
     .command('stats')
     .description('Show security statistics')
     .option('--json', 'Output as JSON')
-    .action(async (options) => {
+    .action(async (options: { json?: boolean }) => {
       try {
         const guard = new AIDefenceGuard({ enableAuditLog: true });
         const log = guard.getAuditLog();
@@ -290,8 +290,8 @@ export function createSecurityCommand(): Command {
         }
 
         console.log('─'.repeat(40));
-      } catch (error: any) {
-        console.error(chalk.red(`Stats failed: ${error.message}`));
+      } catch (error: unknown) {
+        console.error(chalk.red(`Stats failed: ${error instanceof Error ? error.message : String(error)}`));
         process.exit(1);
       }
     });

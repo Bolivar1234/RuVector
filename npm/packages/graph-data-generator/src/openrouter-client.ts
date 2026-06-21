@@ -140,8 +140,9 @@ export class OpenRouterClient {
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        const result = await reader.read();
+        if (result.done) break;
+        const value = result.value as Uint8Array;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -155,7 +156,7 @@ export class OpenRouterClient {
             }
 
             try {
-              const parsed = JSON.parse(data);
+              const parsed = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
               const content = parsed.choices?.[0]?.delta?.content;
               if (content) {
                 yield content;
@@ -215,10 +216,10 @@ export class OpenRouterClient {
   /**
    * Generate embeddings (if the model supports it)
    */
-  async generateEmbedding(_text: string): Promise<number[]> {
+  generateEmbedding(_text: string): Promise<number[]> {
     // Note: Kimi K2 may not support embeddings directly
     // This is a placeholder for potential future support
-    throw new Error('Embedding generation not yet implemented for Kimi K2');
+    return Promise.reject(new Error('Embedding generation not yet implemented for Kimi K2'));
   }
 
   /**

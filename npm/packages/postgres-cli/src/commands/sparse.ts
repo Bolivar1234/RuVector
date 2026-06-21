@@ -5,8 +5,6 @@
 
 import chalk from 'chalk';
 import ora from 'ora';
-import Table from 'cli-table3';
-import { readFileSync } from 'fs';
 import type { RuVectorClient } from '../client.js';
 
 export interface SparseCreateOptions {
@@ -58,7 +56,7 @@ export class SparseCommands {
       const values = JSON.parse(options.values);
       const dim = parseInt(options.dim);
 
-      const result = await client.createSparseVector(indices, values, dim);
+      await client.createSparseVector(indices, values, dim);
 
       spinner.succeed(chalk.green('Sparse vector created successfully'));
 

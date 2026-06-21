@@ -72,10 +72,10 @@ export class DiscordAdapter extends BaseAdapter {
 
       if (discordModule) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const Client = discordModule.Client as any;
-        const GatewayIntentBits = discordModule.GatewayIntentBits as Record<string, number>;
+        const ClientCtor = discordModule['Client'] as new (opts: unknown) => unknown;
+        const GatewayIntentBits = discordModule['GatewayIntentBits'] as Record<string, number>;
 
-        this.client = new Client({
+        this.client = new ClientCtor({
           intents: credentials.intents ?? [
             GatewayIntentBits.Guilds,
             GatewayIntentBits.GuildMessages,
@@ -90,7 +90,7 @@ export class DiscordAdapter extends BaseAdapter {
           if ((message as unknown as { author: { bot?: boolean } }).author.bot) return;
 
           const unified = this.discordToUnified(message);
-          this.emitMessage(unified);
+          void this.emitMessage(unified);
         });
 
         // Login
@@ -167,11 +167,12 @@ export class DiscordAdapter extends BaseAdapter {
   // ==========================================================================
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async loadDiscordJs(): Promise<any | null> {
+  private async loadDiscordJs(): Promise<Record<string, unknown> | null> {
     try {
       // Dynamic import - discord.js is optional
       // @ts-expect-error - discord.js may not be installed
-      return await import('discord.js').catch(() => null);
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+      return await import('discord.js').catch(() => null) as Record<string, unknown>;
     } catch {
       return null;
     }

@@ -7,8 +7,7 @@
  * - Extension management (enable, disable, upgrade)
  */
 
-import { execSync, spawn, spawnSync } from 'child_process';
-import { promisify } from 'util';
+import { execSync, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -18,10 +17,10 @@ import ora from 'ora';
 // Constants
 const DOCKER_IMAGE = 'ruvnet/ruvector-postgres';
 const DOCKER_IMAGE_VERSION = '0.2.5';
-const RUVECTOR_CRATE_VERSION = '0.2.5';
+const _RUVECTOR_CRATE_VERSION = '0.2.5';
 const PGRX_VERSION = '0.12.6';
 const DEFAULT_PG_VERSION = '16';
-const SUPPORTED_PG_VERSIONS = ['14', '15', '16', '17'];
+const _SUPPORTED_PG_VERSIONS = ['14', '15', '16', '17'];
 const DEFAULT_PORT = 5432;
 const DEFAULT_USER = 'ruvector';
 const DEFAULT_PASSWORD = 'ruvector';
@@ -229,7 +228,7 @@ export class InstallCommands {
             return true;
 
           case 'dnf':
-          case 'yum':
+          case 'yum': {
             const pkg = sys.packageManager;
             spinner.text = 'Adding PostgreSQL repository...';
             this.sudoExec(`${pkg} install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-$(rpm -E %{rhel})-x86_64/pgdg-redhat-repo-latest.noarch.rpm`);
@@ -240,6 +239,7 @@ export class InstallCommands {
 
             spinner.succeed(`PostgreSQL ${pgVersion} installed via ${pkg.toUpperCase()}`);
             return true;
+          }
 
           case 'pacman':
             this.sudoExec(`pacman -S --noconfirm postgresql`);

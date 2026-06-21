@@ -220,7 +220,7 @@ export class BotStateManager {
     if (handlers) {
       for (const handler of handlers) {
         try {
-          handler(event);
+          void handler(event);
         } catch (error) {
           console.error(`Event handler error for ${event.type}:`, error);
         }
@@ -232,7 +232,7 @@ export class BotStateManager {
     if (wildcardHandlers) {
       for (const handler of wildcardHandlers) {
         try {
-          handler(event);
+          void handler(event);
         } catch (error) {
           console.error('Wildcard event handler error:', error);
         }

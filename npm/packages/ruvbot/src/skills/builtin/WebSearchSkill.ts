@@ -7,7 +7,6 @@
 
 import type {
   Skill,
-  SkillExecutor,
   SkillExecutionContext,
   SkillStep,
   SkillExecutionResult,

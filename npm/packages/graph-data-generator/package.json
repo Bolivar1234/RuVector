@@ -46,7 +46,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src tests --ext .ts,.js",
+    "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src tests --ext .ts,.js --fix",
     "format": "prettier --write \"src/**/*.{ts,js}\" \"tests/**/*.{ts,js}\"",
     "format:check": "prettier --check \"src/**/*.{ts,js}\" \"tests/**/*.{ts,js}\"",

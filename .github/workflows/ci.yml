@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,11 +15,13 @@ env:
 jobs:
   fmt:
     name: Rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -30,10 +33,12 @@ jobs:
 
   check:
     name: Cargo check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
@@ -49,11 +54,13 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
@@ -75,7 +82,7 @@ jobs:
   # faster test discovery and execution.
   test:
     name: Tests (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     # `core-and-rest` is the catch-all shard and compiles ~50 crates; on a
     # cold cache the build alone has hit ~90min, so headroom matters more
     # than tight feedback for this job. Faster shards still finish in ~10–20m.
@@ -84,10 +91,11 @@ jobs:
     # iter 230) both hit the cap and got cancelled mid-test. Excluding
     # the iter-219 hailo crates from the catch-all (iter 230) was a
     # necessary but not sufficient fix — the shard was already at the
-    # ragged edge. 180min gives ~30min headroom on the typical 150min
-    # run; if a shard's natural duration drifts further we should split
-    # crates out into a new sibling shard rather than push this higher.
-    timeout-minutes: 180
+    # ragged edge. Iter 232+ — natural duration drifted to 155–165 min
+    # (ci/supply-chain-guards branch), hitting the 180-min cap. Bumped
+    # 180→240 to restore headroom. The right long-term fix is to split
+    # heavy crates out into a new sibling shard.
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
@@ -130,13 +138,6 @@ jobs:
               -p ruvix-shell
               -p ruvix-types
               -p ruvix-vecgraph
-          - name: ruqu-quantum
-            packages: >-
-              -p ruqu
-              -p ruqu-algorithms
-              -p ruqu-core
-              -p ruqu-exotic
-              -p ruqu-wasm
           - name: ml-research-heavy
             # Heaviest crates split into their own shard so ml-research
             # doesn't exceed the 45-min timeout.
@@ -259,11 +260,6 @@ jobs:
               --exclude ruvix-shell
               --exclude ruvix-types
               --exclude ruvix-vecgraph
-              --exclude ruqu
-              --exclude ruqu-algorithms
-              --exclude ruqu-core
-              --exclude ruqu-exotic
-              --exclude ruqu-wasm
               --exclude ruvector-attention
               --exclude ruvector-mincut
               --exclude ruvector-scipix
@@ -309,6 +305,8 @@ jobs:
               --exclude ruvllm-wasm
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
@@ -336,10 +334,12 @@ jobs:
 
   audit:
     name: Security audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2

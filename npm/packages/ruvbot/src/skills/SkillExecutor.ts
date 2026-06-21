@@ -197,7 +197,7 @@ export class SkillExecutor {
 
       // Get the final result (returned from generator)
       const result = await (async () => {
-        let lastValue: SkillExecutionResult | undefined;
+        let _lastValue: SkillExecutionResult | undefined;
         const gen = skill.execute(context, params);
         let next = await gen.next();
         while (!next.done) {
@@ -274,8 +274,6 @@ export class SkillExecutor {
     // Execute skill generator and yield steps
     const generator = skill.execute(context, params);
 
-    let result: SkillExecutionResult;
-
     for await (const step of generator) {
       yield step;
     }
@@ -334,7 +332,7 @@ export class SkillExecutor {
           }
           break;
 
-        case 'number':
+        case 'number': {
           const numMatch = message.match(/\b(\d+)\b/);
           if (numMatch && prop.default === undefined) {
             params[name] = parseInt(numMatch[1], 10);
@@ -342,6 +340,7 @@ export class SkillExecutor {
             params[name] = prop.default;
           }
           break;
+        }
 
         case 'boolean':
           if (prop.default !== undefined) {

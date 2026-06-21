@@ -17,11 +17,6 @@ import type {
   AgentConfig,
   Session,
   Message,
-  BotEvent,
-  BotEventType,
-  Result,
-  ok,
-  err,
 } from './core/types.js';
 import { RuvBotError, ConfigurationError, InitializationError } from './core/errors.js';
 import {
@@ -42,6 +37,7 @@ export interface RuvBotOptions {
   config?: Partial<BotConfig>;
   configPath?: string;
   autoStart?: boolean;
+  debug?: boolean;
 }
 
 export interface RuvBotEvents {
@@ -110,9 +106,9 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
 
     // Auto-start if requested
     if (options.autoStart) {
-      this.start().catch((error) => {
+      this.start().catch((error: unknown) => {
         this.logger.error({ error }, 'Auto-start failed');
-        this.emit('error', error);
+        this.emit('error', error instanceof Error ? error : new Error(String(error)));
       });
     }
   }
@@ -214,7 +210,7 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
   /**
    * Spawn a new agent with the given configuration
    */
-  async spawnAgent(config: AgentConfig): Promise<Agent> {
+  spawnAgent(config: AgentConfig): Promise<Agent> {
     const agentId = config.id || uuidv4();
 
     if (this.agents.has(agentId)) {
@@ -234,7 +230,7 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
     this.logger.info({ agentId, name: config.name }, 'Agent spawned');
     this.emit('agent:spawn', agent);
 
-    return agent;
+    return Promise.resolve(agent);
   }
 
   /**
@@ -279,7 +275,7 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
   /**
    * Create a new session for an agent
    */
-  async createSession(
+  createSession(
     agentId: string,
     options: {
       userId?: string;
@@ -317,13 +313,13 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
     this.logger.info({ sessionId, agentId }, 'Session created');
     this.emit('session:create', session);
 
-    return session;
+    return Promise.resolve(session);
   }
 
   /**
    * End a session by ID
    */
-  async endSession(sessionId: string): Promise<void> {
+  endSession(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new RuvBotError(`Session with ID ${sessionId} not found`, 'SESSION_NOT_FOUND');
@@ -332,6 +328,7 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
     this.sessions.delete(sessionId);
     this.logger.info({ sessionId }, 'Session ended');
     this.emit('session:end', sessionId);
+    return Promise.resolve();
   }
 
   /**
@@ -468,7 +465,7 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
   // Private Methods
   // ==========================================================================
 
-  private async initializeServices(): Promise<void> {
+  private initializeServices(): Promise<void> {
     this.logger.debug('Initializing core services...');
 
     const config = this.configManager.getConfig();
@@ -514,9 +511,10 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
     }
 
     // TODO: Initialize memory manager, skill registry, etc.
+    return Promise.resolve();
   }
 
-  private async startIntegrations(config: BotConfig): Promise<void> {
+  private startIntegrations(config: BotConfig): Promise<void> {
     this.logger.debug('Starting integrations...');
 
     if (config.slack.enabled) {
@@ -533,11 +531,13 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
       this.logger.info('Webhook integration enabled');
       // TODO: Initialize webhook handler
     }
+    return Promise.resolve();
   }
 
-  private async stopIntegrations(): Promise<void> {
+  private stopIntegrations(): Promise<void> {
     this.logger.debug('Stopping integrations...');
     // TODO: Stop all integration adapters
+    return Promise.resolve();
   }
 
   private async startApiServer(config: BotConfig): Promise<void> {
@@ -545,8 +545,8 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
     const host = config.api.host || '0.0.0.0';
 
     this.httpServer = createServer((req, res) => {
-      this.handleApiRequest(req, res).catch((error) => {
-        this.logger.error({ err: error }, 'Unhandled API request error');
+      this.handleApiRequest(req, res).catch((error: unknown) => {
+        this.logger.error({ err: error instanceof Error ? error.message : String(error) }, 'Unhandled API request error');
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Internal server error' }));
@@ -681,7 +681,7 @@ export class RuvBot extends EventEmitter<RuvBotEvents> {
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         if (chunks.length === 0) { resolve(null); return; }
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8'))); }
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Record<string, unknown>); }
         catch { reject(new Error('Invalid JSON')); }
       });
       req.on('error', reject);

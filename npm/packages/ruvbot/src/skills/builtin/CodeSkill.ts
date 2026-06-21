@@ -168,7 +168,7 @@ async function* codeExplainExecutor(
 ): AsyncGenerator<SkillStep, SkillExecutionResult, void> {
   const code = params.code as string;
   let language = params.language as string | undefined;
-  const detail = (params.detail as string) || 'normal';
+  const _detail = (params.detail as string) || 'normal';
 
   yield {
     type: 'message',

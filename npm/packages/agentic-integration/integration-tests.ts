@@ -295,7 +295,7 @@ describe('RegionalAgent', () => {
           vector: TestUtils.generateRandomVector(768),
           topK: 5,
           timeout: 5000,
-        }).catch(err => err)
+        }).catch((err: unknown) => err as Error | null)
       );
     }
 
@@ -412,8 +412,7 @@ describe('SwarmManager', () => {
       const initialCount = status.totalAgents;
 
       // Get first agent ID from any region
-      const regionMetrics = Object.values(status.metrics.regionMetrics);
-      const firstRegion = regionMetrics[0];
+      void Object.values(status.metrics.regionMetrics);
 
       // We'll need to track spawned agents to despawn them
       // For now, just verify the mechanism works
@@ -458,15 +457,15 @@ describe('CoordinationProtocol', () => {
     protocol2.registerNode('node-1');
 
     // Set up message forwarding
-    protocol1.on('message:transmit', (message) => {
+    protocol1.on('message:transmit', (message: { to?: string; [key: string]: unknown }) => {
       if (message.to === 'node-2' || !message.to) {
-        protocol2.receiveMessage(message);
+        void protocol2.receiveMessage(message as unknown as import('./coordination-protocol').Message);
       }
     });
 
-    protocol2.on('message:transmit', (message) => {
+    protocol2.on('message:transmit', (message: { to?: string; [key: string]: unknown }) => {
       if (message.to === 'node-1' || !message.to) {
-        protocol1.receiveMessage(message);
+        void protocol1.receiveMessage(message as unknown as import('./coordination-protocol').Message);
       }
     });
   });
@@ -479,7 +478,7 @@ describe('CoordinationProtocol', () => {
   test('should send and receive messages between nodes', async () => {
     let receivedMessage = false;
 
-    protocol2.on('request:received', (message) => {
+    protocol2.on('request:received', (message: import('./coordination-protocol').Message) => {
       receivedMessage = true;
       expect(message.from).toBe('node-1');
     });
@@ -492,8 +491,8 @@ describe('CoordinationProtocol', () => {
   });
 
   test('should handle request-response pattern', async () => {
-    protocol2.on('request:received', async (message) => {
-      await protocol2.sendResponse(message.id, message.from, {
+    protocol2.on('request:received', (message: import('./coordination-protocol').Message) => {
+      void protocol2.sendResponse(message.id, message.from, {
         status: 'ok',
         data: 'response',
       });
@@ -506,13 +505,13 @@ describe('CoordinationProtocol', () => {
       { expectResponse: true }
     );
 
-    expect(response.status).toBe('ok');
+    expect(response!.status).toBe('ok');
   });
 
   test('should broadcast messages to all nodes', async () => {
     let received = false;
 
-    protocol2.on('broadcast:received', (message) => {
+    protocol2.on('broadcast:received', (message: import('./coordination-protocol').Message) => {
       received = true;
       expect(message.type).toBe('broadcast');
     });
@@ -526,7 +525,7 @@ describe('CoordinationProtocol', () => {
 
   test('should handle consensus proposals', async () => {
     // Node 2 auto-approves proposals
-    protocol2.on('consensus:proposed', async (proposal) => {
+    protocol2.on('consensus:proposed', (_proposal) => {
       // Auto-approve handled internally in test setup
     });
 
@@ -545,10 +544,10 @@ describe('CoordinationProtocol', () => {
     // Subscribe node 2 to 'sync' topic
     protocol2.subscribe('sync', 'node-2');
 
-    protocol2.on('topic:message', (data) => {
+    protocol2.on('topic:message', (data: { topicName: string; message: import('./coordination-protocol').Message }) => {
       if (data.topicName === 'sync') {
         receivedMessage = true;
-        expect(data.message.payload.data).toBe('sync-data');
+        expect((data.message.payload as Record<string, unknown>).data).toBe('sync-data');
       }
     });
 
@@ -563,7 +562,7 @@ describe('CoordinationProtocol', () => {
   test('should detect unhealthy nodes', async () => {
     let unhealthyDetected = false;
 
-    protocol1.on('node:unhealthy', (data) => {
+    protocol1.on('node:unhealthy', (data: { nodeId: string; lastSeen: number }) => {
       unhealthyDetected = true;
       expect(data.nodeId).toBe('node-2');
     });
@@ -783,9 +782,9 @@ describe('Failover Scenarios', () => {
     // Set up message forwarding
     let networkPartitioned = false;
 
-    protocol1.on('message:transmit', (message) => {
+    protocol1.on('message:transmit', (message: { to?: string; [key: string]: unknown }) => {
       if (!networkPartitioned && message.to === 'node-2') {
-        protocol2.receiveMessage(message);
+        void protocol2.receiveMessage(message as unknown as import('./coordination-protocol').Message);
       }
     });
 
@@ -799,7 +798,7 @@ describe('Failover Scenarios', () => {
 
     let unhealthyDetected = false;
 
-    protocol1.on('node:unhealthy', (data) => {
+    protocol1.on('node:unhealthy', (data: { nodeId: string; lastSeen: number }) => {
       if (data.nodeId === 'node-2') {
         unhealthyDetected = true;
       }

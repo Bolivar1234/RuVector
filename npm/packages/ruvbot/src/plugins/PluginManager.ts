@@ -363,29 +363,29 @@ export class PluginManager extends EventEmitter<PluginEvents> {
   /**
    * Enable a plugin
    */
-  async enablePlugin(name: string): Promise<boolean> {
+  enablePlugin(name: string): Promise<boolean> {
     const plugin = this.plugins.get(name);
     if (!plugin || plugin.state === 'enabled') {
-      return false;
+      return Promise.resolve(false);
     }
 
     plugin.state = 'enabled';
     this.emit('plugin:enabled', name);
-    return true;
+    return Promise.resolve(true);
   }
 
   /**
    * Disable a plugin
    */
-  async disablePlugin(name: string): Promise<boolean> {
+  disablePlugin(name: string): Promise<boolean> {
     const plugin = this.plugins.get(name);
     if (!plugin || plugin.state !== 'enabled') {
-      return false;
+      return Promise.resolve(false);
     }
 
     plugin.state = 'disabled';
     this.emit('plugin:disabled', name);
-    return true;
+    return Promise.resolve(true);
   }
 
   /**
@@ -485,21 +485,21 @@ export class PluginManager extends EventEmitter<PluginEvents> {
   /**
    * Search IPFS registry for plugins
    */
-  async searchRegistry(query: string): Promise<PluginRegistryEntry[]> {
+  searchRegistry(query: string): Promise<PluginRegistryEntry[]> {
     if (!this.config.ipfsGateway) {
-      return [];
+      return Promise.resolve([]);
     }
 
     // Placeholder for IPFS registry search
     // In production, this would query an IPFS-based registry
     console.log(`Searching IPFS registry for: ${query}`);
-    return [];
+    return Promise.resolve([]);
   }
 
   /**
    * Install plugin from IPFS registry
    */
-  async installFromRegistry(name: string): Promise<PluginInstance | null> {
+  installFromRegistry(name: string): Promise<PluginInstance | null> {
     if (!this.config.ipfsGateway) {
       throw new Error('IPFS gateway not configured');
     }
@@ -513,7 +513,7 @@ export class PluginManager extends EventEmitter<PluginEvents> {
     // 5. Load plugin
 
     console.log(`Installing ${name} from IPFS registry...`);
-    return null;
+    return Promise.resolve(null);
   }
 
   // ==========================================================================
@@ -526,16 +526,16 @@ export class PluginManager extends EventEmitter<PluginEvents> {
       pluginVersion: plugin.manifest.version,
       permissions: plugin.manifest.permissions,
       memory: {
-        get: async () => null,
-        set: async () => { /* no-op */ },
-        search: async () => [],
+        get: () => Promise.resolve(null),
+        set: () => Promise.resolve(),
+        search: () => Promise.resolve([]),
       },
       session: {
-        get: async () => null,
-        current: async () => null,
+        get: () => Promise.resolve(null),
+        current: () => Promise.resolve(null),
       },
       llm: {
-        complete: async () => 'LLM not available in default context',
+        complete: () => Promise.resolve('LLM not available in default context'),
       },
       log: {
         info: (msg) => console.log(`[${plugin.manifest.name}] ${msg}`),

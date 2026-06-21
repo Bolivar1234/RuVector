@@ -1,4 +1,5 @@
 {
+  "root": true,
   "env": {
     "node": true,
     "es2022": true
@@ -35,6 +36,8 @@
     "coverage",
     "*.config.js",
     "*.config.ts",
-    "bin"
+    "bin",
+    "**/*.js",
+    "**/*.d.ts"
   ]
 }

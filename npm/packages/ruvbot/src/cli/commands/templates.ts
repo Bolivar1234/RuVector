@@ -6,7 +6,6 @@
 
 import { Command } from 'commander';
 import {
-  TEMPLATES,
   getTemplate,
   listTemplates,
   getTemplatesByCategory,
@@ -25,7 +24,7 @@ export function createTemplatesCommand(): Command {
     .option('-c, --category <category>', 'Filter by category (practical, intermediate, advanced, exotic)')
     .option('--json', 'Output as JSON')
     .description('List available templates')
-    .action(async (options) => {
+    .action((options: { category?: string; json?: boolean }) => {
       const byCategory = getTemplatesByCategory();
 
       if (options.json) {
@@ -36,8 +35,9 @@ export function createTemplatesCommand(): Command {
       console.log('\n🤖 RuvBot Template Library\n');
       console.log('Deploy with: npx ruvbot deploy <template-id>\n');
 
-      const categories = options.category
-        ? { [options.category]: byCategory[options.category] || [] }
+      const categoryKey = options.category;
+      const categories = categoryKey
+        ? { [categoryKey]: (byCategory as Record<string, Template[]>)[categoryKey] ?? [] }
         : byCategory;
 
       for (const [category, templates] of Object.entries(categories)) {
@@ -45,7 +45,7 @@ export function createTemplatesCommand(): Command {
         console.log(`${emoji} ${category.toUpperCase()}`);
         console.log('─'.repeat(50));
 
-        for (const t of templates as Template[]) {
+        for (const t of templates) {
           console.log(`  ${t.id.padEnd(25)} ${t.name}`);
           console.log(`  ${''.padEnd(25)} ${dim(t.description)}`);
           console.log();
@@ -57,7 +57,7 @@ export function createTemplatesCommand(): Command {
   templates
     .command('info <template-id>')
     .description('Show detailed information about a template')
-    .action(async (templateId) => {
+    .action((templateId: string) => {
       const template = getTemplate(templateId);
 
       if (!template) {
@@ -106,7 +106,7 @@ export function createDeployCommand(): Command {
     .option('--dry-run', 'Show what would be deployed without executing')
     .option('--background', 'Run in background')
     .description('Deploy a template')
-    .action(async (templateId, options) => {
+    .action((templateId: string, options: { name?: string; model?: string; dryRun?: boolean; background?: boolean }) => {
       const template = getTemplate(templateId);
 
       if (!template) {
@@ -144,13 +144,20 @@ export function createDeployCommand(): Command {
 
       console.log('\n✅ Deployment complete!');
       console.log(`\n📊 Monitor with: npx ruvbot status`);
-      console.log(`🛑 Stop with:    npx ruvbot stop ${options.name || templateId}`);
+      console.log(`🛑 Stop with:    npx ruvbot stop ${options.name ?? templateId}`);
     });
 
   return deploy;
 }
 
-function showDeploymentPlan(template: Template, options: Record<string, unknown>): void {
+interface DeployOptions {
+  name?: string;
+  model?: string;
+  dryRun?: boolean;
+  background?: boolean;
+}
+
+function showDeploymentPlan(template: Template, _options: DeployOptions): void {
   console.log(`Template:    ${template.id}`);
   console.log(`Category:    ${template.category}`);
   console.log(`Topology:    ${template.config.topology}`);
@@ -177,16 +184,13 @@ interface DeploymentCommands {
 
 function generateDeploymentCommands(
   template: Template,
-  options: Record<string, unknown>
+  _options: DeployOptions
 ): DeploymentCommands {
-  const name = (options.name as string) || template.id;
-
   // Swarm initialization
   const swarmInit = `npx @claude-flow/cli@latest swarm init --topology ${template.config.topology} --max-agents ${template.config.maxAgents}${template.config.consensus ? ` --consensus ${template.config.consensus}` : ''}`;
 
   // Agent spawn commands
   const agentSpawns = template.agents.map(agent => {
-    const model = (options.model as string) || agent.model || 'google/gemini-2.0-flash-001';
     return `npx @claude-flow/cli@latest agent spawn -t ${agent.type} --name ${agent.name}`;
   });
 

@@ -19,21 +19,26 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { createRequire } from 'module';
 import { RuVectorClient } from './client.js';
-import { VectorCommands } from './commands/vector.js';
-import { AttentionCommands } from './commands/attention.js';
-import { GnnCommands } from './commands/gnn.js';
-import { GraphCommands } from './commands/graph.js';
-import { LearningCommands } from './commands/learning.js';
-import { BenchmarkCommands } from './commands/benchmark.js';
-import { SparseCommands } from './commands/sparse.js';
-import { HyperbolicCommands } from './commands/hyperbolic.js';
-import { RoutingCommands } from './commands/routing.js';
-import { QuantizationCommands } from './commands/quantization.js';
+import { VectorCommands, VectorCreateOptions, VectorInsertOptions, VectorSearchOptions, VectorDistanceOptions, VectorNormalizeOptions } from './commands/vector.js';
+import { AttentionCommands, AttentionComputeOptions } from './commands/attention.js';
+import { GnnCommands, GnnCreateOptions, GnnForwardOptions } from './commands/gnn.js';
+import { GraphCommands, TraverseOptions } from './commands/graph.js';
+import { LearningCommands, TrainOptions, PredictOptions } from './commands/learning.js';
+import { BenchmarkCommands, BenchmarkRunOptions, BenchmarkReportOptions } from './commands/benchmark.js';
+import { SparseCommands, SparseCreateOptions, SparseDistanceOptions, SparseBM25Options, SparseTopKOptions, SparsePruneOptions, DenseToSparseOptions } from './commands/sparse.js';
+import { HyperbolicCommands, PoincareDistanceOptions, LorentzDistanceOptions, MobiusAddOptions, ExpMapOptions, LogMapOptions, ConvertOptions } from './commands/hyperbolic.js';
+import { RoutingCommands, RegisterAgentOptions, RegisterAgentFullOptions, UpdateMetricsOptions, RouteOptions, FindAgentsOptions } from './commands/routing.js';
+import { QuantizationCommands, BinaryQuantizeOptions, ScalarQuantizeOptions } from './commands/quantization.js';
 import { InstallCommands } from './commands/install.js';
 
 // Read version from package.json
 const require = createRequire(import.meta.url);
-const pkg = require('../package.json');
+const pkg = require('../package.json') as { version: string };
+
+interface ProgramOptions {
+  connection: string;
+  verbose?: boolean;
+}
 
 const program = new Command();
 
@@ -55,8 +60,8 @@ vector
   .description('Create a new vector table')
   .option('-d, --dim <number>', 'Vector dimensions', '384')
   .option('-i, --index <type>', 'Index type (hnsw, ivfflat)', 'hnsw')
-  .action(async (name, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (name: string, options: VectorCreateOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await VectorCommands.create(client, name, options);
   });
 
@@ -65,8 +70,8 @@ vector
   .description('Insert vectors into a table')
   .option('-f, --file <path>', 'JSON file with vectors')
   .option('-t, --text <content>', 'Text to embed')
-  .action(async (table, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (table: string, options: VectorInsertOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await VectorCommands.insert(client, table, options);
   });
 
@@ -77,8 +82,8 @@ vector
   .option('-t, --text <content>', 'Text query to embed and search')
   .option('-k, --top-k <number>', 'Number of results', '10')
   .option('-m, --metric <type>', 'Distance metric (cosine, l2, ip)', 'cosine')
-  .action(async (table, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (table: string, options: VectorSearchOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await VectorCommands.search(client, table, options);
   });
 
@@ -88,8 +93,8 @@ vector
   .requiredOption('-a, --a <vector>', 'First vector as JSON array')
   .requiredOption('-b, --b <vector>', 'Second vector as JSON array')
   .option('-m, --metric <type>', 'Distance metric (cosine, l2, ip)', 'cosine')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: VectorDistanceOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await VectorCommands.distance(client, options);
   });
 
@@ -97,8 +102,8 @@ vector
   .command('normalize')
   .description('Normalize a vector to unit length')
   .requiredOption('--vector <array>', 'Vector as JSON array')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: VectorNormalizeOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await VectorCommands.normalize(client, options);
   });
 
@@ -114,8 +119,8 @@ sparse
   .requiredOption('--indices <array>', 'Non-zero indices as JSON array')
   .requiredOption('--values <array>', 'Values as JSON array')
   .requiredOption('--dim <number>', 'Total dimensionality')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: SparseCreateOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await SparseCommands.create(client, options);
   });
 
@@ -125,8 +130,8 @@ sparse
   .requiredOption('-a, --a <sparse>', 'First sparse vector')
   .requiredOption('-b, --b <sparse>', 'Second sparse vector')
   .option('-m, --metric <type>', 'Distance metric (dot, cosine, euclidean, manhattan)', 'cosine')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: SparseDistanceOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await SparseCommands.distance(client, options);
   });
 
@@ -139,8 +144,8 @@ sparse
   .requiredOption('--avg-doc-len <number>', 'Average document length')
   .option('--k1 <number>', 'Term frequency saturation', '1.2')
   .option('--b <number>', 'Length normalization', '0.75')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: SparseBM25Options) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await SparseCommands.bm25(client, options);
   });
 
@@ -149,8 +154,8 @@ sparse
   .description('Keep only top-k elements by value')
   .requiredOption('-s, --sparse <vector>', 'Sparse vector')
   .requiredOption('-k, --k <number>', 'Number of elements to keep')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: SparseTopKOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await SparseCommands.topK(client, options);
   });
 
@@ -159,8 +164,8 @@ sparse
   .description('Remove elements below threshold')
   .requiredOption('-s, --sparse <vector>', 'Sparse vector')
   .requiredOption('--threshold <number>', 'Minimum absolute value threshold')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: SparsePruneOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await SparseCommands.prune(client, options);
   });
 
@@ -168,24 +173,24 @@ sparse
   .command('dense-to-sparse')
   .description('Convert dense vector to sparse')
   .requiredOption('-d, --dense <array>', 'Dense vector as JSON array')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: DenseToSparseOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await SparseCommands.denseToSparse(client, options);
   });
 
 sparse
   .command('sparse-to-dense <sparse>')
   .description('Convert sparse vector to dense')
-  .action(async (sparseVec) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (sparseVec: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await SparseCommands.sparseToDense(client, sparseVec);
   });
 
 sparse
   .command('info <sparse>')
   .description('Get sparse vector information')
-  .action(async (sparseVec) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (sparseVec: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await SparseCommands.info(client, sparseVec);
   });
 
@@ -206,8 +211,8 @@ hyperbolic
   .requiredOption('-a, --a <vector>', 'First vector as JSON array')
   .requiredOption('-b, --b <vector>', 'Second vector as JSON array')
   .option('--curvature <number>', 'Curvature (negative)', '-1.0')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: PoincareDistanceOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await HyperbolicCommands.poincareDistance(client, options);
   });
 
@@ -217,8 +222,8 @@ hyperbolic
   .requiredOption('-a, --a <vector>', 'First vector as JSON array')
   .requiredOption('-b, --b <vector>', 'Second vector as JSON array')
   .option('--curvature <number>', 'Curvature (negative)', '-1.0')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: LorentzDistanceOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await HyperbolicCommands.lorentzDistance(client, options);
   });
 
@@ -228,8 +233,8 @@ hyperbolic
   .requiredOption('-a, --a <vector>', 'First vector as JSON array')
   .requiredOption('-b, --b <vector>', 'Second vector as JSON array')
   .option('--curvature <number>', 'Curvature (negative)', '-1.0')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: MobiusAddOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await HyperbolicCommands.mobiusAdd(client, options);
   });
 
@@ -239,8 +244,8 @@ hyperbolic
   .requiredOption('--base <vector>', 'Base point on manifold')
   .requiredOption('--tangent <vector>', 'Tangent vector at base')
   .option('--curvature <number>', 'Curvature (negative)', '-1.0')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: ExpMapOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await HyperbolicCommands.expMap(client, options);
   });
 
@@ -250,8 +255,8 @@ hyperbolic
   .requiredOption('--base <vector>', 'Base point on manifold')
   .requiredOption('--target <vector>', 'Target point on manifold')
   .option('--curvature <number>', 'Curvature (negative)', '-1.0')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: LogMapOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await HyperbolicCommands.logMap(client, options);
   });
 
@@ -260,8 +265,8 @@ hyperbolic
   .description('Convert Poincare to Lorentz coordinates')
   .requiredOption('--vector <array>', 'Poincare vector')
   .option('--curvature <number>', 'Curvature (negative)', '-1.0')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: ConvertOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await HyperbolicCommands.poincareToLorentz(client, options);
   });
 
@@ -270,8 +275,8 @@ hyperbolic
   .description('Convert Lorentz to Poincare coordinates')
   .requiredOption('--vector <array>', 'Lorentz vector')
   .option('--curvature <number>', 'Curvature (negative)', '-1.0')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: ConvertOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await HyperbolicCommands.lorentzToPoincare(client, options);
   });
 
@@ -280,8 +285,8 @@ hyperbolic
   .description('Compute Minkowski inner product')
   .requiredOption('-a, --a <vector>', 'First vector')
   .requiredOption('-b, --b <vector>', 'Second vector')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: { a: string; b: string }) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await HyperbolicCommands.minkowskiDot(client, options.a, options.b);
   });
 
@@ -305,8 +310,8 @@ routing
   .requiredOption('--cost <number>', 'Cost per request in dollars')
   .requiredOption('--latency <number>', 'Average latency in ms')
   .requiredOption('--quality <number>', 'Quality score (0-1)')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: RegisterAgentOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.registerAgent(client, options);
   });
 
@@ -314,8 +319,8 @@ routing
   .command('register-full')
   .description('Register agent with full JSON config')
   .requiredOption('--config <json>', 'Full agent configuration as JSON')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: RegisterAgentFullOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.registerAgentFull(client, options);
   });
 
@@ -326,27 +331,28 @@ routing
   .requiredOption('--latency <number>', 'Observed latency in ms')
   .requiredOption('--success <boolean>', 'Whether request succeeded')
   .option('--quality <number>', 'Quality score for this request')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  .action(async (options: any) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.updateMetrics(client, {
-      ...options,
-      success: options.success === 'true',
+      ...(options as UpdateMetricsOptions),
+      success: (options as { success: string }).success === 'true',
     });
   });
 
 routing
   .command('remove <name>')
   .description('Remove an agent')
-  .action(async (name) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (name: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.removeAgent(client, name);
   });
 
 routing
   .command('set-active <name> <active>')
   .description('Enable or disable an agent')
-  .action(async (name, active) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (name: string, active: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.setActive(client, name, active === 'true');
   });
 
@@ -356,8 +362,8 @@ routing
   .requiredOption('--embedding <array>', 'Request embedding as JSON array')
   .option('--optimize-for <target>', 'Optimization target (cost, latency, quality, balanced)', 'balanced')
   .option('--constraints <json>', 'Routing constraints as JSON')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: RouteOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.route(client, options);
   });
 
@@ -365,15 +371,15 @@ routing
   .command('list')
   .description('List all registered agents')
   .action(async () => {
-    const client = new RuVectorClient(program.opts().connection);
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.listAgents(client);
   });
 
 routing
   .command('get <name>')
   .description('Get detailed agent information')
-  .action(async (name) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (name: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.getAgent(client, name);
   });
 
@@ -382,8 +388,8 @@ routing
   .description('Find agents by capability')
   .requiredOption('--capability <name>', 'Capability to search for')
   .option('--limit <number>', 'Maximum results', '10')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: FindAgentsOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.findByCapability(client, options);
   });
 
@@ -391,7 +397,7 @@ routing
   .command('stats')
   .description('Get routing statistics')
   .action(async () => {
-    const client = new RuVectorClient(program.opts().connection);
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.stats(client);
   });
 
@@ -399,7 +405,7 @@ routing
   .command('clear')
   .description('Clear all agents')
   .action(async () => {
-    const client = new RuVectorClient(program.opts().connection);
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await RoutingCommands.clearAgents(client);
   });
 
@@ -419,8 +425,8 @@ quantization
   .command('binary')
   .description('Binary quantize a vector (1-bit per dimension)')
   .requiredOption('--vector <array>', 'Vector as JSON array')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: BinaryQuantizeOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await QuantizationCommands.binaryQuantize(client, options);
   });
 
@@ -428,16 +434,16 @@ quantization
   .command('scalar')
   .description('Scalar quantize a vector (8-bit per dimension)')
   .requiredOption('--vector <array>', 'Vector as JSON array')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: ScalarQuantizeOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await QuantizationCommands.scalarQuantize(client, options);
   });
 
 quantization
   .command('compare <vector>')
   .description('Compare all quantization methods on a vector')
-  .action(async (vector) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (vector: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await QuantizationCommands.compare(client, vector);
   });
 
@@ -445,7 +451,7 @@ quantization
   .command('stats')
   .description('Show quantization statistics')
   .action(async () => {
-    const client = new RuVectorClient(program.opts().connection);
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await QuantizationCommands.stats(client);
   });
 
@@ -467,8 +473,8 @@ attention
   .option('-k, --keys <vectors>', 'Key vectors (JSON array)')
   .option('-v, --values <vectors>', 'Value vectors (JSON array)')
   .option('-t, --type <type>', 'Attention type (scaled_dot, multi_head, flash)', 'scaled_dot')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: AttentionComputeOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await AttentionCommands.compute(client, options);
   });
 
@@ -476,7 +482,7 @@ attention
   .command('list-types')
   .description('List available attention types')
   .action(async () => {
-    const client = new RuVectorClient(program.opts().connection);
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await AttentionCommands.listTypes(client);
   });
 
@@ -492,8 +498,8 @@ gnn
   .option('-t, --type <type>', 'GNN type (gcn, graphsage, gat, gin)', 'gcn')
   .option('-i, --input-dim <number>', 'Input dimensions', '384')
   .option('-o, --output-dim <number>', 'Output dimensions', '128')
-  .action(async (name, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (name: string, options: GnnCreateOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await GnnCommands.create(client, name, options);
   });
 
@@ -502,8 +508,8 @@ gnn
   .description('Forward pass through GNN layer')
   .option('-f, --features <path>', 'Node features file')
   .option('-e, --edges <path>', 'Edge list file')
-  .action(async (layer, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (layer: string, options: GnnForwardOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await GnnCommands.forward(client, layer, options);
   });
 
@@ -516,8 +522,8 @@ const graph = program.command('graph').description('Graph and Cypher operations'
 graph
   .command('create <name>')
   .description('Create a new graph')
-  .action(async (name) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (name: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       await client.createGraph(name);
@@ -532,8 +538,8 @@ graph
 graph
   .command('query <graphName> <cypher>')
   .description('Execute a Cypher query on a graph')
-  .action(async (graphName, cypher) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (graphName: string, cypher: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await GraphCommands.query(client, `${graphName}:${cypher}`);
   });
 
@@ -542,12 +548,12 @@ graph
   .description('Create a graph node')
   .option('-l, --labels <labels>', 'Node labels (comma-separated)')
   .option('-p, --properties <json>', 'Node properties as JSON')
-  .action(async (graphName, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (graphName: string, options: { labels?: string; properties?: string }) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const labels = options.labels ? options.labels.split(',').map((l: string) => l.trim()) : [];
-      const properties = options.properties ? JSON.parse(options.properties) : {};
+      const properties: Record<string, unknown> = options.properties ? JSON.parse(options.properties) as Record<string, unknown> : {};
       const nodeId = await client.addNode(graphName, labels, properties);
       console.log(chalk.green(`Node created with ID: ${nodeId}`));
     } catch (err) {
@@ -564,11 +570,11 @@ graph
   .requiredOption('--to <id>', 'Target node ID')
   .requiredOption('--type <type>', 'Edge type/label')
   .option('-p, --properties <json>', 'Edge properties as JSON', '{}')
-  .action(async (graphName, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (graphName: string, options: { from: string; to: string; type: string; properties: string }) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
-      const properties = JSON.parse(options.properties);
+      const properties = JSON.parse(options.properties) as Record<string, unknown>;
       const edgeId = await client.addEdge(
         graphName,
         parseInt(options.from),
@@ -590,8 +596,8 @@ graph
   .requiredOption('--start <id>', 'Starting node ID')
   .requiredOption('--end <id>', 'Ending node ID')
   .option('--max-hops <number>', 'Maximum hops', '10')
-  .action(async (graphName, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (graphName: string, options: { start: string; end: string; maxHops: string }) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const path = await client.shortestPath(
@@ -614,8 +620,8 @@ graph
 graph
   .command('stats <graphName>')
   .description('Get graph statistics')
-  .action(async (graphName) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (graphName: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const stats = await client.graphStats(graphName);
@@ -636,7 +642,7 @@ graph
   .command('list')
   .description('List all graphs')
   .action(async () => {
-    const client = new RuVectorClient(program.opts().connection);
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const graphs = await client.listGraphs();
@@ -656,8 +662,8 @@ graph
 graph
   .command('delete <graphName>')
   .description('Delete a graph')
-  .action(async (graphName) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (graphName: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       await client.deleteGraph(graphName);
@@ -675,8 +681,8 @@ graph
   .option('-s, --start <id>', 'Starting node ID')
   .option('-d, --depth <number>', 'Max traversal depth', '3')
   .option('-t, --type <type>', 'Traversal type (bfs, dfs)', 'bfs')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: TraverseOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await GraphCommands.traverse(client, options);
   });
 
@@ -691,8 +697,8 @@ learning
   .description('Enable learning for a table')
   .option('--max-trajectories <number>', 'Maximum trajectories to track', '1000')
   .option('--num-clusters <number>', 'Number of clusters for patterns', '10')
-  .action(async (table, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (table: string, options: { maxTrajectories: string; numClusters: string }) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const config = {
@@ -711,8 +717,8 @@ learning
 learning
   .command('stats <table>')
   .description('Get learning statistics for a table')
-  .action(async (table) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (table: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const stats = await client.learningStats(table);
@@ -740,8 +746,8 @@ learning
   .command('auto-tune <table>')
   .description('Auto-tune search parameters')
   .option('--optimize-for <target>', 'Optimization target (speed, accuracy, balanced)', 'balanced')
-  .action(async (table, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (table: string, options: { optimizeFor: string }) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const result = await client.autoTune(table, options.optimizeFor);
@@ -758,8 +764,8 @@ learning
   .command('extract-patterns <table>')
   .description('Extract patterns from trajectories')
   .option('--clusters <number>', 'Number of clusters', '10')
-  .action(async (table, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (table: string, options: { clusters: string }) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const result = await client.extractPatterns(table, parseInt(options.clusters));
@@ -775,8 +781,8 @@ learning
   .command('get-params <table>')
   .description('Get optimized search parameters for a query')
   .requiredOption('--query <vector>', 'Query vector as JSON array')
-  .action(async (table, options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (table: string, options: { query: string }) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const queryVec = JSON.parse(options.query);
@@ -795,8 +801,8 @@ learning
 learning
   .command('clear <table>')
   .description('Clear all learning data for a table')
-  .action(async (table) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (table: string) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const result = await client.clearLearning(table);
@@ -813,8 +819,8 @@ learning
   .description('Train from trajectories (legacy)')
   .option('-f, --file <path>', 'Trajectory data file')
   .option('-e, --epochs <number>', 'Training epochs', '10')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: TrainOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await LearningCommands.train(client, options);
   });
 
@@ -822,8 +828,8 @@ learning
   .command('predict')
   .description('Make a prediction (legacy)')
   .option('-i, --input <vector>', 'Input vector')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: PredictOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await LearningCommands.predict(client, options);
   });
 
@@ -839,8 +845,8 @@ benchmark
   .option('-t, --type <type>', 'Benchmark type (vector, attention, gnn, all)', 'all')
   .option('-s, --size <number>', 'Dataset size', '10000')
   .option('-d, --dim <number>', 'Vector dimensions', '384')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: BenchmarkRunOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await BenchmarkCommands.run(client, options);
   });
 
@@ -848,8 +854,8 @@ benchmark
   .command('report')
   .description('Generate benchmark report')
   .option('-f, --format <type>', 'Output format (json, table, markdown)', 'table')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: BenchmarkReportOptions) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     await BenchmarkCommands.report(client, options);
   });
 
@@ -861,7 +867,7 @@ program
   .command('info')
   .description('Show extension information and capabilities')
   .action(async () => {
-    const client = new RuVectorClient(program.opts().connection);
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const info = await client.getExtensionInfo();
@@ -901,8 +907,8 @@ program
   .command('extension')
   .description('Install/upgrade RuVector extension in existing PostgreSQL')
   .option('--upgrade', 'Upgrade existing installation')
-  .action(async (options) => {
-    const client = new RuVectorClient(program.opts().connection);
+  .action(async (options: { upgrade?: boolean }) => {
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       await client.installExtension(options.upgrade);
@@ -918,7 +924,7 @@ program
   .command('memory')
   .description('Show memory statistics')
   .action(async () => {
-    const client = new RuVectorClient(program.opts().connection);
+    const client = new RuVectorClient(program.opts<ProgramOptions>().connection);
     try {
       await client.connect();
       const stats = await client.getMemoryStats();
@@ -954,10 +960,22 @@ program
   .option('--pg-version <version>', 'PostgreSQL version for native install (14, 15, 16, 17)', '16')
   .option('--skip-postgres', 'Skip PostgreSQL installation (use existing)')
   .option('--skip-rust', 'Skip Rust installation (use existing)')
-  .action(async (options) => {
+  .action(async (options: {
+    method: string;
+    port: string;
+    user: string;
+    password: string;
+    database: string;
+    dataDir?: string;
+    name: string;
+    version: string;
+    pgVersion: string;
+    skipPostgres?: boolean;
+    skipRust?: boolean;
+  }) => {
     try {
       await InstallCommands.install({
-        method: options.method,
+        method: options.method as 'docker' | 'native' | 'auto',
         port: parseInt(options.port),
         user: options.user,
         password: options.password,
@@ -980,7 +998,7 @@ program
   .description('Uninstall RuVector PostgreSQL')
   .option('--name <name>', 'Container name', 'ruvector-postgres')
   .option('--remove-data', 'Also remove data volumes')
-  .action(async (options) => {
+  .action(async (options: { name: string; removeData?: boolean }) => {
     try {
       await InstallCommands.uninstall({
         name: options.name,
@@ -996,7 +1014,7 @@ program
   .command('status')
   .description('Show RuVector PostgreSQL installation status')
   .option('--name <name>', 'Container name', 'ruvector-postgres')
-  .action(async (options) => {
+  .action(async (options: { name: string }) => {
     try {
       await InstallCommands.printStatus({ name: options.name });
     } catch (err) {
@@ -1009,7 +1027,7 @@ program
   .command('start')
   .description('Start RuVector PostgreSQL')
   .option('--name <name>', 'Container name', 'ruvector-postgres')
-  .action(async (options) => {
+  .action(async (options: { name: string }) => {
     try {
       await InstallCommands.start({ name: options.name });
     } catch (err) {
@@ -1022,7 +1040,7 @@ program
   .command('stop')
   .description('Stop RuVector PostgreSQL')
   .option('--name <name>', 'Container name', 'ruvector-postgres')
-  .action(async (options) => {
+  .action(async (options: { name: string }) => {
     try {
       await InstallCommands.stop({ name: options.name });
     } catch (err) {
@@ -1037,7 +1055,7 @@ program
   .option('--name <name>', 'Container name', 'ruvector-postgres')
   .option('-f, --follow', 'Follow log output')
   .option('-n, --tail <lines>', 'Number of lines to show', '100')
-  .action(async (options) => {
+  .action(async (options: { name: string; follow?: boolean; tail: string }) => {
     try {
       await InstallCommands.logs({
         name: options.name,
@@ -1054,7 +1072,7 @@ program
   .command('psql [command]')
   .description('Connect to RuVector PostgreSQL or execute SQL')
   .option('--name <name>', 'Container name', 'ruvector-postgres')
-  .action(async (command, options) => {
+  .action(async (command: string | undefined, options: { name: string }) => {
     try {
       await InstallCommands.psql({
         name: options.name,

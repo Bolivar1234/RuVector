@@ -235,7 +235,7 @@ Example format:
   /**
    * Analyze entity-relationship patterns
    */
-  async analyzeERPatterns(data: GraphData): Promise<{
+  analyzeERPatterns(data: GraphData): Promise<{
     entityTypeDistribution: Record<string, number>;
     relationshipTypeDistribution: Record<string, number>;
     avgRelationshipsPerEntity: number;
@@ -269,12 +269,12 @@ Example format:
       ? data.edges.length / maxPossibleEdges
       : 0;
 
-    return {
+    return Promise.resolve({
       entityTypeDistribution,
       relationshipTypeDistribution,
       avgRelationshipsPerEntity,
       densityScore
-    };
+    });
   }
 }
 

@@ -25,6 +25,10 @@ name = "mcp-brain-server-local"
 path = "src/bin/local.rs"
 required-features = ["local"]
 
+[[bin]]
+name = "ruvllm-embedder"
+path = "src/bin/embedder.rs"
+
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["json", "query"] }
@@ -37,8 +41,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # HTTP client (for Firestore/GCS REST APIs + Common Crawl)
-# Using native-tls for compatibility with servers that don't send TLS close_notify
-reqwest = { version = "0.12", features = ["json", "native-tls"], default-features = false }
+# Using native-tls for compatibility with servers that don't send TLS close_notify.
+# native-tls-vendored builds OpenSSL from source so the crate cross-compiles to
+# aarch64 (Pi 5) without target OpenSSL dev headers — same TLS behavior, just
+# statically linked. Without this, openssl-sys fails the aarch64 cross-build.
+reqwest = { version = "0.12", features = ["json", "native-tls-vendored"], default-features = false }
 
 # Crypto
 sha2 = "0.10"
@@ -115,7 +122,7 @@ unused_imports = "allow"
 dead_code = "allow"
 unused_variables = "allow"
 unused_mut = "allow"
-unused_unit = "allow"
+
 unused_assignments = "allow"
 unused_must_use = "allow"
 missing_docs = "allow"
@@ -193,7 +200,7 @@ absurd_extreme_comparisons = "allow"
 incompatible_msrv = "allow"
 unused_enumerate_index = "allow"
 unused_self = "allow"
-unused_unit = "allow"
+
 map_clone = "allow"
 map_unwrap_or = "allow"
 result_map_or_into_option = "allow"

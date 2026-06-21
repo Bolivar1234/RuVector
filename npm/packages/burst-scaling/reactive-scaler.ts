@@ -63,7 +63,7 @@ export class ReactiveScaler {
   private readonly historySize = 60; // Keep 60 samples (5 minutes at 5s intervals)
 
   constructor(
-    private readonly regions: string[] = ['us-central1', 'europe-west1', 'asia-east1'],
+    _regions: string[] = ['us-central1', 'europe-west1', 'asia-east1'],
     private readonly notifyHook: (message: string) => Promise<void> = async (msg) => {
       await execAsync(`npx claude-flow@alpha hooks notify --message "${msg.replace(/"/g, '\\"')}"`);
     }
@@ -142,7 +142,7 @@ export class ReactiveScaler {
   /**
    * Determine what scaling action to take based on metrics
    */
-  private async determineScalingAction(metrics: ScalingMetrics): Promise<ScalingAction> {
+  private determineScalingAction(metrics: ScalingMetrics): Promise<ScalingAction> {
     const reasons: string[] = [];
     let shouldScaleOut = false;
     let shouldScaleIn = false;
@@ -207,11 +207,11 @@ export class ReactiveScaler {
 
     // Determine action
     if (shouldScaleOut && !shouldScaleIn) {
-      return this.createScaleOutAction(metrics, reasons.join(', '), urgency);
+      return Promise.resolve(this.createScaleOutAction(metrics, reasons.join(', '), urgency));
     } else if (shouldScaleIn && !shouldScaleOut) {
-      return this.createScaleInAction(metrics, 'Low utilization');
+      return Promise.resolve(this.createScaleInAction(metrics, 'Low utilization'));
     } else {
-      return this.createNoAction(metrics, 'Within thresholds');
+      return Promise.resolve(this.createNoAction(metrics, 'Within thresholds'));
     }
   }
 
@@ -338,7 +338,13 @@ export class ReactiveScaler {
     totalConnections: number;
     instances: number;
   }> {
-    const summary = new Map();
+    const summary = new Map<string, {
+      avgCpu: number;
+      avgMemory: number;
+      avgLatency: number;
+      totalConnections: number;
+      instances: number;
+    }>();
 
     for (const [region, history] of this.metricsHistory) {
       if (history.length === 0) continue;
@@ -393,7 +399,7 @@ export class ReactiveScaler {
   /**
    * Get scaling recommendation for predictive scaling integration
    */
-  async getScalingRecommendation(region: string): Promise<{
+  getScalingRecommendation(region: string): Promise<{
     currentInstances: number;
     recommendedInstances: number;
     reasoning: string[];
@@ -401,11 +407,11 @@ export class ReactiveScaler {
     const history = this.metricsHistory.get(region);
 
     if (!history || history.length === 0) {
-      return {
+      return Promise.resolve({
         currentInstances: this.config.minInstances,
         recommendedInstances: this.config.minInstances,
         reasoning: ['No metrics available']
-      };
+      });
     }
 
     const latest = history[history.length - 1];
@@ -424,11 +430,11 @@ export class ReactiveScaler {
       reasoning.push('Current capacity is optimal');
     }
 
-    return {
+    return Promise.resolve({
       currentInstances: latest.currentInstances,
       recommendedInstances: recommended,
       reasoning
-    };
+    });
   }
 }
 
@@ -449,7 +455,7 @@ if (require.main === module) {
     currentInstances: 50
   };
 
-  scaler.processMetrics(metrics).then(action => {
+  void scaler.processMetrics(metrics).then(action => {
     console.log('Scaling Action:', action);
 
     if (action.action !== 'none') {

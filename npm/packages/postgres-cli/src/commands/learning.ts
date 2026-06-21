@@ -5,7 +5,6 @@
 
 import chalk from 'chalk';
 import ora from 'ora';
-import Table from 'cli-table3';
 import { readFileSync } from 'fs';
 import type { RuVectorClient } from '../client.js';
 

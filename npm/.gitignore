@@ -34,6 +34,8 @@ Thumbs.db
 # Test coverage
 coverage/
 .nyc_output/
+test-results.json
+**/test-results.json
 
 # Temporary files
 tmp/

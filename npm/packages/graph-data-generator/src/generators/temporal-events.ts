@@ -242,7 +242,7 @@ Example format:
   /**
    * Analyze temporal patterns
    */
-  async analyzeTemporalPatterns(events: TemporalEvent[]): Promise<{
+  analyzeTemporalPatterns(events: TemporalEvent[]): Promise<{
     eventsPerHour: Record<string, number>;
     eventTypeDistribution: Record<string, number>;
     avgTimeBetweenEvents: number;
@@ -272,11 +272,11 @@ Example format:
       ? timeDiffs.reduce((a, b) => a + b, 0) / timeDiffs.length
       : 0;
 
-    return {
+    return Promise.resolve({
       eventsPerHour,
       eventTypeDistribution,
       avgTimeBetweenEvents
-    };
+    });
   }
 }
 

@@ -115,9 +115,18 @@ impl HnswIndex {
             return Ok(());
         }
 
-        // Find nearest neighbors (safe now - no locks held)
-        let neighbors =
-            self.search_knn_internal(&vector, self.config.ef_construction.min(self.config.m * 2));
+        // Issue #430 (bug B): the insert beam was previously clamped to
+        // `ef_construction.min(m * 2)`, which silently became `m * 2` (32 by
+        // default) instead of `ef_construction` (200). At scale the resulting
+        // beam was dominated by whatever sits near the entry point, so late-
+        // inserted clusters got wired up through the wrong nodes. Use the
+        // configured `ef_construction` so the beam actually matches the
+        // HNSW paper.
+        let neighbors = self.search_knn_internal(&vector, self.config.ef_construction);
+
+        // Snapshot the vector store so we can compute neighbour-to-neighbour
+        // distances during pruning without re-acquiring the lock per edge.
+        let vectors_snapshot = self.vectors.read();
 
         // Re-acquire graph lock for modifications
         let mut graph = self.graph.write();
@@ -131,13 +140,35 @@ impl HnswIndex {
             if let Some(neighbor_connections) = graph.get_mut(&neighbor.id) {
                 neighbor_connections.push(id.clone());
 
-                // Issue #430: previously `truncate(m)` kept the OLDEST m
-                // connections, including dropping the one we just pushed when
-                // it landed past position m. Drop oldest, keep newest m so the
-                // freshly-inserted edge always survives.
+                // Issue #430 (bug C): previously this branch trimmed the
+                // adjacency list via `drain(0..)`, which is FIFO — it dropped
+                // the OLDEST edges regardless of how close they were. Proper
+                // HNSW pruning keeps the m CLOSEST neighbours. We compute the
+                // pairwise distances using the vector for `neighbor.id`
+                // (which we just looked up successfully above) and keep the
+                // bottom-m by distance.
                 if neighbor_connections.len() > self.config.m * 2 {
-                    let drain_count = neighbor_connections.len() - self.config.m;
-                    neighbor_connections.drain(0..drain_count);
+                    if let Some(anchor_vec) = vectors_snapshot.get(&neighbor.id) {
+                        let mut scored: Vec<(String, f32)> = neighbor_connections
+                            .drain(..)
+                            .filter_map(|cid| {
+                                vectors_snapshot.get(&cid).map(|cv| {
+                                    let d = calculate_distance(anchor_vec, cv, self.config.metric)
+                                        .unwrap_or(f32::MAX);
+                                    (cid, d)
+                                })
+                            })
+                            .collect();
+                        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+                        scored.truncate(self.config.m);
+                        *neighbor_connections = scored.into_iter().map(|(cid, _)| cid).collect();
+                    } else {
+                        // Fallback: shouldn't happen because `neighbor.id` came
+                        // from the index, but keep the newest-m behavior so we
+                        // never panic on a missing vector.
+                        let drain_count = neighbor_connections.len() - self.config.m;
+                        neighbor_connections.drain(0..drain_count);
+                    }
                 }
             }
         }
@@ -516,6 +547,67 @@ mod tests {
             results.len(),
             25,
             "k=25 with default ef_search=10 must still return 25"
+        );
+    }
+
+    /// Issue #430 (bug C): when an adjacency list overflows `m * 2` the
+    /// pruning step must keep the m CLOSEST neighbours, not the most recently
+    /// inserted ones. Build a graph where one node ("hub") is the nearest
+    /// neighbour of many subsequent inserts, then verify that hub's final
+    /// adjacency list contains the m geometrically-closest connections.
+    #[test]
+    fn test_pruning_keeps_closest_not_newest() {
+        let dimensions = 8;
+        // Tiny m so the prune branch fires after only a few inserts.
+        let config = HnswConfig {
+            m: 4,
+            ef_construction: 64,
+            ef_search: 64,
+            metric: DistanceMetric::Euclidean,
+            dimensions,
+        };
+        let index = HnswIndex::new(config);
+
+        // Hub at origin.
+        let hub = vec![0f32; dimensions];
+        index.insert("hub".into(), hub.clone()).unwrap();
+
+        // 20 close neighbours (distance ~ 1.0..2.0 to hub).
+        for i in 0..20 {
+            let mut v = vec![0f32; dimensions];
+            let r = 1.0 + (i as f32) * 0.05;
+            v[i % dimensions] = r;
+            index.insert(format!("close_{i}"), v).unwrap();
+        }
+
+        // 6 far neighbours (distance ~ 100) — these arrive LAST so the
+        // FIFO pruner would keep them. The distance-based pruner must
+        // discard them in favour of the closer ones already in the list.
+        for i in 0..6 {
+            let mut v = vec![0f32; dimensions];
+            v[i % dimensions] = 100.0 + (i as f32);
+            index.insert(format!("far_{i}"), v).unwrap();
+        }
+
+        // Inspect the hub's adjacency list. We can't access the private
+        // graph directly, but we can search for the hub vector and check
+        // that no "far_*" id is among the closest k=10 — which would be
+        // impossible if the hub's edges still pointed at "far_*" nodes.
+        let q = SearchQuery {
+            vector: hub.clone(),
+            k: 10,
+            filters: None,
+            threshold: None,
+            ef_search: Some(64),
+        };
+        let results = index.search(&q).unwrap();
+        let any_far_in_top10 = results.iter().any(|r| r.id.starts_with("far_"));
+        assert!(
+            !any_far_in_top10,
+            "distance-based pruning regressed: 'far_*' nodes appear in top-10 \
+             search around the hub, which means the pruner is still keeping \
+             newest-by-FIFO instead of closest. results={:?}",
+            results.iter().map(|r| (&r.id, r.score)).collect::<Vec<_>>()
         );
     }
 

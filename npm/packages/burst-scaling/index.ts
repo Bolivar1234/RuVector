@@ -58,14 +58,10 @@ export class BurstScalingSystem {
     this.startOrchestration();
 
     // Schedule predictive scaling checks (every 15 minutes)
-    cron.schedule('*/15 * * * *', async () => {
-      await this.checkPredictiveScaling();
-    });
+    cron.schedule('*/15 * * * *', () => { void this.checkPredictiveScaling(); });
 
     // Schedule daily reporting (at 9 AM)
-    cron.schedule('0 9 * * *', async () => {
-      await this.generateDailyReport();
-    });
+    cron.schedule('0 9 * * *', () => { void this.generateDailyReport(); });
 
     console.log('✅ Burst scaling system started successfully');
     console.log(`   - Metrics collection: every ${this.metricsIntervalMs / 1000}s`);
@@ -120,23 +116,25 @@ export class BurstScalingSystem {
    * Start continuous metrics collection and reactive scaling
    */
   private startMetricsCollection(): void {
-    this.metricsInterval = setInterval(async () => {
-      try {
-        // Collect metrics from all regions
-        for (const region of this.regions) {
-          const metrics = await this.collectRegionMetrics(region);
+    this.metricsInterval = setInterval(() => {
+      void (async () => {
+        try {
+          // Collect metrics from all regions
+          for (const region of this.regions) {
+            const metrics = await this.collectRegionMetrics(region);
 
-          // Process with reactive scaler
-          const action = await this.scaler.processMetrics(metrics);
+            // Process with reactive scaler
+            const action = await this.scaler.processMetrics(metrics);
 
-          // Execute scaling action if needed
-          if (action.action !== 'none') {
-            await this.executeScalingAction(action);
+            // Execute scaling action if needed
+            if (action.action !== 'none') {
+              await this.executeScalingAction(action);
+            }
           }
+        } catch (error) {
+          console.error('❌ Error in metrics collection:', error);
         }
-      } catch (error) {
-        console.error('❌ Error in metrics collection:', error);
-      }
+      })();
     }, this.metricsIntervalMs);
   }
 
@@ -144,26 +142,28 @@ export class BurstScalingSystem {
    * Start orchestration (capacity management, cost controls, degradation)
    */
   private startOrchestration(): void {
-    this.orchestrationInterval = setInterval(async () => {
-      try {
-        // Run capacity manager orchestration
-        const plan = await this.manager.orchestrate();
+    this.orchestrationInterval = setInterval(() => {
+      void (async () => {
+        try {
+          // Run capacity manager orchestration
+          const plan = await this.manager.orchestrate();
 
-        // Log capacity plan
-        this.logCapacityPlan(plan);
+          // Log capacity plan
+          this.logCapacityPlan(plan);
 
-        // Check for budget warnings
-        if (plan.budgetRemaining < 0) {
-          console.warn('⚠️  BUDGET WARNING: Spending exceeds hourly budget');
+          // Check for budget warnings
+          if (plan.budgetRemaining < 0) {
+            console.warn('⚠️  BUDGET WARNING: Spending exceeds hourly budget');
+          }
+
+          // Check for degradation
+          if (plan.degradationLevel !== 'none') {
+            console.warn(`⚠️  DEGRADATION ACTIVE: ${plan.degradationLevel}`);
+          }
+        } catch (error) {
+          console.error('❌ Error in orchestration:', error);
         }
-
-        // Check for degradation
-        if (plan.degradationLevel !== 'none') {
-          console.warn(`⚠️  DEGRADATION ACTIVE: ${plan.degradationLevel}`);
-        }
-      } catch (error) {
-        console.error('❌ Error in orchestration:', error);
-      }
+      })();
     }, this.orchestrationIntervalMs);
   }
 
@@ -221,7 +221,7 @@ export class BurstScalingSystem {
       console.log(`   ${regionPred.region}: scaling to ${regionPred.requiredInstances} instances`);
 
       // In production, call GCP API or Terraform to scale
-      await this.scaleCloudRunService(
+      this.scaleCloudRunService(
         regionPred.region,
         regionPred.requiredInstances
       );
@@ -237,7 +237,7 @@ export class BurstScalingSystem {
    * Collect metrics from a specific region
    * In production, fetch from Cloud Monitoring API
    */
-  private async collectRegionMetrics(region: string): Promise<ScalingMetrics> {
+  private collectRegionMetrics(region: string): Promise<ScalingMetrics> {
     // Mock implementation - in production, query Cloud Monitoring
     // Example:
     // const metrics = await monitoringClient.getMetrics({
@@ -246,7 +246,7 @@ export class BurstScalingSystem {
     //   filter: `resource.labels.service_name="ruvector-${region}"`
     // });
 
-    return {
+    return Promise.resolve({
       region,
       timestamp: new Date(),
       cpuUtilization: 0.5 + Math.random() * 0.3,
@@ -256,7 +256,7 @@ export class BurstScalingSystem {
       errorRate: 0.001 + Math.random() * 0.004,
       p99Latency: 30 + Math.random() * 15,
       currentInstances: 50
-    };
+    });
   }
 
   /**
@@ -270,7 +270,7 @@ export class BurstScalingSystem {
     console.log(`   Urgency: ${action.urgency}`);
 
     // In production, execute actual scaling via GCP API or Terraform
-    await this.scaleCloudRunService(action.region, action.toInstances);
+    this.scaleCloudRunService(action.region, action.toInstances);
 
     // Notify via hooks
     await execAsync(
@@ -281,7 +281,7 @@ export class BurstScalingSystem {
   /**
    * Scale Cloud Run service in a region
    */
-  private async scaleCloudRunService(region: string, instances: number): Promise<void> {
+  private scaleCloudRunService(region: string, instances: number): void {
     try {
       // In production, use GCP API:
       /*
@@ -371,7 +371,7 @@ export class BurstScalingSystem {
   /**
    * Get system health status
    */
-  async getHealthStatus(): Promise<{
+  getHealthStatus(): Promise<{
     healthy: boolean;
     issues: string[];
     metrics: {
@@ -387,7 +387,7 @@ export class BurstScalingSystem {
 
     // Calculate average metrics
     let totalLatency = 0;
-    let totalErrorRate = 0;
+    const totalErrorRate = 0;
     let count = 0;
 
     summary.forEach(metrics => {
@@ -410,7 +410,7 @@ export class BurstScalingSystem {
       issues.push(`Degradation active: ${status.degradationLevel}`);
     }
 
-    return {
+    return Promise.resolve({
       healthy: issues.length === 0,
       issues,
       metrics: {
@@ -419,7 +419,7 @@ export class BurstScalingSystem {
         errorRate: totalErrorRate / (count || 1),
         budgetUsage: status.budgetUsage
       }
-    };
+    });
   }
 }
 

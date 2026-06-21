@@ -261,5 +261,115 @@ export const VectorDB = VectorDBWrapper;
 // Also export the raw native implementation for advanced users
 export const NativeVectorDb = implementation.VectorDb;
 
+// ────────────────────────────────────────────────────────────────────────────
+// Backwards-compat surface used by tests and older integrations
+// ────────────────────────────────────────────────────────────────────────────
+
+/** High-level index class compatible with the test-suite API. */
+export class VectorIndex {
+  private db: VectorDBWrapper;
+  private _dimension: number;
+  private _storagePath: string;
+
+  constructor(opts: { dimension: number; metric?: string; indexType?: string }) {
+    if (opts.dimension <= 0) {
+      throw new Error(`Invalid dimensions: must be positive, got ${opts.dimension}`);
+    }
+    this._dimension = opts.dimension;
+    // Use a unique temp path per instance to avoid cross-instance dimension conflicts
+    this._storagePath = require('os').tmpdir() + `/ruvector-idx-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    this.db = new VectorDBWrapper({ dimensions: opts.dimension, distanceMetric: opts.metric, storagePath: this._storagePath });
+  }
+
+  async insert(entry: { id?: string; values: number[] }): Promise<string> {
+    return this.db.insert({ id: entry.id, vector: new Float32Array(entry.values) });
+  }
+
+  async insertBatch(
+    entries: Array<{ id?: string; values: number[] }>,
+    _opts?: { batchSize?: number; progressCallback?: (p: number) => void }
+  ): Promise<string[]> {
+    const ids: string[] = [];
+    const batchSize = _opts?.batchSize ?? entries.length;
+    for (let i = 0; i < entries.length; i += batchSize) {
+      const slice = entries.slice(i, i + batchSize);
+      const batch = slice.map(e => ({ id: e.id, vector: new Float32Array(e.values) }));
+      const batchIds = await this.db.insertBatch(batch);
+      ids.push(...batchIds);
+      _opts?.progressCallback?.(Math.min((i + batchSize) / entries.length, 1));
+    }
+    return ids;
+  }
+
+  async search(query: number[], opts: { k: number }): Promise<Array<{ id: string; score: number }>> {
+    return this.db.search({ vector: new Float32Array(query), k: opts.k });
+  }
+
+  async get(id: string): Promise<{ id: string; values: number[] } | null> {
+    const r = await this.db.get(id);
+    if (!r) return null;
+    return { id: r.id ?? id, values: Array.from(r.vector) };
+  }
+
+  async delete(id: string): Promise<boolean> {
+    return this.db.delete(id);
+  }
+
+  async stats(): Promise<{ vectorCount: number; dimension: number }> {
+    const count = await this.db.len();
+    return { vectorCount: count, dimension: this._dimension };
+  }
+
+  async clear(): Promise<void> {
+    // Create a fresh db at a new temp path to reset state
+    const newPath = require('os').tmpdir() + `/ruvector-idx-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    this._storagePath = newPath;
+    this.db = new VectorDBWrapper({ dimensions: this._dimension, storagePath: newPath });
+  }
+
+  async optimize(): Promise<void> {
+    // No-op: native HNSW self-optimises on insert
+  }
+}
+
+/** Get backend info (compat with old getBackendInfo() call). */
+export function getBackendInfo(): { type: 'native' | 'wasm'; version: string; features: string[] } {
+  const type = implementationType === 'native' ? 'native' : 'wasm';
+  const { version } = getVersion();
+  const features: string[] = type === 'native'
+    ? ['SIMD', 'Multi-threading', 'Rust-native']
+    : ['Browser-compatible', 'Cross-platform'];
+  return { type, version, features };
+}
+
+/** Check native availability (compat alias for isNative()). */
+export function isNativeAvailable(): boolean {
+  return implementationType === 'native';
+}
+
+/** Vector utility functions used by tests and downstream packages. */
+export const Utils = {
+  cosineSimilarity(a: number[], b: number[]): number {
+    if (a.length !== b.length) throw new Error('Vectors must have same dimension');
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] ** 2; nb += b[i] ** 2; }
+    const denom = Math.sqrt(na) * Math.sqrt(nb);
+    return denom === 0 ? 0 : dot / denom;
+  },
+  euclideanDistance(a: number[], b: number[]): number {
+    if (a.length !== b.length) throw new Error('Vectors must have same dimension');
+    return Math.sqrt(a.reduce((sum, v, i) => sum + (v - b[i]) ** 2, 0));
+  },
+  normalize(v: number[]): number[] {
+    const mag = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+    if (mag === 0) return v.slice();
+    return v.map(x => x / mag);
+  },
+  randomVector(dimension: number): number[] {
+    const v = Array.from({ length: dimension }, () => Math.random() * 2 - 1);
+    return Utils.normalize(v);
+  },
+};
+
 // Export everything from the implementation
 export default implementation;

@@ -13,8 +13,6 @@ import type {
   Completion,
   Token,
   ModelInfo,
-  Tool,
-  ToolCall,
 } from './index.js';
 
 // ============================================================================
@@ -46,7 +44,7 @@ export type GoogleAIModel =
   | 'gemini-1.5-pro'
   | 'gemini-1.5-flash'
   | 'gemini-1.5-flash-8b'
-  | string;
+  | (string & Record<never, never>);
 
 interface GeminiMessage {
   role: 'user' | 'model';
@@ -294,7 +292,7 @@ export class GoogleAIProvider implements LLMProvider {
         const { done, value } = await reader.read();
         if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
+        buffer += decoder.decode(value as Uint8Array | undefined, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
@@ -332,9 +330,9 @@ export class GoogleAIProvider implements LLMProvider {
     };
   }
 
-  async countTokens(text: string): Promise<number> {
+  countTokens(text: string): Promise<number> {
     // Approximate token count (Gemini uses ~4 chars per token on average)
-    return Math.ceil(text.length / 4);
+    return Promise.resolve(Math.ceil(text.length / 4));
   }
 
   getModel(): ModelInfo {

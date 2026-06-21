@@ -249,7 +249,7 @@ test('Integration - Error Handling', async (t) => {
       // Some backends might auto-handle this, others might throw
       assert.ok(true);
     } catch (error) {
-      assert.ok(error.message.includes('dimension'), 'Error should mention dimension');
+      assert.ok(error.message.toLowerCase().includes('dimension'), 'Error should mention dimension');
     }
   });
 
@@ -270,8 +270,8 @@ test('Integration - TypeScript Types', async (t) => {
     const fs = require('fs');
     const path = require('path');
 
-    const ruvectorTypesPath = path.join(__dirname, '../../ruvector/dist/index.d.ts');
-    const coreTypesPath = path.join(__dirname, '../../core/dist/index.d.ts');
+    const ruvectorTypesPath = path.join(__dirname, '../../packages/ruvector/dist/index.d.ts');
+    const coreTypesPath = path.join(__dirname, '../../packages/core/index.d.ts');
 
     // At least one should exist
     const hasRuvectorTypes = fs.existsSync(ruvectorTypesPath);

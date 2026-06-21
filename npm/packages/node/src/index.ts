@@ -25,26 +25,12 @@
  * ```
  */
 
-// Re-export everything from @ruvector/core
+// Re-export from @ruvector/core (packages/core — simple WASM-free wrapper)
 export {
   VectorDB,
-  CollectionManager,
-  version,
-  hello,
-  getMetrics,
-  getHealth,
-  DistanceMetric,
-  type DbOptions,
-  type HnswConfig,
-  type QuantizationConfig,
   type VectorEntry,
   type SearchQuery,
   type SearchResult as CoreSearchResult,
-  type CollectionConfig,
-  type CollectionStats,
-  type Alias,
-  type HealthResponse,
-  type Filter
 } from '@ruvector/core';
 
 // Re-export everything from @ruvector/gnn
@@ -66,12 +52,6 @@ import * as gnn from '@ruvector/gnn';
 export default {
   // Core exports
   VectorDB: core.VectorDB,
-  CollectionManager: core.CollectionManager,
-  version: core.version,
-  hello: core.hello,
-  getMetrics: core.getMetrics,
-  getHealth: core.getHealth,
-  DistanceMetric: core.DistanceMetric,
 
   // GNN exports
   RuvectorLayer: gnn.RuvectorLayer,

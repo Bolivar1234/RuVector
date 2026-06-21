@@ -1,6 +1,6 @@
 {
   "name": "@ruvector/diskann",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DiskANN/Vamana — SSD-friendly billion-scale approximate nearest neighbor search with product quantization",
   "main": "index.js",
   "types": "index.d.ts",

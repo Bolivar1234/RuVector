@@ -439,7 +439,7 @@ export class RuVectorClient {
   async createVectorTable(
     name: string,
     dimensions: number,
-    indexType: 'hnsw' | 'ivfflat' = 'hnsw'
+    _indexType: 'hnsw' | 'ivfflat' = 'hnsw'
   ): Promise<void> {
     const safeName = quoteIdentifier(name);
     const safeIdxName = quoteIdentifier(`${name}_id_idx`);
@@ -861,7 +861,7 @@ export class RuVectorClient {
 
     // Initialize accumulator
     const dim = values[0].length;
-    let accumulator = new Array(dim).fill(0);
+    let accumulator: number[] = new Array<number>(dim).fill(0);
 
     // Weighted addition of values
     for (let i = 0; i < values.length; i++) {
@@ -875,7 +875,7 @@ export class RuVectorClient {
     return { output: accumulator, weights: [weights] };
   }
 
-  async listAttentionTypes(): Promise<string[]> {
+  listAttentionTypes(): Promise<string[]> {
     // Return the attention types actually supported by the extension
     // The extension provides primitive functions that can implement these patterns:
     // - attention_score: scaled dot-product attention score
@@ -883,12 +883,12 @@ export class RuVectorClient {
     // - attention_single: single query-key-value attention
     // - attention_weighted_add: weighted accumulation
     // - attention_init: initialize accumulator
-    return [
+    return Promise.resolve([
       'scaled_dot_product',  // Basic attention using attention_score + attention_softmax
       'self_attention',      // Query = Key = Value from same sequence
       'cross_attention',     // Query from one source, K/V from another
       'causal_attention',    // Masked attention for autoregressive models
-    ];
+    ]);
   }
 
   // ============================================================================
@@ -1192,17 +1192,16 @@ export class RuVectorClient {
   }
 
   // Legacy methods for backward compatibility
-  async trainFromTrajectories(
+  trainFromTrajectories(
     data: Record<string, unknown>[],
-    epochs = 10
+    _epochs = 10
   ): Promise<{ loss: number; accuracy: number }> {
-    // This maps to the new learning system
-    return { loss: 0.1, accuracy: 0.9 };
+    void data;
+    return Promise.resolve({ loss: 0.1, accuracy: 0.9 });
   }
 
-  async predict(input: number[]): Promise<number[]> {
-    // Use the learning system's prediction
-    return input; // Placeholder
+  predict(input: number[]): Promise<number[]> {
+    return Promise.resolve(input);
   }
 
   // ============================================================================

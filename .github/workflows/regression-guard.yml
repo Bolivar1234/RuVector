@@ -9,6 +9,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,7 +18,7 @@ jobs:
   # Issue #437: parking_lot::RwLock is non-reentrant. Two .write() (or .read())
   # in the same expression deadlocks. Forbid the exact textual pattern.
   reentrant-rwlock-double-write:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Forbid reentrant parking_lot lock acquisition in a single statement
@@ -44,7 +45,7 @@ jobs:
   # Issue #458: Windows clones break on case-only collisions because NTFS is
   # case-insensitive. Fail CI if any two paths in the tree differ only by case.
   case-insensitive-collisions:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Detect case-only filename collisions
@@ -60,7 +61,7 @@ jobs:
   # Issue #438: AVX-512 intrinsics must be gated. ruvector-core must build on
   # stable Rust 1.77+ without the simd-avx512 feature.
   ruvector-core-no-avx512-builds-on-stable:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -77,7 +78,7 @@ jobs:
   # Issue #430: HNSW recall@1 must stay above 95% on the regression test that
   # historically exposed the result-heap inversion.
   hnsw-recall-at-1:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -89,12 +90,76 @@ jobs:
           cargo test -p ruvector-router-core --release --lib test_recall_at_1_with_biased_insertion_order
           cargo test -p ruvector-router-core --release --lib test_k_exceeds_ef_search_default
           cargo test -p ruvector-router-core --release --lib test_vector_db_basic_operations
+          # Issue #430 (bug C): adjacency-list pruning must keep CLOSEST m
+          # neighbours, not the most recently inserted ones.
+          cargo test -p ruvector-router-core --release --lib test_pruning_keeps_closest_not_newest
+          # Issue #430 (storage): VectorDB::new must rebuild the HNSW from
+          # persisted vectors so search returns results after reopen.
+          cargo test -p ruvector-router-core --release --lib test_index_rebuilt_from_storage_on_open
+
+  # Issue #430 (bug B): the HNSW insert beam must use `ef_construction`, not
+  # `ef_construction.min(m * 2)`. The latter silently clamps the beam to 32
+  # by default (m=16) and collapses recall at scale. This guard textually
+  # forbids the regression.
+  hnsw-insert-beam-no-m2-clamp:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Forbid ef_construction.min(m * 2) clamp in HNSW insert beam
+        run: |
+          set -e
+          if grep -nE 'ef_construction\s*\.\s*min\s*\(\s*self\.config\.m\s*\*\s*2\s*\)' \
+                  crates/ruvector-router-core/src/index.rs ; then
+            echo "::error::Insert beam clamped to ef_construction.min(m*2) — this silently becomes m*2 (regression of issue #430 bug B). Use self.config.ef_construction directly."
+            exit 1
+          fi
+
+  # Issue #430 (bug C): adjacency-list pruning must be distance-based. The
+  # historical FIFO pruner did not call `calculate_distance` anywhere inside
+  # the overflow gate, so checking that the helper is invoked in the same
+  # function as the `> self.config.m * 2` check is a cheap structural guard
+  # that complements the behavioural `test_pruning_keeps_closest_not_newest`
+  # test below.
+  hnsw-distance-based-neighbor-pruning:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require calculate_distance() inside HNSW overflow gate
+        run: |
+          set -e
+          # The `insert` function in index.rs must reach calculate_distance()
+          # AFTER the `> self.config.m * 2` overflow check fires — that is
+          # what proves the pruner is distance-aware, not FIFO.
+          if ! grep -nE 'calculate_distance' crates/ruvector-router-core/src/index.rs >/dev/null ; then
+            echo "::error::index.rs no longer references calculate_distance (regression of issue #430 bug C). Adjacency-list pruning must score candidates by distance."
+            exit 1
+          fi
+          # And the overflow gate itself must still exist.
+          if ! grep -nE '> self\.config\.m \* 2' crates/ruvector-router-core/src/index.rs >/dev/null ; then
+            echo "::error::HNSW overflow gate '> self.config.m * 2' removed — refusing to ship without the m*2/m prune semantics (#430)."
+            exit 1
+          fi
+
+  # Issue #430 (storage): VectorDB::new must rebuild the in-memory HNSW from
+  # persisted storage. The historical bug was that a fresh empty HnswIndex
+  # was created on every open, so search returned 0 results after restart.
+  vector-db-rebuilds-index-on-open:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require storage.get_all_ids() rebuild path in VectorDB::new
+        run: |
+          set -e
+          if ! grep -nE 'storage\.get_all_ids' crates/ruvector-router-core/src/vector_db.rs ; then
+            echo "::error::VectorDB::new no longer rebuilds the HNSW from storage (regression of issue #430). Reintroduce the storage.get_all_ids() + index.insert_batch() path."
+            exit 1
+          fi
 
   # Issue #462 / #376: published tarballs must contain dist/. Run `npm pack`
   # (which now triggers our prepack hooks) and assert the entry points exist
   # inside the resulting tarball.
   npm-publish-pipeline:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -120,7 +185,7 @@ jobs:
           cd /tmp/pkgcopy
           # Detach from the parent workspace.
           rm -f package-lock.json
-          npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces
+          npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
           mkdir -p /tmp/pack
           npm pack --pack-destination /tmp/pack
           tar -tzf /tmp/pack/*.tgz | head -30
@@ -158,7 +223,7 @@ jobs:
   # to subprocess-only commands (security-scan, git-churn, verify) and are
   # tracked separately — this guard locks the #463 regression shut.
   no-npx-execSync-in-route-enhanced:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Forbid execSync('npx ruvector …') inside hooks_route_enhanced case
@@ -184,7 +249,7 @@ jobs:
   # drowning in false positives, we only flag template literals that include
   # `${args.…}` and don't wrap it in sanitizeShellArg(...).
   shell-injection-in-mcp-server:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Forbid unsanitized ${args.X} in exec*/spawn* calls
@@ -200,7 +265,7 @@ jobs:
   # wasm32-unknown-unknown and can't use std::time::SystemTime / Instant —
   # they panic at runtime.
   no-systemtime-in-wasm-crates:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Reject SystemTime/Instant in wasm32-targeted crates
@@ -234,7 +299,7 @@ jobs:
   # configured per-developer (not committed-by-default). Markdown docs and
   # JS example/test files are excluded — they're illustrative.
   no-hardcoded-workspaces-paths:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Forbid hardcoded devcontainer path in checked-in config
@@ -259,7 +324,7 @@ jobs:
   # If a future refactor removes the log lines, we lose the diagnostic when
   # we need it most. Assert all four "Hydrate <collection>:" log lines stay.
   brain-hydration-counters-present:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Assert hydration counter log lines exist
@@ -284,7 +349,7 @@ jobs:
   # against the live npm registry and fail if any are missing. Soft-skip on
   # network errors so transient registry hiccups don't false-fail.
   optional-deps-resolvable-on-npm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -327,3 +392,40 @@ jobs:
             done <<< "$entries"
           done < <(find npm/packages -name package.json -not -path '*/node_modules/*')
           exit $fail
+
+  # PR #547: the graph-condense + perception crates are workspace members, so
+  # `cargo check --workspace` builds them — but no job runs their unit tests,
+  # integration tests, or benches, so they can silently rot. Run them explicitly.
+  graph-condense-perception-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test graph-condense + perception
+        run: |
+          set -e
+          cargo test -p ruvector-graph-condense --all-features
+          cargo test -p ruvector-perception --all-features
+          # wasm crate: rlib path type-checks on host; the cdylib/getrandom-js
+          # path is exercised on wasm32 by the no-systemtime-in-wasm-crates job.
+          cargo check -p ruvector-graph-condense-wasm
+
+  # PR #547: these crates were built and tested against the local workspace
+  # ruvector-mincut (2.2.3, path dep). A `version = "2.0.x"` pin would resolve
+  # downstream to the stale published mincut 2.0.6 and could ship a crate that
+  # fails to compile for crates.io consumers. Forbid regressing the pin to 2.0.x.
+  mincut-pin-tracks-workspace-version:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: ruvector-mincut pin must not regress to 2.0.x
+        run: |
+          set -e
+          if grep -rnE 'ruvector-mincut[^#]*version *= *"[~^]?2\.0\.' \
+               crates/ruvector-graph-condense/Cargo.toml \
+               crates/ruvector-graph-condense-wasm/Cargo.toml \
+               crates/ruvector-perception/Cargo.toml ; then
+            echo "::error::ruvector-mincut pinned to 2.0.x but the workspace is 2.2.3 (regression of PR #547). A crates.io publish would resolve mincut to the stale published 2.0.6 and may not compile downstream. Keep the pin aligned with the workspace version."
+            exit 1
+          fi

@@ -344,6 +344,7 @@ pub async fn create_router() -> (Router, AppState) {
         .route("/v1/lora/submit", post(lora_submit))
         .route("/v1/training/preferences", get(training_preferences))
         .route("/v1/train", post(train_endpoint))
+        .route("/v1/reclassify", post(reclassify))
         // Brainpedia (ADR-062)
         .route("/v1/pages", get(list_pages).post(create_page))
         .route("/v1/pages/:id", get(get_page))
@@ -412,9 +413,12 @@ pub async fn create_router() -> (Router, AppState) {
         .route("/v1/consciousness/status", get(consciousness_status))
         .layer({
             // CORS origins: configurable via CORS_ORIGINS env var (comma-separated).
-            // Falls back to safe defaults if unset.
+            // Falls back to safe defaults if unset. Explicit per-origin allowlist
+            // (not `*`) — callers authenticate with Bearer tokens, so credentials
+            // are not cookie-based, but an allowlist keeps the surface tight.
+            // conceptmapping.org origins added per issue #560.
             let origins: Vec<axum::http::HeaderValue> = std::env::var("CORS_ORIGINS")
-                .unwrap_or_else(|_| "https://brain.ruv.io,https://pi.ruv.io,http://localhost:8080,http://127.0.0.1:8080".to_string())
+                .unwrap_or_else(|_| "https://brain.ruv.io,https://pi.ruv.io,https://app.conceptmapping.org,https://conceptmapping.org,http://localhost:8080,http://127.0.0.1:8080".to_string())
                 .split(',')
                 .filter_map(|s| s.trim().parse::<axum::http::HeaderValue>().ok())
                 .collect();
@@ -473,7 +477,7 @@ pub fn run_training_cycle(state: &AppState) -> TrainingCycleResult {
 }
 
 /// Enhanced training result (ADR-110)
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EnhancedTrainingResult {
     pub sona_message: String,
     pub sona_patterns: usize,
@@ -3118,6 +3122,63 @@ async fn train_endpoint(
         result.memory_count
     );
     Ok(Json(result))
+}
+
+/// POST /v1/reclassify — re-cluster memories and refresh category embeddings
+///
+/// Triggered by the `brain-reclassify-daily` Cloud Scheduler job (every 4 h).
+/// Runs a training cycle (which rebuilds SONA patterns + cluster centroids) and
+/// a drift check, then returns a per-category summary so the caller knows which
+/// categories shifted.  Read-only mode blocks this endpoint.
+async fn reclassify(
+    State(state): State<AppState>,
+    _contributor: AuthenticatedContributor,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_read_only(&state)?;
+
+    // 1. Training cycle — rebuilds cluster centroids + SONA patterns
+    let training = run_training_cycle(&state);
+    *state.pipeline_metrics.last_training.write() = Some(chrono::Utc::now());
+
+    // 2. Drift check — computes per-category centroid movement
+    let drift_report = {
+        let drift = state.drift.read();
+        drift.compute_drift(None)
+    };
+    *state.pipeline_metrics.last_drift_check.write() = Some(chrono::Utc::now());
+
+    // 3. Category summary from current store
+    let all_mems = state.store.all_memories();
+    let clusters = build_memory_clusters(&all_mems);
+    let category_summary: Vec<serde_json::Value> = clusters
+        .iter()
+        .map(|(_, ids, cat)| {
+            serde_json::json!({
+                "category": cat,
+                "memory_count": ids.len(),
+            })
+        })
+        .collect();
+
+    tracing::info!(
+        "Reclassify: sona_patterns={}, pareto={}→{}, drifting={}, categories={}",
+        training.sona_patterns,
+        training.pareto_before,
+        training.pareto_after,
+        drift_report.is_drifting,
+        clusters.len(),
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "sona_patterns": training.sona_patterns,
+        "pareto_before": training.pareto_before,
+        "pareto_after": training.pareto_after,
+        "memory_count": training.memory_count,
+        "is_drifting": drift_report.is_drifting,
+        "drift_coefficient_of_variation": drift_report.coefficient_of_variation,
+        "categories": category_summary,
+    })))
 }
 
 // ──────────────────────────────────────────────────────────────────────

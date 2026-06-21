@@ -23,6 +23,7 @@ import * as path from 'path';
 
 // Import real dspy.ts components from dist/src
 // Note: dspy.ts package main entry needs dist/src prefix
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const dspy = require('dspy.ts/dist/src/index');
 const {
   configureLM,

@@ -191,7 +191,7 @@ Example format:
   /**
    * Analyze network properties
    */
-  async analyzeNetwork(data: GraphData): Promise<{
+  analyzeNetwork(data: GraphData): Promise<{
     avgDegree: number;
     maxDegree: number;
     communities?: number;
@@ -208,10 +208,10 @@ Example format:
     const avgDegree = degreeValues.reduce((a, b) => a + b, 0) / degreeValues.length;
     const maxDegree = Math.max(...degreeValues);
 
-    return {
+    return Promise.resolve({
       avgDegree,
       maxDegree
-    };
+    });
   }
 }
 

@@ -11,7 +11,6 @@ import type {
   SkillResult,
   SkillExample,
 } from '../types.js';
-import { SkillError } from '../errors.js';
 
 export type SkillExecutor<TInput = unknown, TOutput = unknown> = (
   input: TInput,

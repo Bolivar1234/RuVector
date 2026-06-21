@@ -30,7 +30,7 @@ export interface ConsensusProposal {
   id: string;
   proposer: string;
   type: 'schema_change' | 'topology_change' | 'critical_operation';
-  data: any;
+  data: Record<string, unknown>;
   requiredVotes: number;
   deadline: number;
   votes: Map<string, boolean>;
@@ -58,7 +58,7 @@ export class CoordinationProtocol extends EventEmitter {
   private messageQueue: Message[] = [];
   private sentMessages: Map<string, Message> = new Map();
   private pendingResponses: Map<string, {
-    resolve: (value: any) => void;
+    resolve: (value: Record<string, unknown>) => void;
     reject: (error: Error) => void;
     timeout: NodeJS.Timeout;
   }> = new Map();
@@ -72,7 +72,7 @@ export class CoordinationProtocol extends EventEmitter {
 
   constructor(private config: CoordinationProtocolConfig) {
     super();
-    this.initialize();
+    void this.initialize();
   }
 
   /**
@@ -113,14 +113,14 @@ export class CoordinationProtocol extends EventEmitter {
   async sendMessage(
     to: string,
     type: Message['type'],
-    payload: any,
+    payload: Record<string, unknown> | unknown[],
     options: {
       topic?: string;
       ttl?: number;
       priority?: number;
       expectResponse?: boolean;
     } = {}
-  ): Promise<any> {
+  ): Promise<Record<string, unknown> | undefined> {
     const message: Message = {
       id: `msg-${this.config.nodeId}-${this.messageCounter++}`,
       type,
@@ -167,7 +167,7 @@ export class CoordinationProtocol extends EventEmitter {
    */
   async broadcastMessage(
     type: Message['type'],
-    payload: any,
+    payload: Record<string, unknown>,
     options: {
       topic?: string;
       ttl?: number;
@@ -213,11 +213,11 @@ export class CoordinationProtocol extends EventEmitter {
         break;
 
       case 'response':
-        await this.handleResponse(message);
+        this.handleResponse(message);
         break;
 
       case 'broadcast':
-        await this.handleBroadcast(message);
+        this.handleBroadcast(message);
         break;
 
       case 'consensus':
@@ -226,7 +226,7 @@ export class CoordinationProtocol extends EventEmitter {
 
       default:
         console.warn(
-          `[CoordinationProtocol:${this.config.nodeId}] Unknown message type: ${message.type}`
+          `[CoordinationProtocol:${this.config.nodeId}] Unknown message type: ${String(message.type)}`
         );
     }
 
@@ -245,7 +245,7 @@ export class CoordinationProtocol extends EventEmitter {
 
     // Application can handle request and send response
     // Example auto-response for health checks
-    if (message.payload.type === 'health_check') {
+    if ((message.payload as { type?: string }).type === 'health_check') {
       await this.sendResponse(message.id, message.from, {
         status: 'healthy',
         timestamp: Date.now(),
@@ -256,35 +256,27 @@ export class CoordinationProtocol extends EventEmitter {
   /**
    * Send response to a request
    */
-  async sendResponse(requestId: string, to: string, payload: any): Promise<void> {
-    const response: Message = {
-      id: `resp-${requestId}`,
-      type: 'response',
-      from: this.config.nodeId,
-      to,
-      payload: {
-        requestId,
-        ...payload,
-      },
-      timestamp: Date.now(),
-      ttl: this.config.messageTimeout,
-      priority: 1,
+  async sendResponse(requestId: string, to: string, payload: Record<string, unknown>): Promise<void> {
+    const responsePayload: Record<string, unknown> = {
+      requestId,
+      ...payload,
     };
 
-    await this.sendMessage(to, 'response', response.payload);
+    await this.sendMessage(to, 'response', responsePayload);
   }
 
   /**
    * Handle response message
    */
-  private async handleResponse(message: Message): Promise<void> {
-    const requestId = message.payload.requestId;
-    const pending = this.pendingResponses.get(requestId);
+  private handleResponse(message: Message): void {
+    const typedPayload = message.payload as { requestId?: string };
+    const requestId = typedPayload.requestId;
+    const pending = this.pendingResponses.get(requestId ?? '');
 
     if (pending) {
       clearTimeout(pending.timeout);
-      pending.resolve(message.payload);
-      this.pendingResponses.delete(requestId);
+      pending.resolve(message.payload as Record<string, unknown>);
+      this.pendingResponses.delete(requestId ?? '');
     }
 
     this.emit('response:received', message);
@@ -293,7 +285,7 @@ export class CoordinationProtocol extends EventEmitter {
   /**
    * Handle broadcast message
    */
-  private async handleBroadcast(message: Message): Promise<void> {
+  private handleBroadcast(message: Message): void {
     // If message has topic, deliver to topic subscribers
     if (message.topic) {
       const topic = this.pubSubTopics.get(message.topic);
@@ -310,7 +302,7 @@ export class CoordinationProtocol extends EventEmitter {
    */
   async proposeConsensus(
     type: ConsensusProposal['type'],
-    data: any,
+    data: Record<string, unknown>,
     requiredVotes: number = Math.floor(this.knownNodes.size / 2) + 1
   ): Promise<boolean> {
     const proposal: ConsensusProposal = {
@@ -376,7 +368,12 @@ export class CoordinationProtocol extends EventEmitter {
    * Handle consensus message
    */
   private async handleConsensusMessage(message: Message): Promise<void> {
-    const { action, proposal, vote } = message.payload;
+    const typedPayload = message.payload as {
+      action?: string;
+      proposal?: unknown;
+      vote?: { proposalId: string; approve: boolean };
+    };
+    const { action, proposal, vote } = typedPayload;
 
     switch (action) {
       case 'propose':
@@ -386,12 +383,14 @@ export class CoordinationProtocol extends EventEmitter {
 
       case 'vote':
         // Vote received for proposal
-        await this.handleConsensusVote(vote.proposalId, message.from, vote.approve);
+        if (vote) {
+          this.handleConsensusVote(vote.proposalId, message.from, vote.approve);
+        }
         break;
 
       default:
         console.warn(
-          `[CoordinationProtocol:${this.config.nodeId}] Unknown consensus action: ${action}`
+          `[CoordinationProtocol:${this.config.nodeId}] Unknown consensus action: ${String(action)}`
         );
     }
   }
@@ -399,15 +398,16 @@ export class CoordinationProtocol extends EventEmitter {
   /**
    * Handle consensus proposal
    */
-  private async handleConsensusProposal(proposalData: any, from: string): Promise<void> {
+  private async handleConsensusProposal(proposalData: unknown, from: string): Promise<void> {
+    const data = proposalData as Omit<ConsensusProposal, 'votes' | 'status'>;
     console.log(
-      `[CoordinationProtocol:${this.config.nodeId}] Received consensus proposal ${proposalData.id} from ${from}`
+      `[CoordinationProtocol:${this.config.nodeId}] Received consensus proposal ${data.id} from ${from}`
     );
 
     // Store proposal
     const proposal: ConsensusProposal = {
-      ...proposalData,
-      votes: new Map([[proposalData.proposer, true]]),
+      ...data,
+      votes: new Map([[data.proposer, true]]),
       status: 'pending' as const,
     };
 
@@ -433,11 +433,11 @@ export class CoordinationProtocol extends EventEmitter {
   /**
    * Handle consensus vote
    */
-  private async handleConsensusVote(
+  private handleConsensusVote(
     proposalId: string,
     voter: string,
     approve: boolean
-  ): Promise<void> {
+  ): void {
     const proposal = this.consensusProposals.get(proposalId);
 
     if (!proposal || proposal.status !== 'pending') {
@@ -533,7 +533,7 @@ export class CoordinationProtocol extends EventEmitter {
   /**
    * Publish message to topic
    */
-  async publishToTopic(topicName: string, payload: any): Promise<void> {
+  async publishToTopic(topicName: string, payload: Record<string, unknown>): Promise<void> {
     const topic = this.pubSubTopics.get(topicName);
 
     if (!topic) {
@@ -606,7 +606,7 @@ export class CoordinationProtocol extends EventEmitter {
     }
 
     // Insert message by priority
-    let insertIndex = this.messageQueue.findIndex(m => m.priority < message.priority);
+    const insertIndex = this.messageQueue.findIndex(m => m.priority < message.priority);
     if (insertIndex === -1) {
       this.messageQueue.push(message);
     } else {
@@ -626,7 +626,7 @@ export class CoordinationProtocol extends EventEmitter {
   /**
    * Process queued messages
    */
-  private async processMessages(): Promise<void> {
+  private processMessages(): void {
     while (this.messageQueue.length > 0) {
       const message = this.messageQueue.shift()!;
 
@@ -648,7 +648,7 @@ export class CoordinationProtocol extends EventEmitter {
    */
   private startHeartbeat(): void {
     this.heartbeatTimer = setInterval(() => {
-      this.sendHeartbeat();
+      void this.sendHeartbeat();
       this.checkNodeHealth();
     }, this.config.heartbeatInterval);
   }
@@ -744,10 +744,10 @@ export class CoordinationProtocol extends EventEmitter {
     }
 
     // Process remaining messages
-    await this.processMessages();
+    this.processMessages();
 
     // Clear pending responses
-    for (const [messageId, pending] of this.pendingResponses.entries()) {
+    for (const pending of this.pendingResponses.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error('Protocol shutting down'));
     }
