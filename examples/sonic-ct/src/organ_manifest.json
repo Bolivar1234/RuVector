@@ -1,6 +1,7 @@
 {
-  "model": "torso.glb",
-  "notes": "Maps GLB mesh names to organ identities and ghost colours. Supply a licensed anatomy model (e.g. Zygote) or an outer-body shell (e.g. Meshcapade/SMPL). The GLB is a VISUAL prior only — the Rust procedural phantom remains the physics ground truth.",
+  "model": "human.glb",
+  "attribution": "CesiumMan — Khronos glTF Sample Assets, CC-BY 4.0 (Cesium). Used as the open-source outer-body ghost shell.",
+  "notes": "Maps GLB mesh names to organ identities and ghost colours. Default ships the CC-BY CesiumMan body shell; swap in a licensed anatomy model (e.g. Zygote organs) by replacing public/models/human.glb and updating GLB_URL. The GLB is a VISUAL prior only — the Rust procedural phantom remains the physics ground truth.",
   "ghostMaterial": {
     "color": "#6FD9FF",
     "emissive": "#2BEAFF",

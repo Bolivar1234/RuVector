@@ -23,6 +23,16 @@ To use a real model: drop `torso.glb` in `examples/sonic-ct/public/models/`,
 set `GLB_URL = "/models/torso.glb"`, and update the organ name map in the
 manifest.
 
+## Shipped default
+
+The app ships with **CesiumMan** (`public/models/human.glb`) from the
+[Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets),
+licensed **CC-BY 4.0** (Cesium). It is loaded as the translucent outer-body
+ghost shell and styled at runtime via `applyGhostMaterials`; the procedural
+internal organ glows are rendered inside it. Replace this file (and the manifest
+organ name map) with a higher-fidelity licensed model — e.g. Zygote organs —
+for production fidelity. Attribution must be preserved per CC-BY.
+
 ## Sourced model options (researched)
 
 | Need | Service | License notes |
