@@ -1,7 +1,10 @@
 import React from "react";
 import { useStore, CHANNELS } from "../store.js";
-import { TISSUE_NAMES } from "../engine.js";
+import { TISSUE_NAMES, EVIDENCE } from "../engine.js";
 import { TISSUE_COLORS } from "../theme.js";
+
+const SEVERITY = ["Low", "Moderate", "High"];
+const QF_LABELS = ["Bone shadowing", "Sparse path coverage", "Boundary uncertainty", "Gas artifact"];
 
 const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
 const pct = (x) => `${(x * 100).toFixed(1)}%`;
@@ -23,6 +26,7 @@ export default function Hud() {
     <div className="hud">
       <TopLeft />
       <TopRight />
+      <OrganPanel />
       <Legend />
       <Bottom />
       <Badge />
@@ -37,9 +41,9 @@ function TopLeft() {
     <div className="panel top-left">
       <div className="brand">
         <span className="dot" />
-        Sonic <b>Chamber</b>
+        Meta<b>BioHacker</b>
       </div>
-      <div className="brand-sub">Full-body acoustic imaging · acoustic digital human workbench</div>
+      <div className="brand-sub">Acoustic digital human workbench · Sonic Chamber</div>
       <div className="modes">
         {CHANNELS.map((c) => (
           <button
@@ -91,6 +95,48 @@ function Metric({ label, value }) {
       <div className="metric-label">{label}</div>
     </div>
   );
+}
+
+function OrganPanel() {
+  const vol = useStore((s) => s.vol);
+  const organs = (vol?.organs || []).filter((o) => o.confidence > 0.01);
+  const flags = vol?.qualityFlags;
+  return (
+    <div className="panel organ-panel">
+      <div className="legend-title">Organ hypotheses</div>
+      {organs.length === 0 && <div className="organ-empty">Scanning… inference pending</div>}
+      {organs.map((o) => (
+        <div key={o.id} className="organ-row" title={evidenceText(o.evidence)}>
+          <span className="organ-name">{o.name}</span>
+          <span className="organ-bar">
+            <span className="organ-fill" style={{ width: `${o.confidence * 100}%` }} />
+          </span>
+          <span className="organ-val">{Math.round(o.confidence * 100)}%</span>
+        </div>
+      ))}
+      <div className="organ-note">
+        Identity inferred from shape, z-position, adjacency, landmarks — <b>not from speed alone</b>.
+      </div>
+
+      {flags && (
+        <>
+          <div className="legend-title qf-title">Quality flags</div>
+          {QF_LABELS.map((label, i) => (
+            <div key={label} className="qf-row">
+              <span className="qf-name">{label}</span>
+              <span className={`qf-badge sev-${flags[i]}`}>{SEVERITY[flags[i]]}</span>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function evidenceText(mask) {
+  return EVIDENCE.filter(([bit]) => mask & bit)
+    .map(([, label]) => `✓ ${label}`)
+    .join("\n") || "no supporting evidence";
 }
 
 function Legend() {

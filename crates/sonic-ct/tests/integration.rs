@@ -179,6 +179,25 @@ fn volume_reconstruction_is_coherent() {
 }
 
 #[test]
+fn organ_detector_finds_lateralised_organs() {
+    use sonic_ct::organ::{detect_organs, Organ, EV_ZONE};
+    use sonic_ct::volume3d::reconstruct_volume;
+    let mut cfg = small_cfg(2);
+    cfg.phantom.n = 64;
+    let vol = reconstruct_volume(cfg, &SegModel::tuned(), 20).unwrap();
+    let hyps = detect_organs(&vol.recon_labels, vol.n, vol.nz);
+    assert_eq!(hyps.len(), 8);
+    let by = |o: Organ| hyps.iter().find(|h| h.organ == o).unwrap();
+    // Liver (right) and spleen (left) should both be detected in the corpus.
+    assert!(by(Organ::Liver).confidence > 0.4, "liver conf {}", by(Organ::Liver).confidence);
+    assert!(by(Organ::Liver).evidence & EV_ZONE != 0);
+    // Confidences are bounded probabilities.
+    for h in &hyps {
+        assert!((0.0..=1.0).contains(&h.confidence));
+    }
+}
+
+#[test]
 fn butterfly_backend_matches_direct_sim() {
     let cfg = ButterflyEmbeddedConfig::default();
     assert_eq!(cfg.total_elements(), 40 * 64);

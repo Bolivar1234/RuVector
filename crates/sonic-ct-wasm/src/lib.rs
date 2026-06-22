@@ -15,6 +15,7 @@
 use core::ptr::addr_of_mut;
 
 use sonic_ct::memory::check_coherence;
+use sonic_ct::organ::detect_organs;
 use sonic_ct::pipeline::{run_slice, run_with_model, PipelineConfig};
 use sonic_ct::segmentation::SegModel;
 use sonic_ct::types::Tissue;
@@ -190,6 +191,8 @@ struct VolState {
     body_voxels: u64,
     worst_slice: u32,
     worst_mae: f32,
+    organs: Vec<(u8, f32, u32)>, // (organ id, confidence, evidence)
+    quality_flags: [u32; 4],     // bone-shadow, sparse-coverage, boundary-uncertainty, gas
 }
 
 static mut VOL: Option<VolState> = None;
@@ -300,6 +303,38 @@ pub extern "C" fn sct_vol_step() -> i32 {
         s.worst_slice = zi;
     }
     s.cursor += 1;
+
+    // When the sweep finishes, run organ inference + quality flags once.
+    if s.cursor >= s.nz {
+        let hyps = detect_organs(&s.recon_labels, s.n as usize, s.nz as usize);
+        s.organs = hyps
+            .iter()
+            .map(|h| (h.organ as u8, h.confidence, h.evidence))
+            .collect();
+
+        // Quality flags as severities: 0 = low, 1 = moderate, 2 = high.
+        let body = s.body_voxels.max(1) as f32;
+        let bone_frac = s.class_counts[Tissue::Bone as usize] as f32 / body;
+        let sev = |x: f32, m: f32, h: f32| -> u32 {
+            if x >= h { 2 } else if x >= m { 1 } else { 0 }
+        };
+        // Mean confidence over built voxels → boundary uncertainty.
+        let built = (s.cursor as usize) * s.cells;
+        let conf_sum: u64 = s.confidence_u8[..built.min(s.confidence_u8.len())]
+            .iter()
+            .map(|&v| v as u64)
+            .sum();
+        let mean_conf = if built > 0 { (conf_sum as f32 / built as f32) / 255.0 } else { 0.0 };
+        let uncertainty = 1.0 - mean_conf;
+        // Path coverage from fan/element ratio.
+        let coverage = (s.fan as f32) / (s.elements as f32).max(1.0);
+        s.quality_flags = [
+            sev(bone_frac, 0.06, 0.12),       // bone shadowing
+            sev(1.0 - coverage, 0.4, 0.7),    // sparse path coverage
+            sev(uncertainty, 0.45, 0.65),     // boundary uncertainty
+            0,                                // gas artifact — not modelled
+        ];
+    }
     s.cursor as i32
 }
 
@@ -382,3 +417,34 @@ vptr!(sct_vol_error_ptr, u8, error_u8);
 vptr!(sct_vol_confidence_ptr, u8, confidence_u8);
 vptr!(sct_vol_slice_dice_ptr, f32, slice_dice);
 vptr!(sct_vol_slice_mae_ptr, f32, slice_mae);
+
+/// Number of organ hypotheses available (0 until the sweep completes).
+#[no_mangle]
+pub extern "C" fn sct_organ_count() -> u32 {
+    vol().as_ref().map(|s| s.organs.len() as u32).unwrap_or(0)
+}
+
+/// Organ id for hypothesis `i` (see `sonic_ct::organ::Organ`).
+#[no_mangle]
+pub extern "C" fn sct_organ_id(i: u32) -> u32 {
+    vol().as_ref().and_then(|s| s.organs.get(i as usize)).map(|o| o.0 as u32).unwrap_or(255)
+}
+
+/// Confidence for hypothesis `i`.
+#[no_mangle]
+pub extern "C" fn sct_organ_conf(i: u32) -> f32 {
+    vol().as_ref().and_then(|s| s.organs.get(i as usize)).map(|o| o.1).unwrap_or(0.0)
+}
+
+/// Evidence bitmask for hypothesis `i`.
+#[no_mangle]
+pub extern "C" fn sct_organ_evidence(i: u32) -> u32 {
+    vol().as_ref().and_then(|s| s.organs.get(i as usize)).map(|o| o.2).unwrap_or(0)
+}
+
+/// Quality-flag severity (0 low / 1 moderate / 2 high) for `flag` 0..=3:
+/// 0 bone shadowing, 1 sparse path coverage, 2 boundary uncertainty, 3 gas.
+#[no_mangle]
+pub extern "C" fn sct_quality_flag(flag: u32) -> u32 {
+    vol().as_ref().and_then(|s| s.quality_flags.get(flag as usize).copied()).unwrap_or(0)
+}

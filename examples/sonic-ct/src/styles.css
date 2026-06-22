@@ -66,6 +66,24 @@ html, body, #root {
 .progress-track { height: 7px; background: #0c1729; border-radius: 5px; overflow: hidden; }
 .progress-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--violet)); transition: width 0.2s ease; }
 
+/* Organ hypotheses + quality flags (left middle) */
+.organ-panel { left: 26px; top: 210px; width: 250px; }
+.organ-empty { font-size: 12px; color: var(--muted); }
+.organ-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12.5px; }
+.organ-name { width: 78px; text-transform: capitalize; }
+.organ-bar { flex: 1; height: 7px; background: #0c1729; border-radius: 4px; overflow: hidden; }
+.organ-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--cyan), var(--violet)); }
+.organ-val { width: 34px; text-align: right; color: var(--muted); }
+.organ-note { font-size: 10.5px; color: var(--muted); margin-top: 8px; line-height: 1.4; }
+.organ-note b { color: var(--amber); }
+.qf-title { margin-top: 16px; }
+.qf-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; font-size: 12px; }
+.qf-name { color: var(--text); }
+.qf-badge { font-size: 10.5px; padding: 2px 9px; border-radius: 7px; font-weight: 600; }
+.sev-0 { background: #0f2c24; color: var(--success); }
+.sev-1 { background: #3a2f14; color: var(--gold); }
+.sev-2 { background: #3a1320; color: var(--danger); }
+
 /* Tissue legend + body composition */
 .legend { right: 26px; bottom: 110px; width: 300px; }
 .legend-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 10px; }

@@ -88,8 +88,46 @@ export class SonicCT {
       confidenceVol: this._u8(e.sct_vol_confidence_ptr(), total),
       sliceDice: this._f32(e.sct_vol_slice_dice_ptr(), nz),
       sliceMae: this._f32(e.sct_vol_slice_mae_ptr(), nz),
+      organs: this._organs(),
+      qualityFlags: [0, 1, 2, 3].map((f) => e.sct_quality_flag(f)),
     };
   }
+
+  _organs() {
+    const e = this.e;
+    const count = e.sct_organ_count();
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const id = e.sct_organ_id(i);
+      out.push({
+        id,
+        name: ORGAN_NAMES[id] || "unknown",
+        confidence: e.sct_organ_conf(i),
+        evidence: e.sct_organ_evidence(i),
+      });
+    }
+    return out;
+  }
 }
+
+export const ORGAN_NAMES = [
+  "liver",
+  "spleen",
+  "left kidney",
+  "right kidney",
+  "aorta",
+  "heart",
+  "left lung",
+  "right lung",
+];
+
+// Evidence bitmask labels (must match sonic_ct::organ EV_* constants).
+export const EVIDENCE = [
+  [1, "expected z-zone"],
+  [2, "correct side"],
+  [4, "plausible size"],
+  [8, "posterior adjacency"],
+  [16, "consistent across slices"],
+];
 
 export const TISSUE_NAMES = ["water", "fat", "muscle", "organ", "bone"];

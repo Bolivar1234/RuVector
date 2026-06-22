@@ -33,11 +33,11 @@ export default function WelcomeModal() {
         <div className="modal-head">
           <div className="modal-kicker">Welcome to</div>
           <h2 className="modal-title">
-            Sonic <span className="accent">Chamber</span>
+            Meta<span className="accent">BioHacker</span>
           </h2>
-          <div className="modal-sub">Acoustic Digital Human Workbench</div>
+          <div className="modal-sub">Acoustic Digital Human Workbench · Sonic Chamber</div>
           <p className="modal-desc">
-            Sonic Chamber is a research platform for simulating full-body underwater acoustic
+            MetaBioHacker is a research platform for simulating full-body underwater acoustic
             imaging, reconstructing 3D anatomy, and evaluating results against known ground truth.
           </p>
         </div>

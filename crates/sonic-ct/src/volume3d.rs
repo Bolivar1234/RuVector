@@ -175,8 +175,8 @@ pub fn reconstruct_volume(
     }
 
     if body_voxels > 0 {
-        for c in 0..Tissue::COUNT {
-            vol.fractions[c] = class_counts[c] as f32 / body_voxels as f32;
+        for (frac, &count) in vol.fractions.iter_mut().zip(class_counts.iter()) {
+            *frac = count as f32 / body_voxels as f32;
         }
     }
     Ok(vol)

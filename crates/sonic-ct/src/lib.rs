@@ -45,6 +45,7 @@ pub mod grid;
 pub mod memory;
 pub mod metrics;
 pub mod model;
+pub mod organ;
 pub mod phantom;
 pub mod pipeline;
 pub mod ray;
