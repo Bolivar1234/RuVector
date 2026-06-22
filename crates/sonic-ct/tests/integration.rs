@@ -234,6 +234,47 @@ fn pgm_phantom_roundtrip_and_reconstruct() {
 }
 
 #[test]
+fn method_comparison_iterative_beats_backprojection() {
+    use sonic_ct::acquisition::{simulate, AcquisitionConfig};
+    use sonic_ct::geometry::Ring;
+    use sonic_ct::metrics::{psnr, rmse, ssim};
+    use sonic_ct::reconstruction::{reconstruct_speed_with, Method, ReconConfig};
+    use sonic_ct::shepp_logan::shepp_logan;
+
+    let extent = 0.24;
+    let phantom = shepp_logan(64, extent);
+    // Shepp-Logan must contain a fast high-contrast skull ring.
+    let (lo, hi) = phantom.speed.min_max();
+    assert!(hi > 2000.0, "skull should be fast: hi={hi}");
+    assert!(lo <= sonic_ct::types::WATER_SPEED + 1.0, "background water present");
+
+    let ring = Ring::new(140, extent / 2.0 * 0.92);
+    let acq = simulate(&phantom, &ring, AcquisitionConfig { fan: 70, ..Default::default() });
+
+    let bp = reconstruct_speed_with(&acq, &phantom.speed, ReconConfig { iters: 1, relaxation: 0.9 }, Method::Backprojection);
+    let sart = reconstruct_speed_with(&acq, &phantom.speed, ReconConfig { iters: 8, relaxation: 0.9 }, Method::Sart);
+    let land = reconstruct_speed_with(&acq, &phantom.speed, ReconConfig { iters: 40, relaxation: 1.0 }, Method::Landweber);
+
+    let (e_bp, e_sart, e_land) = (rmse(&bp, &phantom.speed), rmse(&sart, &phantom.speed), rmse(&land, &phantom.speed));
+    // Iterative methods must beat the single backprojection sweep.
+    assert!(e_sart < e_bp, "SART {e_sart} should beat BP {e_bp}");
+    assert!(e_land < e_bp, "Landweber {e_land} should beat BP {e_bp}");
+    // SSIM in [-1,1], PSNR finite and improving over BP.
+    let s = ssim(&land, &phantom.speed);
+    assert!((-1.0..=1.0).contains(&s));
+    assert!(psnr(&land, &phantom.speed) > psnr(&bp, &phantom.speed));
+}
+
+#[test]
+fn image_metrics_identity() {
+    use sonic_ct::metrics::{psnr, rmse, ssim};
+    let g = Phantom::build(PhantomConfig { n: 32, extent: 0.24, seed: 1 }).speed;
+    assert_eq!(rmse(&g, &g), 0.0);
+    assert!(psnr(&g, &g).is_infinite());
+    assert!((ssim(&g, &g) - 1.0).abs() < 1e-4);
+}
+
+#[test]
 fn butterfly_backend_matches_direct_sim() {
     let cfg = ButterflyEmbeddedConfig::default();
     assert_eq!(cfg.total_elements(), 40 * 64);

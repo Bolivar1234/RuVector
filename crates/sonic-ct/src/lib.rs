@@ -51,6 +51,7 @@ pub mod pipeline;
 pub mod ray;
 pub mod reconstruction;
 pub mod segmentation;
+pub mod shepp_logan;
 pub mod types;
 pub mod volume3d;
 
