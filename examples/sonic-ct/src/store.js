@@ -24,6 +24,15 @@ export const useStore = create((set, get) => ({
   channel: "recon",
   currentZ: 0,
   exploded: false,
+  welcomeOpen:
+    typeof localStorage !== "undefined" ? localStorage.getItem("sonic_welcome_hidden") !== "1" : true,
+
+  closeWelcome: (dontShowAgain) => {
+    if (dontShowAgain && typeof localStorage !== "undefined") {
+      localStorage.setItem("sonic_welcome_hidden", "1");
+    }
+    set({ welcomeOpen: false });
+  },
 
   params: { nz: 28, n: 56, elements: 140, fan: 72, iters: 5, seed: 1 },
 

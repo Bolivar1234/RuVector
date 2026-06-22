@@ -4,6 +4,7 @@ import { OrbitControls } from "@react-three/drei";
 import { EffectComposer, Bloom, Vignette } from "@react-three/postprocessing";
 import Scene from "./scene/Scene.jsx";
 import Hud from "./hud/Hud.jsx";
+import WelcomeModal from "./hud/WelcomeModal.jsx";
 import { useStore } from "./store.js";
 import { theme } from "./theme.js";
 
@@ -42,6 +43,7 @@ export default function App() {
       </Canvas>
 
       <Hud />
+      <WelcomeModal />
 
       {!ready && !error && <div className="overlay">Booting acoustic engine…</div>}
       {error && <div className="overlay error">⚠ {error}</div>}

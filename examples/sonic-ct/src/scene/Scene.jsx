@@ -4,39 +4,11 @@ import { useFrame } from "@react-three/fiber";
 import { useStore } from "../store.js";
 import { theme } from "../theme.js";
 import { TISSUE_COLORS } from "../theme.js";
+import BodyModel from "./BodyModel.jsx";
+import { TORSO_PROFILE, SX, SZ, torsoRadius, sliceY } from "./anatomy.js";
 
-const SPAN = 1.9;
 const RING_R = 0.92;
 const TILE_COUNT = 110;
-
-const sliceY = (z, nz, spacing) => (z - (nz - 1) / 2) * spacing;
-
-// Torso radius (lathe units) at normalised height t in [0,1].
-const TORSO_PROFILE = [
-  [0.0, 0.5],
-  [0.12, 0.7],
-  [0.22, 0.64],
-  [0.42, 0.55], // waist
-  [0.62, 0.72],
-  [0.8, 0.84], // chest
-  [0.93, 0.92], // shoulders
-  [1.0, 0.86],
-];
-function torsoRadius(t) {
-  for (let i = 1; i < TORSO_PROFILE.length; i++) {
-    if (t <= TORSO_PROFILE[i][0]) {
-      const [t0, r0] = TORSO_PROFILE[i - 1];
-      const [t1, r1] = TORSO_PROFILE[i];
-      const f = (t - t0) / (t1 - t0 || 1);
-      return r0 + (r1 - r0) * f;
-    }
-  }
-  return TORSO_PROFILE[TORSO_PROFILE.length - 1][1];
-}
-
-// Human proportions: wider than deep.
-const SX = 1.28;
-const SZ = 0.82;
 
 export default function Scene() {
   const vol = useStore((s) => s.vol);
@@ -74,8 +46,7 @@ export default function Scene() {
       <Lights />
       <Chamber bodyH={bodyH} />
       <WaterParticles bodyH={bodyH} />
-      <TorsoHologram bodyH={bodyH} />
-      <InternalOrgans bodyH={bodyH} />
+      <BodyModel bodyH={bodyH} />
       <ContourRings nz={nz} spacing={spacing} bodyH={bodyH} builtCount={builtCount} currentZ={currentZ} colors={sliceColors} />
       <ActiveSlice y={ringY} t={Math.min(currentZ, nz - 1) / Math.max(nz - 1, 1)} />
       <TransducerRing y={ringY} bright />
@@ -150,60 +121,6 @@ function WaterParticles({ bodyH }) {
       </bufferGeometry>
       <pointsMaterial color={theme.cyan} size={0.011} transparent opacity={0.35} sizeAttenuation depthWrite={false} />
     </points>
-  );
-}
-
-// Translucent glowing torso: additive back-faces glow brightest at the
-// silhouette (a fresnel-like effect without a custom shader), with a faint
-// wireframe for surface definition.
-function TorsoHologram({ bodyH }) {
-  const geom = useMemo(() => {
-    const pts = TORSO_PROFILE.map(([t, r]) => new THREE.Vector2(r, (t - 0.5) * bodyH));
-    return new THREE.LatheGeometry(pts, 72);
-  }, [bodyH]);
-  return (
-    <group scale={[SX, 1, SZ]}>
-      {/* violet volumetric glow, brightest at the silhouette */}
-      <mesh geometry={geom}>
-        <meshBasicMaterial color={theme.violet} transparent opacity={0.3} side={THREE.BackSide} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
-      </mesh>
-      <mesh geometry={geom} scale={[0.88, 1, 0.88]}>
-        <meshBasicMaterial color={theme.blue} transparent opacity={0.18} side={THREE.BackSide} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
-      </mesh>
-      <mesh geometry={geom} scale={[0.7, 1, 0.7]}>
-        <meshBasicMaterial color={theme.violet} transparent opacity={0.12} side={THREE.BackSide} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
-      </mesh>
-    </group>
-  );
-}
-
-// Glowing internal organ volumes positioned by anatomy.
-function InternalOrgans({ bodyH }) {
-  const y = (t) => (t - 0.5) * bodyH;
-  const organs = [
-    { p: [-0.04, y(0.84), 0.06], r: 0.15, c: theme.danger, n: "heart" },
-    { p: [-0.32, y(0.86), -0.02], r: 0.18, c: theme.blue, n: "lungL" },
-    { p: [0.32, y(0.86), -0.02], r: 0.18, c: theme.blue, n: "lungR" },
-    { p: [0.24, y(0.68), 0.04], r: 0.21, c: theme.amber, n: "liver" },
-    { p: [-0.26, y(0.64), -0.04], r: 0.12, c: theme.violet, n: "spleen" },
-    { p: [0.18, y(0.48), -0.12], r: 0.11, c: theme.success, n: "kidneyR" },
-    { p: [-0.18, y(0.48), -0.12], r: 0.11, c: theme.success, n: "kidneyL" },
-    { p: [0.0, y(0.28), 0.02], r: 0.22, c: theme.violet, n: "bowel" },
-  ];
-  return (
-    <group scale={[SX, 1, SZ]}>
-      {/* spine column */}
-      <mesh position={[0, 0, -0.42]}>
-        <cylinderGeometry args={[0.05, 0.06, bodyH * 0.95, 12]} />
-        <meshBasicMaterial color={theme.medicalWhite} transparent opacity={0.35} />
-      </mesh>
-      {organs.map((o) => (
-        <mesh key={o.n} position={o.p} scale={[1, 1.2, 0.8]}>
-          <sphereGeometry args={[o.r, 20, 20]} />
-          <meshBasicMaterial color={o.c} transparent opacity={0.62} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
-        </mesh>
-      ))}
-    </group>
   );
 }
 
