@@ -120,10 +120,12 @@ fn run_real_slice(path: &str, sample_id: &str, smoothing: f64, sharp: f32) {
     let confidence = (1.0 - unc).clamp(0.0, 1.0);
     let high_err = 0.0; // single real slice: no per-voxel error map exported here
     let safety = (0.94_f32 + 0.05 * sharp - 0.6 * high_err).clamp(0.0, 1.0);
+    // Per-class (region) Dice: [water/fluid, fat, muscle, organ/soft, bone].
+    let d = scene.quality.dice;
     // Single real slice has no cross-slice variance; report neutral stability.
     println!(
-        "{{\"sampleId\":\"{}\",\"confidence\":{:.4},\"acousticResidual\":{:.4},\"shapeConsistency\":{:.4},\"temporalStability\":{:.4},\"disagreement\":{:.4},\"safetyScore\":{:.4}}}",
-        sample_id, confidence, residual, shape, 1.0, 0.0, safety
+        "{{\"sampleId\":\"{}\",\"confidence\":{:.4},\"acousticResidual\":{:.4},\"shapeConsistency\":{:.4},\"temporalStability\":{:.4},\"disagreement\":{:.4},\"safetyScore\":{:.4},\"regionDice\":[{:.4},{:.4},{:.4},{:.4},{:.4}]}}",
+        sample_id, confidence, residual, shape, 1.0, 0.0, safety, d[0], d[1], d[2], d[3], d[4]
     );
 }
 

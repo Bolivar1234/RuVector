@@ -25,6 +25,7 @@
 | [0021](ADR-0021-patient-state-graph-contradictions.md) | Patient state graph + contradiction detection | Audit |
 | [0022](ADR-0022-reconstruction-run-ledger.md) | Reconstruction run ledger (reproducibility) | Audit |
 | [0023](ADR-0023-ruvn-evidence-layer.md) | ruvn evidence layer (claim gate) | Governance |
+| [0024](ADR-0024-real-slice-calibration-honesty-gate.md) | Real-slice calibration + domain-gap honesty gate | Benchmark |
 
 Design principle (ADR-0019): a *medical signal operating system*, not an "AI
 doctor" — frozen physics engines + deterministic validators at the core, an

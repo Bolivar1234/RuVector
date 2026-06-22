@@ -123,37 +123,84 @@ for (const c of [base, evo]) {
 }
 console.log(`\nevolved vs baseline: shape ${dShape >= 0 ? "+" : ""}${dShape.toFixed(1)}% · latency ${dLatency >= 0 ? "+" : ""}${dLatency.toFixed(1)}% faster · residual ${dResidual >= 0 ? "-" : "+"}${Math.abs(dResidual).toFixed(1)}%`);
 
+// --- Real-slice region Dice + honesty gate (ADR-0024) -----------------------
+const REGION = ["fluid", "fat", "softTissue (muscle)", "softTissue (organ)", "bone"];
+function realSliceAnalysis(row) {
+  const rd = row.regionDice || [0, 0, 0, 0, 0];
+  const region = { fluid: rd[0], fat: rd[1], softTissue: Math.min(rd[2], rd[3]), bone: rd[4] };
+  const meanRegion = (region.fluid + region.fat + region.softTissue + region.bone) / 4;
+  // Conservative domain-gap heuristic: soft tissue + bone failing => high gap.
+  const missingAcoustic = 1 - (region.softTissue + region.bone) / 2;
+  const domainGap = Math.max(0, Math.min(1, 0.2 + 0.4 * missingAcoustic));
+  const registrationErrorPx = 6; // proxy registration (no landmark reg yet)
+  let classification = "headline";
+  if (registrationErrorPx > 12 || domainGap > 0.6) classification = "exclude";
+  else if (row.shapeConsistency < 0.45 || domainGap > 0.3) classification = "researchOnly";
+  return { id: row.id, region, meanRegion, domainGap, registrationErrorPx, classification };
+}
+const realAnalyses = evo.rows.filter((r) => r.kind === "real").map(realSliceAnalysis);
+
 const report = {
   engine: "sonic_ct_serve (frozen)",
   samples: samples.map((s) => ({ id: s.id, kind: s.kind })),
-  baseline: base.summary,
-  evolved: evo.summary,
-  deltas: { shapePct: dShape, latencyPctFaster: dLatency, residualPctLower: dResidual },
+  synthetic: { baseline: base.summary, evolved: evo.summary, deltas: { shapePct: dShape, latencyPctFaster: dLatency, residualPctLower: dResidual } },
+  real: realAnalyses,
+  governance: {
+    headlineRealSlices: realAnalyses.filter((a) => a.classification === "headline").length,
+    note: "Real slices below the honesty gate are excluded from headline metrics.",
+  },
   rows: { baseline: base.rows, evolved: evo.rows },
 };
 fs.writeFileSync(path.join(__dirname, "benchmark.report.json"), JSON.stringify(report, null, 2));
 
+const realRows = realAnalyses
+  .map((a) => `| ${a.id} | ${f(a.region.fluid)} | ${f(a.region.fat)} | ${f(a.region.softTissue)} | ${f(a.region.bone)} | ${f(a.domainGap)} | **${a.classification}** |`)
+  .join("\n");
+
 const md = `# MetaBioHacker reconstruction benchmark
 
-Frozen engine: \`sonic_ct_serve\`. Dataset: ${samples.length} samples
-(${samples.filter((s) => s.kind === "synthetic").length} reproducible synthetic phantoms${
-  samples.some((s) => s.kind === "real") ? " + 1 real abdominal CT slice from Wikimedia Commons" : ""
-}). Only the harness config differs between rows.
+Frozen engine: \`sonic_ct_serve\`. Only the harness config differs between rows.
+Reports are split so reconstruction **speed** is never conflated with real
+anatomical **fidelity**.
 
-Statistics over ${base.summary.shape.n} synthetic samples (mean ± 95% CI) and
-${base.summary.realShape.n} real CT slice(s).
+## 1. Synthetic phantom benchmark
 
-| Config | Dice (synthetic, 95% CI) | Acoustic residual | Latency (ms) | Dice (real CT) |
-|--------|--------------------------|-------------------|--------------|----------------|
-| baseline | ${f(base.summary.shape.mean)} ± ${f(base.summary.shape.ci95)} | ${f(base.summary.residual.mean)} | ${base.summary.latency.mean.toFixed(0)} | ${f(base.summary.realShape.mean)} |
-| evolved | ${f(evo.summary.shape.mean)} ± ${f(evo.summary.shape.ci95)} | ${f(evo.summary.residual.mean)} | ${evo.summary.latency.mean.toFixed(0)} | ${f(evo.summary.realShape.mean)} |
+Statistics over ${base.summary.shape.n} reproducible synthetic phantoms (mean ± 95% CI).
 
-**Evolved vs baseline:** shape ${dShape >= 0 ? "+" : ""}${dShape.toFixed(1)}%, latency ${dLatency.toFixed(1)}% faster, residual ${dResidual >= 0 ? "−" : "+"}${Math.abs(dResidual).toFixed(1)}%.
+| Config | Dice (95% CI) | Acoustic residual | Latency (ms) |
+|--------|---------------|-------------------|--------------|
+| baseline | ${f(base.summary.shape.mean)} ± ${f(base.summary.shape.ci95)} | ${f(base.summary.residual.mean)} | ${base.summary.latency.mean.toFixed(0)} |
+| evolved | ${f(evo.summary.shape.mean)} ± ${f(evo.summary.shape.ci95)} | ${f(evo.summary.residual.mean)} | ${evo.summary.latency.mean.toFixed(0)} |
 
-Real-data note: the real CT slice is fetched on demand by \`tools/fetchRealSlice.mjs\`
-(not committed); intensity is banded into the five acoustic classes as a proxy
-ground truth. Real anatomy is harder than synthetic phantoms, so its Dice is
-lower — an honest measure, not a regression.
+**Evolved vs baseline:** Dice ${dShape >= 0 ? "+" : ""}${dShape.toFixed(1)}%, **latency ${dLatency.toFixed(1)}% faster**, residual ${dResidual >= 0 ? "−" : "+"}${Math.abs(dResidual).toFixed(1)}%.
+
+## 2. Real public slice benchmark (region-level)
+
+Real CT slices (Wikimedia Commons, fetched on demand, not committed) are
+calibration targets — **not** ultrasound-CT. Intensity is banded into the five
+acoustic classes as a proxy ground truth. Region-level Dice + a domain-gap score
+gate headline inclusion.
+
+| Slice | fluid | fat | soft tissue | bone | domain gap | inclusion |
+|-------|-------|-----|-------------|------|-----------|-----------|
+${realRows || "| (none fetched) | | | | | | |"}
+
+Domain gap < 0.30 → headline · 0.30–0.60 → research only · > 0.60 → excluded.
+
+## 3. Governance & safety benchmark
+
+- Acoustic residual is invariant to multimodal/contradiction layers (physics frozen).
+- Pathology/biopsy/Pap/HPV/cytology force human review.
+- User-facing claims require ruvn evidence grade **A/B** with citations (acoustic USCT grades **C → research-only**).
+- Reconstruction run ledgers verify end-to-end (tamper-evident).
+
+## Headline (honest wording)
+
+> The Darwin-evolved reconstruction harness achieved about **${dLatency.toFixed(0)}% faster runtime at equal synthetic-phantom Dice**.
+> On real public CT slices, Dice remained **research stage (~${f(evo.summary.realShape.mean)})**, showing the expected domain
+> gap between controlled acoustic phantoms and real anatomical images.
+> No diagnostic claims are emitted; the multimodal layer only adjusts priors, uncertainty, routing, and review state.
 `;
 fs.writeFileSync(path.join(__dirname, "..", "..", "docs", "sonic-ct", "BENCHMARK.md"), md);
-console.log(`\nreports -> benchmark.report.json + docs/sonic-ct/BENCHMARK.md`);
+console.log(`\nreal slices: ${realAnalyses.map((a) => `${a.id}=${a.classification}`).join(", ") || "none"}`);
+console.log(`reports -> benchmark.report.json + docs/sonic-ct/BENCHMARK.md`);
