@@ -198,6 +198,42 @@ fn organ_detector_finds_lateralised_organs() {
 }
 
 #[test]
+fn pgm_phantom_roundtrip_and_reconstruct() {
+    use sonic_ct::grid::Grid;
+    use sonic_ct::phantom::Phantom;
+    use sonic_ct::pipeline::{run_with_phantom, PipelineConfig};
+    // Build a synthetic phantom, render its labels to PGM, reload it as a
+    // real-style intensity image, and reconstruct — exercising the real-data path.
+    let truth = Phantom::build(PhantomConfig { n: 48, extent: 0.24, seed: 5 });
+    // Use a grayscale gradient image so all five intensity bands appear.
+    let mut gray = Grid::square(48, 0.24, 0.0);
+    for y in 0..48 {
+        for x in 0..48 {
+            let i = gray.idx(x, y);
+            gray.data[i] = ((x * 255) / 47) as f32;
+        }
+    }
+    let pgm = gray.to_pgm(0.0, 255.0);
+    let reloaded = Grid::from_pgm(&pgm, 0.24).expect("parse pgm");
+    assert_eq!(reloaded.nx, 48);
+    let phantom = Phantom::from_intensity_grid(&reloaded);
+    let mut seen = [false; Tissue::COUNT];
+    for &v in &phantom.labels.data {
+        seen[v as usize] = true;
+    }
+    assert!(seen.iter().filter(|&&s| s).count() >= 3, "intensity bands should map to several classes");
+
+    let mut cfg = PipelineConfig::default();
+    cfg.phantom.n = 48;
+    cfg.elements = 96;
+    cfg.acquisition.fan = 48;
+    let scene = run_with_phantom(cfg, &SegModel::tuned(), phantom).unwrap();
+    assert!(scene.quality.measurements > 0);
+    assert!(scene.quality.mae_speed.is_finite());
+    let _ = truth; // truth retained for clarity of intent
+}
+
+#[test]
 fn butterfly_backend_matches_direct_sim() {
     let cfg = ButterflyEmbeddedConfig::default();
     assert_eq!(cfg.total_elements(), 40 * 64);

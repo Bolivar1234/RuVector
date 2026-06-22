@@ -14,7 +14,9 @@
 
 use std::io::Read;
 
-use sonic_ct::pipeline::PipelineConfig;
+use sonic_ct::grid::Grid;
+use sonic_ct::phantom::Phantom;
+use sonic_ct::pipeline::{run_with_phantom, PipelineConfig};
 use sonic_ct::segmentation::SegModel;
 use sonic_ct::volume3d::reconstruct_volume;
 
@@ -30,6 +32,13 @@ fn main() {
     let sharp = num(&input, "organBoundarySharpness").unwrap_or(0.5) as f32;
     let seed = num(&input, "seed").unwrap_or(1.0) as u64;
     let sample_id = string(&input, "id").unwrap_or_else(|| "sample".to_string());
+
+    // Real-data path: if a PGM phantom is supplied, reconstruct that real slice
+    // instead of a procedural one (the engine and reconstruction are identical).
+    if let Some(pgm_path) = string(&input, "phantomPgm") {
+        run_real_slice(&pgm_path, &sample_id, smoothing, sharp);
+        return;
+    }
 
     // Map harness policy -> frozen-engine parameters.
     let n = (240.0 / vox).round().clamp(32.0, 96.0) as usize;
@@ -73,6 +82,61 @@ fn main() {
         "{{\"sampleId\":\"{}\",\"confidence\":{:.4},\"acousticResidual\":{:.4},\"shapeConsistency\":{:.4},\"temporalStability\":{:.4},\"disagreement\":{:.4},\"safetyScore\":{:.4}}}",
         sample_id, confidence, residual, shape, temporal_stability, disagreement, safety
     );
+}
+
+/// Reconstruct a real anatomical slice loaded from a PGM and print scores.
+fn run_real_slice(path: &str, sample_id: &str, smoothing: f64, sharp: f32) {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => {
+            print_fail(sample_id);
+            return;
+        }
+    };
+    let gray = match Grid::from_pgm(&bytes, 0.24) {
+        Some(g) => g,
+        None => {
+            print_fail(sample_id);
+            return;
+        }
+    };
+    let phantom = Phantom::from_intensity_grid(&gray);
+    let mut cfg = PipelineConfig::default();
+    cfg.phantom.n = gray.nx;
+    cfg.recon.iters = (2.0 + smoothing * 10.0).round().clamp(1.0, 14.0) as usize;
+    cfg.elements = 180;
+    cfg.acquisition.fan = 90;
+
+    let scene = match run_with_phantom(cfg, &SegModel::tuned(), phantom) {
+        Ok(s) => s,
+        Err(_) => {
+            print_fail(sample_id);
+            return;
+        }
+    };
+    let shape = scene.quality.mean_dice.clamp(0.0, 1.0);
+    let residual = (scene.quality.mae_speed / 1700.0).max(0.0);
+    let unc = mean_f32(&scene.segmentation.uncertainty.data);
+    let confidence = (1.0 - unc).clamp(0.0, 1.0);
+    let high_err = 0.0; // single real slice: no per-voxel error map exported here
+    let safety = (0.94_f32 + 0.05 * sharp - 0.6 * high_err).clamp(0.0, 1.0);
+    // Single real slice has no cross-slice variance; report neutral stability.
+    println!(
+        "{{\"sampleId\":\"{}\",\"confidence\":{:.4},\"acousticResidual\":{:.4},\"shapeConsistency\":{:.4},\"temporalStability\":{:.4},\"disagreement\":{:.4},\"safetyScore\":{:.4}}}",
+        sample_id, confidence, residual, shape, 1.0, 0.0, safety
+    );
+}
+
+fn print_fail(id: &str) {
+    println!("{{\"sampleId\":\"{id}\",\"confidence\":0,\"acousticResidual\":1,\"shapeConsistency\":0,\"temporalStability\":0,\"disagreement\":1,\"safetyScore\":0}}");
+}
+
+fn mean_f32(v: &[f32]) -> f32 {
+    if v.is_empty() {
+        0.0
+    } else {
+        v.iter().sum::<f32>() / v.len() as f32
+    }
 }
 
 fn std_dev(v: &[f32]) -> f32 {

@@ -283,4 +283,34 @@ impl Phantom {
     pub fn n(&self) -> usize {
         self.speed.nx
     }
+
+    /// Build a ground-truth phantom from a real anatomical intensity image
+    /// (0..255 grayscale, e.g. a windowed CT slice). Intensity is banded into
+    /// the five acoustic classes; this is a proxy mapping for benchmarking
+    /// reconstruction on real anatomy, not a calibrated HU→speed conversion.
+    pub fn from_intensity_grid(gray: &Grid) -> Phantom {
+        let n = gray.nx;
+        let ext = gray.dx * n as f32;
+        let mut speed = Grid::square(n, ext, WATER_SPEED);
+        let mut atten = Grid::square(n, ext, Tissue::Water.nominal_attenuation());
+        let mut labels = Grid::square(n, ext, Tissue::Water as u8 as f32);
+        for i in 0..gray.data.len() {
+            let g = gray.data[i];
+            let t = if g < 22.0 {
+                Tissue::Water
+            } else if g < 70.0 {
+                Tissue::Fat
+            } else if g < 120.0 {
+                Tissue::Muscle
+            } else if g < 190.0 {
+                Tissue::Organ
+            } else {
+                Tissue::Bone
+            };
+            speed.data[i] = t.nominal_speed();
+            atten.data[i] = t.nominal_attenuation();
+            labels.data[i] = t as u8 as f32;
+        }
+        Phantom { speed, attenuation: atten, labels }
+    }
 }

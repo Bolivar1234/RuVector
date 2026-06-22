@@ -10,6 +10,7 @@
     "build": "vite build",
     "preview": "vite preview --port 5184",
     "optimize": "node optimize.mjs",
+    "benchmark": "node benchmark.mjs",
     "test": "node --test --experimental-strip-types test/"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
   "devDependencies": {
     "@metaharness/darwin": "^0.3.1",
     "@vitejs/plugin-react": "^4.3.3",
+    "jpeg-js": "^0.4.4",
     "vite": "^5.4.10"
   }
 }

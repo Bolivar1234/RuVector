@@ -167,6 +167,34 @@ impl Grid {
         out
     }
 
+    /// Parse a binary PGM (P5) into a square grid of raw 0..255 values.
+    ///
+    /// Returns `None` on malformed input. Used to ingest real anatomical slices
+    /// as ground-truth phantoms.
+    pub fn from_pgm(bytes: &[u8], extent: f32) -> Option<Grid> {
+        // Header: "P5\n<w> <h>\n<max>\n" (whitespace-separated, may include comments).
+        let mut pos = 0usize;
+        let magic = read_token(bytes, &mut pos)?;
+        if magic != b"P5" {
+            return None;
+        }
+        let w: usize = parse_ascii(read_token(bytes, &mut pos)?)?;
+        let h: usize = parse_ascii(read_token(bytes, &mut pos)?)?;
+        let _max: usize = parse_ascii(read_token(bytes, &mut pos)?)?;
+        pos += 1; // single whitespace after maxval
+        if w != h || pos + w * h > bytes.len() {
+            return None;
+        }
+        let mut g = Grid::square(w, extent, 0.0);
+        // PGM is top-down; flip to the grid's bottom-up convention.
+        for y in 0..h {
+            for x in 0..w {
+                g.data[(h - 1 - y) * w + x] = bytes[pos + y * w + x] as f32;
+            }
+        }
+        Some(g)
+    }
+
     /// Render to an 8-bit PGM (P5) byte buffer, linearly scaled to `[lo, hi]`.
     pub fn to_pgm(&self, lo: f32, hi: f32) -> Vec<u8> {
         let mut out = Vec::with_capacity(64 + self.nx * self.ny);
@@ -183,4 +211,34 @@ impl Grid {
         }
         out
     }
+}
+
+/// Read a whitespace-delimited token from `bytes` starting at `*pos`, skipping
+/// leading whitespace and `#` comment lines. Advances `*pos` past the token.
+fn read_token<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+    while *pos < bytes.len() {
+        let c = bytes[*pos];
+        if c == b'#' {
+            while *pos < bytes.len() && bytes[*pos] != b'\n' {
+                *pos += 1;
+            }
+        } else if c.is_ascii_whitespace() {
+            *pos += 1;
+        } else {
+            break;
+        }
+    }
+    let start = *pos;
+    while *pos < bytes.len() && !bytes[*pos].is_ascii_whitespace() {
+        *pos += 1;
+    }
+    if *pos > start {
+        Some(&bytes[start..*pos])
+    } else {
+        None
+    }
+}
+
+fn parse_ascii<T: std::str::FromStr>(b: &[u8]) -> Option<T> {
+    std::str::from_utf8(b).ok()?.parse().ok()
 }

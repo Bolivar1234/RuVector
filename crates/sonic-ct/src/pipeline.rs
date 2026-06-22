@@ -87,9 +87,16 @@ pub fn run_with_model(cfg: PipelineConfig, model: &SegModel) -> Result<Scene> {
 /// `z = 0.5` is the canonical mid-abdomen slice; sweeping `z` builds a 3-D body
 /// (see [`crate::volume3d`]).
 pub fn run_slice(cfg: PipelineConfig, model: &SegModel, z: f32) -> Result<Scene> {
+    let phantom = Phantom::build_slice(cfg.phantom, z);
+    run_with_phantom(cfg, model, phantom)
+}
+
+/// Run the pipeline against a *supplied* phantom (e.g. one derived from a real
+/// anatomical image), rather than a procedurally generated one. The acoustic
+/// engine and reconstruction are identical — only the ground truth differs.
+pub fn run_with_phantom(cfg: PipelineConfig, model: &SegModel, phantom: Phantom) -> Result<Scene> {
     cfg.validate()?;
 
-    let phantom = Phantom::build_slice(cfg.phantom, z);
     let half_fov = cfg.phantom.extent / 2.0;
     let ring = Ring::new(cfg.elements, half_fov * cfg.ring_frac);
 
