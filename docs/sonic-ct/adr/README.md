@@ -21,6 +21,10 @@
 | [0017](ADR-0017-multimodal-fusion-patterns.md) | Typed multimodal fusion patterns | Data fusion |
 | [0018](ADR-0018-governance-samd-boundary.md) | Governance & SaMD boundary | Governance |
 | [0019](ADR-0019-medical-signal-operating-system.md) | Medical signal operating system | Architecture |
+| [0020](ADR-0020-multimodal-canonical-observation.md) | Canonical observation ingest boundary | Data model |
+| [0021](ADR-0021-patient-state-graph-contradictions.md) | Patient state graph + contradiction detection | Audit |
+| [0022](ADR-0022-reconstruction-run-ledger.md) | Reconstruction run ledger (reproducibility) | Audit |
+| [0023](ADR-0023-ruvn-evidence-layer.md) | ruvn evidence layer (claim gate) | Governance |
 
 Design principle (ADR-0019): a *medical signal operating system*, not an "AI
 doctor" — frozen physics engines + deterministic validators at the core, an
