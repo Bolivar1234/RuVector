@@ -313,6 +313,35 @@ fn box_smooth(g: &mut [f32], n: usize, passes: usize) {
     }
 }
 
+/// One stage of a multi-scale (frequency-continuation) inversion.
+pub struct Stage {
+    /// Configuration for this stage (typically a distinct centre frequency).
+    pub cfg: FwiConfig,
+    /// Observed traces band-matched to this stage's source.
+    pub observed: Vec<Vec<Vec<f32>>>,
+    /// Gradient-descent iterations for this stage.
+    pub iters: usize,
+}
+
+/// Multi-scale FWI: invert low frequencies first (smooth, cycle-skip-robust),
+/// then refine at higher frequencies, chaining the model and lightly smoothing it
+/// between stages (model-space regularisation). This is the standard remedy that
+/// turns FWI from anomaly *detection* into quantitative *recovery*.
+pub fn invert_multiscale(init_speed: &Grid, geom: &Geometry, stages: &[Stage]) -> FwiResult {
+    let mut model = init_speed.clone();
+    let mut history = Vec::new();
+    for (k, stage) in stages.iter().enumerate() {
+        let r = invert(&model, &stage.cfg, geom, &stage.observed, stage.iters);
+        model = r.speed;
+        // Model-space regularisation between stages (not after the final stage).
+        if k + 1 < stages.len() {
+            box_smooth(&mut model.data, stage.cfg.n, 1);
+        }
+        history.extend(r.misfit_history);
+    }
+    FwiResult { speed: model, misfit_history: history }
+}
+
 /// Generate synthetic "observed" traces for `true_speed` (the forward problem).
 pub fn observe(true_speed: &Grid, cfg: &FwiConfig, geom: &Geometry) -> Vec<Vec<Vec<f32>>> {
     let dx = cfg.extent / cfg.n as f32;

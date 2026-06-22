@@ -24,10 +24,16 @@ Add a transparent, dependency-free 2-D FWI reference in `fwi.rs`:
   `∂χ/∂κ(x) = Σ_t λ(x,t) ∇²p(x,t)`.
 - **Inversion** — gradient descent on `κ` with source/receiver-footprint muting,
   gradient smoothing, and a backtracking step.
+- **Frequency continuation** — `invert_multiscale` chains low → high frequency
+  stages (each its own `FwiConfig` + observed set), smoothing the model between
+  stages. Low frequencies recover the smooth, long-wavelength background first and
+  keep the higher-frequency stages out of local minima (cycle-skipping).
 
 **Correctness is proven by an adjoint-vs-finite-difference gradient check**
 (cosine > 0.85) — the gold-standard FWI test — plus an inversion that reduces the
-data misfit ≥ 15% and recovers a centrally-concentrated velocity anomaly.
+data misfit ≥ 15% and recovers a centrally-concentrated velocity anomaly. A third
+test shows frequency continuation lowers the inclusion-region error below
+single-scale FWI at matched iteration count.
 
 ## Consequences
 
@@ -37,10 +43,12 @@ data misfit ≥ 15% and recovers a centrally-concentrated velocity anomaly.
 
 ### Negative / Trade-offs
 - Single-frequency, unregularised FWI overshoots amplitude and mislocates the
-  brightest pixel on small/underdetermined problems. **Frequency continuation,
-  Tikhonov/TV regularisation, source encoding, and 3-D are the next steps** and
-  are NOT yet implemented — claims are limited to misfit reduction + anomaly
-  localisation, not quantitative clinical recovery (ADR-0013/0018).
+  brightest pixel on small/underdetermined problems. Frequency continuation
+  (now implemented) improves the inclusion-region error over single-scale FWI,
+  but **Tikhonov/TV regularisation, source encoding, and 3-D are still the next
+  steps** and are NOT yet implemented — claims are limited to misfit reduction +
+  anomaly localisation + relative multiscale improvement, not quantitative
+  clinical recovery (ADR-0013/0018).
 
 ## Alternatives Considered
 - Staying ray-based only (rejected: caps resolution; FWI is the SOTA direction).
