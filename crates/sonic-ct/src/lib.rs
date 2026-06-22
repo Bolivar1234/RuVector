@@ -40,6 +40,7 @@
 
 pub mod acquisition;
 pub mod butterfly;
+pub mod fwi;
 pub mod geometry;
 pub mod grid;
 pub mod memory;

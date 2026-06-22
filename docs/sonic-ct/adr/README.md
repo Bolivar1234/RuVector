@@ -27,6 +27,7 @@
 | [0023](ADR-0023-ruvn-evidence-layer.md) | ruvn evidence layer (claim gate) | Governance |
 | [0024](ADR-0024-real-slice-calibration-honesty-gate.md) | Real-slice calibration + domain-gap honesty gate | Benchmark |
 | [0025](ADR-0025-method-comparison-standard-metrics.md) | Method comparison (BP/SART/Landweber) + RMSE/PSNR/SSIM | Benchmark |
+| [0026](ADR-0026-full-waveform-inversion.md) | Full-waveform inversion (forward + adjoint gradient) | Reconstruction |
 
 Design principle (ADR-0019): a *medical signal operating system*, not an "AI
 doctor" — frozen physics engines + deterministic validators at the core, an
