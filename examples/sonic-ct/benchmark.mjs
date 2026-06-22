@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVE = path.join(__dirname, "..", "..", "crates", "sonic-ct", "target", "release", "sonic_ct_serve");
-const REAL_PGM = path.join(__dirname, "public", "benchmark", "real_abdomen.pgm");
+const BENCH_DIR = path.join(__dirname, "public", "benchmark");
+const N_SEEDS = Number(process.argv[2] || 40);
 
 if (!fs.existsSync(SERVE)) {
   console.error(`missing engine: ${SERVE}\nbuild it: cargo build --release --bin sonic_ct_serve`);
@@ -61,29 +62,34 @@ if (fs.existsSync(reportPath)) {
   } catch {}
 }
 
-// Dataset: reproducible synthetic seeds + the real CT slice (if fetched).
+// Dataset: reproducible synthetic seeds + every real CT slice fetched.
 const samples = [];
-for (let seed = 1; seed <= 12; seed++) samples.push({ id: `synthetic-${seed}`, seed, kind: "synthetic" });
-if (fs.existsSync(REAL_PGM)) {
-  samples.push({ id: "real-abdomen-ct", seed: 1, kind: "real" });
+for (let seed = 1; seed <= N_SEEDS; seed++) samples.push({ id: `synthetic-${seed}`, seed, kind: "synthetic" });
+const realFiles = fs.existsSync(BENCH_DIR)
+  ? fs.readdirSync(BENCH_DIR).filter((f) => /^real_.*\.pgm$/.test(f))
+  : [];
+for (const f of realFiles) {
+  samples.push({ id: `real-${f.replace(/^real_|\.pgm$/g, "")}`, seed: 1, kind: "real", pgm: path.join(BENCH_DIR, f) });
 }
 
 const mean = (a) => a.reduce((s, x) => s + x, 0) / Math.max(a.length, 1);
 const std = (a) => {
+  if (a.length < 2) return 0;
   const m = mean(a);
-  return Math.sqrt(mean(a.map((x) => (x - m) ** 2)));
+  return Math.sqrt(a.map((x) => (x - m) ** 2).reduce((s, x) => s + x, 0) / (a.length - 1));
 };
+const ci95 = (a) => (a.length > 1 ? (1.96 * std(a)) / Math.sqrt(a.length) : 0);
 
 async function evalConfig(name, reconstruction) {
   const rows = [];
   for (const s of samples) {
-    const recon = s.kind === "real" ? { ...reconstruction, phantomPgm: REAL_PGM } : reconstruction;
+    const recon = s.kind === "real" ? { ...reconstruction, phantomPgm: s.pgm } : reconstruction;
     const r = await runEngine(recon, { id: s.id, seed: s.seed });
     rows.push({ ...s, ...r });
   }
   const agg = (key, kind) => {
     const v = rows.filter((r) => !kind || r.kind === kind).map((r) => r[key]);
-    return { mean: mean(v), std: std(v) };
+    return { mean: mean(v), std: std(v), ci95: ci95(v), n: v.length };
   };
   return { name, rows, summary: {
     shape: agg("shapeConsistency", "synthetic"),
@@ -106,11 +112,12 @@ const dLatency = pct(base.summary.latency.mean, evo.summary.latency.mean);
 const dResidual = pct(base.summary.residual.mean, evo.summary.residual.mean);
 
 const f = (x) => x.toFixed(3);
-console.log("config    shape(Dice)   residual    latency(ms)   real-Dice");
+console.log(`samples: ${samples.length} synthetic seeds=${N_SEEDS}, real=${realFiles.length}`);
+console.log("config    shape(Dice, 95% CI)   residual    latency(ms)   real-Dice");
 for (const c of [base, evo]) {
   const s = c.summary;
   console.log(
-    `${c.name.padEnd(9)} ${f(s.shape.mean)}±${f(s.shape.std)}  ${f(s.residual.mean)}   ` +
+    `${c.name.padEnd(9)} ${f(s.shape.mean)}±${f(s.shape.ci95)}  ${f(s.residual.mean)}   ` +
       `${s.latency.mean.toFixed(0).padStart(6)}      ${f(s.realShape.mean)}`
   );
 }
@@ -133,10 +140,13 @@ Frozen engine: \`sonic_ct_serve\`. Dataset: ${samples.length} samples
   samples.some((s) => s.kind === "real") ? " + 1 real abdominal CT slice from Wikimedia Commons" : ""
 }). Only the harness config differs between rows.
 
-| Config | Dice (synthetic) | Acoustic residual | Latency (ms) | Dice (real CT) |
-|--------|------------------|-------------------|--------------|----------------|
-| baseline | ${f(base.summary.shape.mean)} ± ${f(base.summary.shape.std)} | ${f(base.summary.residual.mean)} | ${base.summary.latency.mean.toFixed(0)} | ${f(base.summary.realShape.mean)} |
-| evolved | ${f(evo.summary.shape.mean)} ± ${f(evo.summary.shape.std)} | ${f(evo.summary.residual.mean)} | ${evo.summary.latency.mean.toFixed(0)} | ${f(evo.summary.realShape.mean)} |
+Statistics over ${base.summary.shape.n} synthetic samples (mean ± 95% CI) and
+${base.summary.realShape.n} real CT slice(s).
+
+| Config | Dice (synthetic, 95% CI) | Acoustic residual | Latency (ms) | Dice (real CT) |
+|--------|--------------------------|-------------------|--------------|----------------|
+| baseline | ${f(base.summary.shape.mean)} ± ${f(base.summary.shape.ci95)} | ${f(base.summary.residual.mean)} | ${base.summary.latency.mean.toFixed(0)} | ${f(base.summary.realShape.mean)} |
+| evolved | ${f(evo.summary.shape.mean)} ± ${f(evo.summary.shape.ci95)} | ${f(evo.summary.residual.mean)} | ${evo.summary.latency.mean.toFixed(0)} | ${f(evo.summary.realShape.mean)} |
 
 **Evolved vs baseline:** shape ${dShape >= 0 ? "+" : ""}${dShape.toFixed(1)}%, latency ${dLatency.toFixed(1)}% faster, residual ${dResidual >= 0 ? "−" : "+"}${Math.abs(dResidual).toFixed(1)}%.
 
