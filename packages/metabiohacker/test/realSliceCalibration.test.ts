@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { diceByRegionFromLabels, regionDiceFromClassDice, meanRegionDice } from "../src/calibration/diceByRegion.ts";
 import { scoreDomainGap, classifyRealSliceResult } from "../src/calibration/domainGapScoring.ts";
-import { estimateRegistrationErrorPx, boundaryComplexity } from "../src/calibration/sliceRegistration.ts";
+import { estimateRegistrationErrorPx, boundaryComplexity, registerByTranslation } from "../src/calibration/sliceRegistration.ts";
 
 test("region Dice from labels: perfect match scores 1, mismatch < 1", () => {
   // classes: 0=water/fluid,1=fat,2=muscle,3=organ,4=bone
@@ -54,4 +54,26 @@ test("registration error is centroid offset; misaligned masks score higher", () 
   assert.ok(estimateRegistrationErrorPx(left, left) < 0.001, "self-registration ~0");
   assert.ok(estimateRegistrationErrorPx(left, right) > 3, "shifted mask has offset");
   assert.ok(boundaryComplexity(left) >= 0 && boundaryComplexity(left) <= 1);
+});
+
+test("rigid translation registration recovers the offset and maximises overlap", () => {
+  const w = 12, h = 12;
+  const a = { width: w, height: h, data: new Uint8Array(w * h) };
+  const b = { width: w, height: h, data: new Uint8Array(w * h) };
+  // a: 3x3 block at (2,2); b: same block shifted +4 in x, +2 in y.
+  for (let y = 0; y < 3; y++)
+    for (let x = 0; x < 3; x++) {
+      a.data[(2 + y) * w + (2 + x)] = 1;
+      b.data[(4 + y) * w + (6 + x)] = 1;
+    }
+  // Self-registration: zero offset, perfect overlap.
+  const self = registerByTranslation(a, a);
+  assert.equal(self.errorPx, 0);
+  assert.ok(self.overlapDice > 0.999);
+  // Cross: best translation aligns the blocks (shift target by (+4,+2)).
+  const reg = registerByTranslation(a, b);
+  assert.equal(reg.dx, 4);
+  assert.equal(reg.dy, 2);
+  assert.ok(reg.overlapDice > 0.999, "blocks align after registration");
+  assert.ok(reg.errorPx > 4, "misalignment magnitude reported");
 });
