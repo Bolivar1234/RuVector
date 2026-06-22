@@ -9,7 +9,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --port 5184",
-    "optimize": "node optimize.mjs"
+    "optimize": "node optimize.mjs",
+    "test": "node --test --experimental-strip-types test/"
   },
   "dependencies": {
     "@react-three/drei": "^9.114.0",

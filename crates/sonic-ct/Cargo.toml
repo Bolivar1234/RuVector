@@ -39,6 +39,10 @@ path = "src/bin/demo.rs"
 name = "sonic_ct_train"
 path = "src/bin/train.rs"
 
+[[bin]]
+name = "sonic_ct_serve"
+path = "src/bin/serve.rs"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
