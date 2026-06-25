@@ -75,6 +75,32 @@ runtime forecasting capability it would orchestrate is the
 `ruvector-timesfm-forecast` CLI in `crates/ruvector-timesfm` (JSON in →
 point + p10/p50/p90 out).
 
+## Optimizing the harness — Darwin evolve via OpenRouter (key from GCP)
+
+The harness ships a Darwin-Mode self-improvement loop (the `evolve` skill). Its
+default mutator is deterministic (air-gapped, no key). The **LLM mutator**
+(`OpenRouterMutator`, ADR-071) is library-only — not exposed by the
+`metaharness-darwin` CLI — so `scripts/evolve-openrouter.{sh,mjs}` wire it into
+the `evolve()` engine.
+
+The OpenRouter API key is **sourced from GCP Secret Manager at runtime** and
+exported only into the run's process — never stored in the repo, a dotfile, or
+the logs:
+
+```bash
+# real sandbox, key fetched from GCP secret OPENROUTER_API_KEY (project cognitum-20260110)
+./scripts/evolve-openrouter.sh
+# tune cost/scope:
+GENERATIONS=1 CHILDREN=2 SANDBOX=mock ./scripts/evolve-openrouter.sh
+# overrides: OPENROUTER_SECRET, GCP_PROJECT, DARWIN_MUTATOR_MODEL, DARWIN_DIST
+```
+
+Validated run (real sandbox, 1 gen × 2 children, `google/gemini-2.5-flash`):
+baseline scored **0.985** (taskSuccess 1.0, testPassRate 1.0, safety 1.0, zero
+secret-exposure/destructive/hallucination flags); 2 real OpenRouter mutations,
+~$0.003. Every mutation passes the `validateGeneratedCode` safety gate (no new
+imports/network/shell/env) and only promotes on measured improvement.
+
 ## Notes on this generator version (v0.2.7)
 
 - `mint` emits `.harness/manifest.json` + `.harness/manifest.sha256` (the
