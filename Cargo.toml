@@ -242,6 +242,11 @@ members = [
     "crates/photonlayer-ruvector",
     "crates/photonlayer-cli",
     "crates/photonlayer-wasm",
+    "crates/pixelrag-core",
+    "crates/pixelrag-encoder",
+    "crates/pixelrag-render",
+    "crates/pixelrag-serve",
+    "crates/pixelrag-cli",
 ]
 resolver = "2"
 

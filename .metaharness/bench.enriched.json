@@ -1,0 +1,159 @@
+{
+  "id": "pixelrag-rust-port",
+  "version": "0.2.0",
+  "createdAt": "2026-06-25T17:34:44.138Z",
+  "taskHash": "777f5485b70a95429c6cd6be31d883d69ad06e9ee34d814ccb8cf7df5e33a949",
+  "description": "Darwin/MetaHarness optimization suite for the PixelRAG Rust port (ADR-264). Darwin EVOLVES the harness PARAMETERS (index backend, batch size, embedding cache size, rerank threshold, quantization tier) — NOT the Rust source. Each task pins a parameter axis from ADR-264 Validation and scores it on the ViDoRe SUBSET fixture under tests/fixtures/pixelrag/. Pass criteria pair a quality floor (recall@10 >= baseline - epsilon) with a resource budget (latency p99 + memory/doc). The harness is REMOVABLE per ADR-256: the port builds/indexes/searches on Config::default() even if darwin never runs.",
+  "baseline": {
+    "note": "Baseline = PixelRAG Python on the SAME ViDoRe subset, measured in the SAME environment. Numbers below are PLACEHOLDERS to be measured at M1+ (ADR-264 Validation table is all 'to measure'). epsilon is the allowed recall regression vs that baseline.",
+    "recallAt10": 0.0,
+    "epsilon": 0.02,
+    "searchP99Ms": 0,
+    "memoryPerDocKb": 0
+  },
+  "evolveParameters": {
+    "index_backend": { "type": "categorical", "values": ["hnsw", "ivf-sq"], "default": "hnsw", "note": "ruvector-core HNSW (M1 primary) vs ruvector-rairs IVF-SQ (M1 fallback). turbovec FastScan is M2+ and only if ADR-254 ships." },
+    "batch_size": { "type": "ordinal", "values": [8, 16, 32, 64, 128], "default": 32, "note": "Tile embedding batch size on the Tokio thread pool." },
+    "embedding_cache_mb": { "type": "ordinal", "values": [0, 50, 100, 256, 512], "default": 100, "note": "LRU embedding cache for tiles (pixelrag-encoder::cache)." },
+    "rerank_threshold": { "type": "continuous", "min": 0.0, "max": 1.0, "default": 0.0, "note": "Score cutoff above which the optional cross-encoder/LLM rerank fires. 0.0 = rerank disabled (default M1 harness)." },
+    "quantization": { "type": "categorical", "values": ["none", "4-bit", "3-bit", "2-bit"], "default": "4-bit", "note": "Scalar quantization tier. 'none' = f32. 2/3-bit are M2+ via ruvector-turbovec (ADR-254) and only valid once it ships." }
+  },
+  "tasks": [
+    {
+      "id": "task-0001",
+      "repo": "C:\\Users\\ruv\\ruvector",
+      "commit": "WORKDIR",
+      "title": "Build green: pixelrag-* workspace compiles",
+      "prompt": "Keep the PixelRAG Rust crates compiling. This is the M0 gate — the suite is unrunnable for optimization until the workspace builds.",
+      "publicTestCommand": "cargo build -p pixelrag-core -p pixelrag-encoder -p pixelrag-render -p pixelrag-serve -p pixelrag-cli",
+      "hiddenTestCommand": "cargo build -p pixelrag-core -p pixelrag-encoder -p pixelrag-render -p pixelrag-serve -p pixelrag-cli",
+      "regressionTestCommand": "cargo build -p pixelrag-core -p pixelrag-encoder -p pixelrag-render -p pixelrag-serve -p pixelrag-cli",
+      "timeoutMs": 600000,
+      "maxCostUsd": 2,
+      "allowedMutationFiles": [],
+      "blockedFiles": [
+        ".env",
+        "Cargo.lock",
+        "Cargo.toml",
+        "package-lock.json",
+        ".github/workflows"
+      ],
+      "successCriteria": [
+        "all five pixelrag-* crates compile",
+        "no edits to root Cargo.toml"
+      ],
+      "difficulty": 1,
+      "tags": ["m0", "build", "gate"]
+    },
+    {
+      "id": "task-0002",
+      "repo": "C:\\Users\\ruv\\ruvector",
+      "commit": "WORKDIR",
+      "title": "Index backend selection: HNSW vs IVF-SQ at the recall/memory Pareto point",
+      "prompt": "Choose the index backend (ruvector-core HNSW vs ruvector-rairs IVF-SQ) that holds recall@10 within epsilon of the Python baseline while minimizing memory/doc on the ViDoRe subset. Darwin varies the `index_backend` parameter only; the Rust source is frozen.",
+      "publicTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics ndcg,mrr,recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "hiddenTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics ndcg,mrr,recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "regressionTestCommand": "cargo test -p pixelrag-core",
+      "timeoutMs": 600000,
+      "maxCostUsd": 3,
+      "allowedMutationFiles": [],
+      "blockedFiles": [".env", "Cargo.lock", "Cargo.toml", ".github/workflows"],
+      "successCriteria": [
+        "recall@10 >= baseline.recallAt10 - baseline.epsilon",
+        "search p99 <= baseline.searchP99Ms (or budget if baseline unmeasured)",
+        "memory/doc reported and on the Pareto frontier (recall x memory)"
+      ],
+      "difficulty": 3,
+      "tags": ["m1", "index", "pareto", "recall-memory"],
+      "evolve": ["index_backend"]
+    },
+    {
+      "id": "task-0003",
+      "repo": "C:\\Users\\ruv\\ruvector",
+      "commit": "WORKDIR",
+      "title": "Embedding batch size vs throughput/latency",
+      "prompt": "Tune `batch_size` for tile embedding so index-build throughput rises without blowing the search p99 latency budget. recall@10 must stay within epsilon (batch size must not change retrieval quality if the encoder is deterministic). Darwin varies `batch_size` only.",
+      "publicTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "hiddenTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "regressionTestCommand": "cargo test -p pixelrag-encoder",
+      "timeoutMs": 600000,
+      "maxCostUsd": 3,
+      "allowedMutationFiles": [],
+      "blockedFiles": [".env", "Cargo.lock", "Cargo.toml", ".github/workflows"],
+      "successCriteria": [
+        "recall@10 >= baseline.recallAt10 - baseline.epsilon",
+        "index build time (s/1k docs) reported",
+        "search p99 <= latency budget"
+      ],
+      "difficulty": 2,
+      "tags": ["m1", "encoder", "throughput", "latency"],
+      "evolve": ["batch_size"]
+    },
+    {
+      "id": "task-0004",
+      "repo": "C:\\Users\\ruv\\ruvector",
+      "commit": "WORKDIR",
+      "title": "Embedding cache size vs warm-query latency/memory",
+      "prompt": "Tune `embedding_cache_mb` (LRU tile-embedding cache) to cut warm-query latency without exceeding the per-doc memory budget. recall@10 unchanged. Darwin varies `embedding_cache_mb` only.",
+      "publicTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "hiddenTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "regressionTestCommand": "cargo test -p pixelrag-encoder",
+      "timeoutMs": 600000,
+      "maxCostUsd": 3,
+      "allowedMutationFiles": [],
+      "blockedFiles": [".env", "Cargo.lock", "Cargo.toml", ".github/workflows"],
+      "successCriteria": [
+        "recall@10 >= baseline.recallAt10 - baseline.epsilon",
+        "memory/doc <= budget",
+        "warm-query p50 reported"
+      ],
+      "difficulty": 2,
+      "tags": ["m1", "cache", "memory", "latency"],
+      "evolve": ["embedding_cache_mb"]
+    },
+    {
+      "id": "task-0005",
+      "repo": "C:\\Users\\ruv\\ruvector",
+      "commit": "WORKDIR",
+      "title": "Rerank threshold vs recall-cost tradeoff",
+      "prompt": "Tune `rerank_threshold`: the score cutoff above which the optional cross-encoder/LLM rerank fires. Higher recall@10 must justify added latency/cost; threshold=0.0 disables rerank (default M1 harness, must remain valid). Darwin varies `rerank_threshold` only.",
+      "publicTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics ndcg,recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "hiddenTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics ndcg,recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "regressionTestCommand": "cargo test -p pixelrag-core",
+      "timeoutMs": 600000,
+      "maxCostUsd": 4,
+      "allowedMutationFiles": [],
+      "blockedFiles": [".env", "Cargo.lock", "Cargo.toml", ".github/workflows"],
+      "successCriteria": [
+        "recall@10 >= baseline.recallAt10 - baseline.epsilon",
+        "rerank cost (ms or USD) reported",
+        "ndcg@10 gain justifies cost or threshold=0.0 chosen"
+      ],
+      "difficulty": 3,
+      "tags": ["m1", "m3", "rerank", "recall-cost"],
+      "evolve": ["rerank_threshold"]
+    },
+    {
+      "id": "task-0006",
+      "repo": "C:\\Users\\ruv\\ruvector",
+      "commit": "WORKDIR",
+      "title": "Quantization tier vs recall-memory Pareto frontier (M2+, conditional on ADR-254)",
+      "prompt": "Sweep `quantization` (none/4/3/2-bit) for the best NDCG@10 x memory/doc Pareto point. 2-bit and 3-bit require ruvector-turbovec FastScan (ADR-254) — if that crate has not shipped, only 'none' and '4-bit' (ruvector-rabitq scalar) are valid and the task is M1-scoped. Darwin varies `quantization` only.",
+      "publicTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics ndcg,recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "hiddenTestCommand": "cargo run --release -p pixelrag-cli -- benchmark --predictions ./bench_output/vidore_results.json --ground-truth ./tests/fixtures/pixelrag/ground-truth.json --metrics ndcg,recall@10 --queries ./tests/fixtures/pixelrag/queries.json",
+      "regressionTestCommand": "cargo test -p pixelrag-core",
+      "timeoutMs": 600000,
+      "maxCostUsd": 4,
+      "allowedMutationFiles": [],
+      "blockedFiles": [".env", "Cargo.lock", "Cargo.toml", ".github/workflows"],
+      "successCriteria": [
+        "recall@10 >= baseline.recallAt10 - baseline.epsilon",
+        "memory/doc minimized at the chosen tier",
+        "(2/3-bit only counted if ruvector-turbovec / ADR-254 has shipped)"
+      ],
+      "difficulty": 4,
+      "tags": ["m2", "quantization", "turbovec", "adr-254", "pareto"],
+      "evolve": ["quantization"]
+    }
+  ]
+}
