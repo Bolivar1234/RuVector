@@ -116,6 +116,61 @@ impl Forecaster {
         Ok(Forecast { point, quantiles })
     }
 
+    /// Forecast a **batch** of equal-length series in a single model call —
+    /// the throughput path. All series must share one length (the common case
+    /// for windowed telemetry / multi-series dashboards); returns one
+    /// [`Forecast`] per input row. For ragged lengths, call [`Self::forecast`]
+    /// per series.
+    pub fn forecast_batch(
+        &self,
+        series_batch: &[Vec<f32>],
+        horizon: usize,
+        freq_id: u32,
+    ) -> Result<Vec<Forecast>> {
+        if series_batch.is_empty() {
+            return Err(Error::Invalid("series batch is empty".into()));
+        }
+        if horizon == 0 {
+            return Err(Error::Invalid("horizon must be > 0".into()));
+        }
+        let k = series_batch[0].len();
+        if k == 0 {
+            return Err(Error::Invalid("series must be non-empty".into()));
+        }
+        if series_batch.iter().any(|s| s.len() != k) {
+            return Err(Error::Invalid(
+                "forecast_batch requires equal-length series; use forecast() per series for ragged input".into(),
+            ));
+        }
+        let b = series_batch.len();
+        let flat: Vec<f32> = series_batch.iter().flatten().copied().collect();
+        let input_ts = Tensor::from_vec(flat, (b, k), &self.device)?;
+        let input_padding = Tensor::zeros((b, k), DType::F32, &self.device)?;
+        let freq = Tensor::from_vec(vec![freq_id; b], (b, 1), &self.device)?;
+
+        let (point_t, full_t) = self
+            .model
+            .decode(&input_ts, &input_padding, &freq, horizon)?;
+
+        let mut out = Vec::with_capacity(b);
+        for row in 0..b {
+            let point: Vec<f32> = point_t.i(row)?.to_vec1()?;
+            let full: Vec<Vec<f32>> = full_t.i(row)?.to_vec2()?;
+            let quantiles: Vec<[f32; NUM_QUANTILES]> = full
+                .iter()
+                .map(|r| {
+                    let mut q = [0f32; NUM_QUANTILES];
+                    for (j, slot) in q.iter_mut().enumerate() {
+                        *slot = r.get(j + 1).copied().unwrap_or(r[0]);
+                    }
+                    q
+                })
+                .collect();
+            out.push(Forecast { point, quantiles });
+        }
+        Ok(out)
+    }
+
     /// PRUNE/CONTINUE decision for a partial optimization curve (lower = better),
     /// forecasting toward `target_iters` total against a viability `threshold`.
     /// Thin pass-through to [`timesfm::prune::decide_prune`] using this

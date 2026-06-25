@@ -116,4 +116,38 @@ mod real_model {
         assert!(!d2.stop && d2.decision.is_none());
         Ok(())
     }
+
+    #[test]
+    fn batched_matches_per_series() -> anyhow::Result<()> {
+        if skip() {
+            return Ok(());
+        }
+        let device = timesfm::select_device()?;
+        let f = Forecaster::load(WEIGHTS, device)?;
+        let batch: Vec<Vec<f32>> = (0..4)
+            .map(|s| {
+                (0..128)
+                    .map(|t| ((t as f32 + s as f32) / 9.0).sin() * 8.0 + 40.0)
+                    .collect()
+            })
+            .collect();
+        let batched = f.forecast_batch(&batch, 32, 0)?;
+        assert_eq!(batched.len(), 4);
+        for (i, series) in batch.iter().enumerate() {
+            let single = f.forecast(series, 32)?;
+            // CPU bit-exact; GPU within reduction-order noise (relative).
+            let scale = single.point.iter().fold(1e-6f32, |m, v| m.max(v.abs()));
+            let max_abs = single
+                .point
+                .iter()
+                .zip(batched[i].point.iter())
+                .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+            assert!(
+                max_abs / scale < 1e-3,
+                "row {i} batched vs single rel {:.3e}",
+                max_abs / scale
+            );
+        }
+        Ok(())
+    }
 }

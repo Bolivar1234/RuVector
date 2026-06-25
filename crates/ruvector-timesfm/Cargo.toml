@@ -26,6 +26,10 @@ required-features = ["candle"]
 name = "telemetry_anomaly"
 required-features = ["candle"]
 
+[[example]]
+name = "throughput"
+required-features = ["candle"]
+
 [features]
 default = []
 # Activates the numeric path (TimesFM candle inference). Off by default so a
