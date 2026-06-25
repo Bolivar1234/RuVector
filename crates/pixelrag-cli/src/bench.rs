@@ -305,12 +305,10 @@ pub fn run(args: BenchArgs) -> Result<BenchReport, BenchError> {
 
     // ── 7. Assemble report (latency / build / memory + honesty label) ─────────
     let latency = percentiles(&latencies_ms);
-    // Honest index footprint. The pipeline owns its `Box<dyn AnnIndex>` privately, so
-    // we reconstruct the backend's own contract (RuvectorHnswIndex::memory_bytes =
-    // n*dim*4 + n*size_of::<usize>()) from what we indexed. This equals the backend's
-    // reported footprint exactly for the M1 unquantized (f32-originals) path.
-    let index_bytes = (docs_indexed * SYNTHETIC_DIM * std::mem::size_of::<f32>()
-        + docs_indexed * std::mem::size_of::<usize>()) as u64;
+    // Honest index footprint, read straight from the live backend so it stays
+    // correct across backends (HNSW = n*dim*4 + n*usize; IVF-Flat additionally
+    // counts its k-means centroid table) instead of reconstructing one formula.
+    let index_bytes = pipeline.index_memory_bytes() as u64;
 
     let build = BuildMetrics {
         seconds_per_1k_docs: if docs_indexed == 0 {
@@ -541,6 +539,7 @@ fn percentiles(samples_ms: &[f64]) -> LatencyMetrics {
 fn backend_label(b: IndexBackend) -> String {
     match b {
         IndexBackend::Hnsw => "hnsw",
+        IndexBackend::IvfFlat => "ivf-flat",
         IndexBackend::IvfSq => "ivf-sq",
         IndexBackend::Turbovec => "turbovec",
     }

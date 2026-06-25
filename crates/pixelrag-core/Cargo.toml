@@ -12,6 +12,7 @@ description = "PixelRAG core orchestrator (render→embed→index→search) on t
 # milestone that needs them (IVF-SQ fallback, allowlist contract, FastScan).
 [dependencies]
 ruvector-core   = { path = "../ruvector-core" }    # HNSW — M1 primary index backend
+ruvector-rairs  = { path = "../ruvector-rairs" }   # IVF-Flat — M1 train-then-add IVF backend (ADR-193)
 pixelrag-encoder = { path = "../pixelrag-encoder" } # generic Embedder trait + Image type
 serde      = { workspace = true }                  # config + metadata (de)serialization
 serde_json = { workspace = true }                  # darwin genome parsing (Config::from_darwin_json)
@@ -20,7 +21,6 @@ serde_json = { workspace = true }                  # darwin genome parsing (Conf
 tempfile = "3"  # deterministic temp storage path for the synthetic-embedding plumbing tests
 
 # ── M1 (deferred) ────────────────────────────────────────────────────────────
-# ruvector-rairs    = { path = "../ruvector-rairs" }  # IVF-SQ — M1 fallback backend (ADR-193)
 # ruvector-rabitq   = { path = "../ruvector-rabitq" } # AnnIndex trait + Hadamard rotation reuse
 # ruvector-turbovec = { path = "../ruvector-turbovec", optional = true } # M2+ FastScan (ADR-254, if shipped)
 # bincode = "1"                                        # *.pixelrag persistence (M2)

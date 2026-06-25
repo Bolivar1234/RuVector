@@ -139,7 +139,7 @@ impl Cli {
          \x20 --report-out <path>     Report JSON (default: bench_output/pixelrag_bench.json).\n\
          \x20 --k <n>                 Retrieval cutoff (default 10).\n\
          \x20 --batch-size <n>        Override embedding batch size.\n\
-         \x20 --index-backend <name>  hnsw (default) | ivf-sq | turbovec.\n\
+         \x20 --index-backend <name>  hnsw (default) | ivf-flat | ivf-sq | turbovec.\n\
          \x20 --darwin-config <path>  Optional darwin genome JSON (read-only).\n\
          \n\
          HONESTY: the benchmark uses a DETERMINISTIC SYNTHETIC embedder on a TINY SUBSET\n\
@@ -248,6 +248,7 @@ fn parse_benchmark(args: &[String]) -> Result<bench::BenchArgs, UsageError> {
     let index_backend = match flag(args, "--index-backend") {
         Some(s) => Some(match s.to_ascii_lowercase().as_str() {
             "hnsw" => IndexBackend::Hnsw,
+            "ivfflat" | "ivf_flat" | "ivf-flat" => IndexBackend::IvfFlat,
             "ivfsq" | "ivf_sq" | "ivf-sq" => IndexBackend::IvfSq,
             "turbovec" => IndexBackend::Turbovec,
             other => {

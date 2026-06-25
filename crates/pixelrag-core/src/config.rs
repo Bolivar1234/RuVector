@@ -21,6 +21,10 @@ use crate::Result;
 pub enum IndexBackend {
     /// `ruvector-core` HNSW — M1 primary backend.
     Hnsw,
+    /// `ruvector-rairs` IVF-Flat — M1 train-then-add IVF backend (single
+    /// assignment, flat list scan). The genuine second backend the darwin
+    /// harness chooses between (`hnsw` vs `ivf-flat`).
+    IvfFlat,
     /// `ruvector-rairs` IVF-SQ — M1 fallback when HNSW memory exceeds budget (ADR-193).
     IvfSq,
     /// `ruvector-turbovec` multi-bit FastScan — M2+ optimization, only if ADR-254 ships.
@@ -98,6 +102,7 @@ impl Config {
                 .ok_or_else(|| Error::Config("index_backend must be a string".into()))?;
             out.index_backend = match s.to_ascii_lowercase().as_str() {
                 "hnsw" => IndexBackend::Hnsw,
+                "ivfflat" | "ivf_flat" | "ivf-flat" => IndexBackend::IvfFlat,
                 "ivfsq" | "ivf_sq" | "ivf-sq" => IndexBackend::IvfSq,
                 "turbovec" => IndexBackend::Turbovec,
                 other => return Err(Error::Config(format!("unknown index_backend '{other}'"))),

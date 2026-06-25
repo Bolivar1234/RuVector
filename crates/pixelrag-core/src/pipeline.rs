@@ -75,6 +75,16 @@ impl<E: Embedder> Pipeline<E> {
         &self.config
     }
 
+    /// Honest byte footprint reported by the live index backend.
+    ///
+    /// The HNSW path is `n*dim*4 + n*size_of::<usize>()`; the IVF path adds its
+    /// k-means centroid table. Callers (e.g. the bench memory metric) should use
+    /// this rather than reconstructing a backend-specific formula, so footprints
+    /// stay correct as backends differ.
+    pub fn index_memory_bytes(&self) -> usize {
+        self.index.memory_bytes()
+    }
+
     /// Ingest one already-rendered document (M1 path; render is bypassed).
     ///
     /// **M1**: tile `pages` via [`Tiler::tile_document`], batch-embed via
@@ -121,6 +131,11 @@ impl<E: Embedder> Pipeline<E> {
                 indexed += 1;
             }
         }
+        // Commit the batch. HNSW already inserted incrementally (no-op); IVF-style
+        // backends buffer during `add` and do their train-then-add build here.
+        // finalize() is idempotent, so calling it per ingest leaves the index
+        // reflecting every tile after the final call.
+        self.index.finalize()?;
         Ok(IngestReport { tiles: tiles.len(), indexed })
     }
 
