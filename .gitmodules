@@ -7,3 +7,6 @@
 [submodule "external/rvdna"]
 	path = external/rvdna
 	url = https://github.com/ruvnet/rvdna.git
+[submodule "external/rupixel"]
+	path = external/rupixel
+	url = https://github.com/ruvnet/rupixel.git
