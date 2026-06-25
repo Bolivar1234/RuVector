@@ -1,0 +1,140 @@
+//! The high-level [`Forecaster`] — load TimesFM weights once, forecast many.
+
+use std::path::Path;
+
+use candle_core::{DType, Device, IndexOp, Tensor};
+use timesfm::config::TimesfmConfig;
+use timesfm::model::PatchedTimeSeriesDecoder;
+use timesfm::prune::{decide_prune, PruneDecision};
+
+use crate::forecast_types::{Forecast, NUM_QUANTILES};
+use crate::{Error, Result};
+
+/// A loaded TimesFM 1.0 200M forecaster bound to a compute device.
+///
+/// Construct once (weight load + mmap is the expensive part), then call
+/// [`Forecaster::forecast`] repeatedly.
+pub struct Forecaster {
+    model: PatchedTimeSeriesDecoder,
+    device: Device,
+}
+
+impl Forecaster {
+    /// Load TimesFM 1.0 200M weights (a converted `safetensors` file) onto
+    /// `device`. Use [`timesfm::select_device`] to pick CPU/cuda/metal from the
+    /// `TIMESFM_DEVICE` env var.
+    pub fn load(weights: impl AsRef<Path>, device: Device) -> Result<Self> {
+        let cfg = TimesfmConfig::timesfm_1p0_200m();
+        Self::load_with_config(weights, cfg, device)
+    }
+
+    /// Load with an explicit [`TimesfmConfig`] (e.g. a test/tiny variant).
+    pub fn load_with_config(
+        weights: impl AsRef<Path>,
+        cfg: TimesfmConfig,
+        device: Device,
+    ) -> Result<Self> {
+        let path = weights.as_ref();
+        if !path.exists() {
+            return Err(Error::Invalid(format!(
+                "weights file not found: {}",
+                path.display()
+            )));
+        }
+        // SAFETY: from_mmaped_safetensors is unsafe because it mmaps a file the
+        // caller asserts is a valid safetensors blob; load() validates existence
+        // and candle validates the header/dtypes on read.
+        let vb = unsafe {
+            candle_nn::VarBuilder::from_mmaped_safetensors(
+                &[path.to_path_buf()],
+                DType::F32,
+                &device,
+            )?
+        };
+        let model = PatchedTimeSeriesDecoder::load(cfg, vb)?;
+        Ok(Self { model, device })
+    }
+
+    /// The device this forecaster runs on.
+    #[must_use]
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    /// The underlying model (for callers that need the raw decode API).
+    #[must_use]
+    pub fn model(&self) -> &PatchedTimeSeriesDecoder {
+        &self.model
+    }
+
+    /// Forecast `horizon` steps ahead of `series`, using the default (finest)
+    /// frequency bucket. Returns point + quantile bands.
+    pub fn forecast(&self, series: &[f32], horizon: usize) -> Result<Forecast> {
+        self.forecast_with_freq(series, horizon, 0)
+    }
+
+    /// Forecast `horizon` steps with an explicit frequency id (0 = high/fine,
+    /// 1 = medium, 2 = low — TimesFM's frequency buckets).
+    pub fn forecast_with_freq(
+        &self,
+        series: &[f32],
+        horizon: usize,
+        freq_id: u32,
+    ) -> Result<Forecast> {
+        if series.is_empty() {
+            return Err(Error::Invalid("series must be non-empty".into()));
+        }
+        if horizon == 0 {
+            return Err(Error::Invalid("horizon must be > 0".into()));
+        }
+
+        let k = series.len();
+        let input_ts = Tensor::from_vec(series.to_vec(), (1, k), &self.device)?;
+        let input_padding = Tensor::zeros((1, k), DType::F32, &self.device)?;
+        let freq = Tensor::from_vec(vec![freq_id], (1, 1), &self.device)?;
+
+        // (point [1, h], full [1, h, num_outputs]); channel 0 = mean, 1..=9 = p10..p90.
+        let (point_t, full_t) = self
+            .model
+            .decode(&input_ts, &input_padding, &freq, horizon)?;
+
+        let point: Vec<f32> = point_t.i(0)?.to_vec1()?;
+        let full: Vec<Vec<f32>> = full_t.i(0)?.to_vec2()?; // [h][num_outputs]
+
+        let quantiles: Vec<[f32; NUM_QUANTILES]> = full
+            .iter()
+            .map(|row| {
+                let mut q = [0f32; NUM_QUANTILES];
+                // row[0] is the mean; quantiles live at indices 1..=9.
+                for (j, slot) in q.iter_mut().enumerate() {
+                    *slot = row.get(j + 1).copied().unwrap_or(row[0]);
+                }
+                q
+            })
+            .collect();
+
+        Ok(Forecast { point, quantiles })
+    }
+
+    /// PRUNE/CONTINUE decision for a partial optimization curve (lower = better),
+    /// forecasting toward `target_iters` total against a viability `threshold`.
+    /// Thin pass-through to [`timesfm::prune::decide_prune`] using this
+    /// forecaster's model + device; see [`crate::sweep`] for the gated wrapper.
+    pub fn prune_decision(
+        &self,
+        curve: &[f32],
+        target_iters: usize,
+        threshold: f32,
+    ) -> Result<PruneDecision> {
+        if curve.is_empty() {
+            return Err(Error::Invalid("curve must be non-empty".into()));
+        }
+        Ok(decide_prune(
+            &self.model,
+            curve,
+            target_iters,
+            threshold,
+            &self.device,
+        )?)
+    }
+}
