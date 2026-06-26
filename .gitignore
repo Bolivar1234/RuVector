@@ -165,3 +165,6 @@ crates/ruvector-hailo/Cargo.lock
 crates/ruvector-hailo-cluster/Cargo.lock
 crates/hailort-sys/Cargo.lock
 crates/ruvector-mmwave/Cargo.lock
+
+# pixelrag embedding sidecar deps (run npm install)
+crates/pixelrag-cli/sidecar/node_modules/

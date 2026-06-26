@@ -244,8 +244,6 @@ members = [
     "crates/photonlayer-wasm",
     "crates/pixelrag-core",
     "crates/pixelrag-encoder",
-    "crates/pixelrag-render",
-    "crates/pixelrag-serve",
     "crates/pixelrag-cli",
 ]
 resolver = "2"
