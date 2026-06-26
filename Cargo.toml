@@ -20,7 +20,13 @@ exclude = ["external/ruqu", "external/rvdna", "examples/OSpipe", "examples/rvf",
     # ruos-thermal: Pi 5 thermal supervisor skeleton (ADR-174). Standalone
     # for now; joins workspace once daemon mode + Unix socket protocol
     # land in iters 92-97.
-    "crates/ruos-thermal"]
+    "crates/ruos-thermal",
+    # helix: standalone Personal Health Intelligence repo (own workspace);
+    # kept fully detached so it can be lifted out as its own ruvnet repo.
+    "helix", "helix/crates/helix-provenance", "helix/crates/helix-numeric",
+    "helix/crates/helix-evidence", "helix/crates/helix-escalation",
+    "helix/crates/helix-ontology", "helix/crates/helix-vault",
+    "helix/crates/helix-core"]
 members = [
     "crates/ruvector-temporal-coherence",
     "crates/ruvector-acorn",
