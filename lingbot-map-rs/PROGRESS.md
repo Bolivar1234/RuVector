@@ -51,11 +51,12 @@ cargo test
   `ruvector-core` `VectorDB` API; insert/retrieve; long-range recall test. ✅
 - [x] **P2 Tensor/config** (`lingbot-tensor`) — `ModelConfig`, safetensors
   header `WeightIndex` (header-only, no multi-GB load). candle behind feature.
-- [ ] **P3 Model** (`lingbot-model`) — Geometric Context Transformer in candle:
-  patch embed, attention block w/ anchor cross-attention, drift-correction head.
-  Synthetic-weight path + real safetensors path. Unit tests on shapes.
-- [ ] **P4 IO** (`lingbot-io`) — frame source (image crate / synthetic),
-  PNG export, MP4 muxing (streaming). Tests write a tiny PNG + MP4 to tmp.
+- [x] **P3 Model** (`lingbot-model`) — `SyntheticReconstructor` (pure-Rust,
+  wasm-safe, default) + candle `GeometricContextTransformer` (feature `candle`,
+  loads safetensors). Both compile; 6 default tests + candle shape test pass. ✅
+- [x] **P4 IO** (`lingbot-io`) — `FrameSink` trait, `PngSequenceSink`, streaming
+  `Mp4Sink` (openh264 → mp4 mux). MP4 round-trips through the reader as a valid
+  AVC track; PNG verified. 3 tests pass. ✅
 - [ ] **P5 Pipeline** (`lingbot-pipeline`) — streaming loop: frame → encode →
   retrieve_context(top_k) → attention → point cloud; candle⇄&[f32] bridge to
   `lingbot-memory`. Integration test over N synthetic frames.
@@ -75,9 +76,9 @@ cargo test
 - [x] ADR-0003 candle tensor backend & safetensors weight loading
 - [x] ADR-0004 Rendering (wgpu native + WebGPU/WASM) & GitHub Pages deploy
 - [x] ADR-0005 Streaming MP4 + PNG output pipeline
-- [ ] ADR-0006 Synthetic-fallback strategy & checkpoint provenance (write in P3)
+- [x] ADR-0006 Synthetic-fallback strategy & checkpoint provenance
 
 ## Next step
 
-→ **P3**: scaffold `lingbot-model` (candle) with the Geometric Context
-Transformer blocks and shape tests; add ADR-0006.
+→ **P5**: `lingbot-pipeline` — streaming loop wiring model + memory + io
+(candle⇄&[f32] bridge), integration test over N synthetic frames.

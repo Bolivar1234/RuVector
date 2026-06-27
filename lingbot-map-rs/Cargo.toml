@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/lingbot-memory",
     "crates/lingbot-tensor",
+    "crates/lingbot-model",
+    "crates/lingbot-io",
 ]
 
 # Crates added in later iterations (kept out of `members` until they exist so
