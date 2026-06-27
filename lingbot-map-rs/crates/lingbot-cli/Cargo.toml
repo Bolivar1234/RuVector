@@ -1,0 +1,21 @@
+[package]
+name = "lingbot-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Native demo CLI for the LingBot-Map Rust port: streaming reconstruction → PNG + MP4"
+
+[[bin]]
+name = "lingbot"
+path = "src/main.rs"
+
+[dependencies]
+lingbot-pipeline = { path = "../lingbot-pipeline", features = ["mp4"] }
+lingbot-model = { path = "../lingbot-model" }
+lingbot-io = { path = "../lingbot-io", features = ["mp4"] }
+lingbot-tensor = { path = "../lingbot-tensor" }
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }

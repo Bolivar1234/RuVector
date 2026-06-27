@@ -107,13 +107,11 @@ impl Reconstructor for SyntheticReconstructor {
         &self.config
     }
 
-    fn process_frame(
-        &mut self,
-        _frame_index: u64,
-        frame: &Frame,
-        anchors: &[KeyframeFeatures],
-    ) -> (KeyframeFeatures, PointCloud) {
-        let features = self.encode(frame);
+    fn encode(&self, frame: &Frame) -> KeyframeFeatures {
+        SyntheticReconstructor::encode(self, frame)
+    }
+
+    fn reconstruct(&self, frame: &Frame, anchors: &[KeyframeFeatures]) -> PointCloud {
         let correction = self.drift_correction(anchors);
 
         let w = frame.width as f32;
@@ -146,7 +144,7 @@ impl Reconstructor for SyntheticReconstructor {
             y += step;
         }
 
-        (features, PointCloud { points })
+        PointCloud { points }
     }
 }
 

@@ -1,0 +1,20 @@
+[package]
+name = "lingbot-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Streaming reconstruction pipeline: wires lingbot-model + lingbot-memory + lingbot-io"
+
+[dependencies]
+lingbot-model = { path = "../lingbot-model" }
+lingbot-memory = { path = "../lingbot-memory" }
+lingbot-io = { path = "../lingbot-io", default-features = false }
+anyhow.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+mp4 = ["lingbot-io/mp4"]

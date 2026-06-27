@@ -19,7 +19,7 @@
 //! `lingbot-memory`) is folded into reconstruction as a drift-correction term,
 //! mirroring how the Python original uses anchor context inside attention.
 
-use lingbot_tensor::ModelConfig;
+pub use lingbot_tensor::ModelConfig;
 
 mod synthetic;
 pub use synthetic::SyntheticReconstructor;
@@ -133,22 +133,31 @@ impl KeyframeFeatures {
 }
 
 /// Per-frame reconstruction interface shared by all backends.
+///
+/// Split into `encode` then `reconstruct` so the streaming pipeline can use the
+/// encoded features to retrieve anchor context from `lingbot-memory` *before*
+/// reconstructing (the order the Python original attends to anchor context).
 pub trait Reconstructor {
     /// The configuration in use.
     fn config(&self) -> &ModelConfig;
 
-    /// Process one streaming frame.
-    ///
-    /// `anchors` are the feature vectors of the top-K structurally similar past
-    /// keyframes retrieved from `lingbot-memory` (empty for the first frames).
-    /// They are used for drift correction. Returns this frame's keyframe
-    /// features (to be inserted into memory) and its 3D point cloud.
+    /// Encode a frame into its keyframe feature vector (used for memory
+    /// retrieval and stored as the keyframe).
+    fn encode(&self, frame: &Frame) -> KeyframeFeatures;
+
+    /// Reconstruct the 3D point cloud for a frame, given the feature vectors of
+    /// the retrieved anchor keyframes (empty for the first frames).
+    fn reconstruct(&self, frame: &Frame, anchors: &[KeyframeFeatures]) -> PointCloud;
+
+    /// Convenience: encode + reconstruct in one call.
     fn process_frame(
         &mut self,
-        frame_index: u64,
+        _frame_index: u64,
         frame: &Frame,
         anchors: &[KeyframeFeatures],
-    ) -> (KeyframeFeatures, PointCloud);
+    ) -> (KeyframeFeatures, PointCloud) {
+        (self.encode(frame), self.reconstruct(frame, anchors))
+    }
 }
 
 #[cfg(test)]

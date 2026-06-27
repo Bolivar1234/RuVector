@@ -5,6 +5,8 @@ members = [
     "crates/lingbot-tensor",
     "crates/lingbot-model",
     "crates/lingbot-io",
+    "crates/lingbot-pipeline",
+    "crates/lingbot-cli",
 ]
 
 # Crates added in later iterations (kept out of `members` until they exist so

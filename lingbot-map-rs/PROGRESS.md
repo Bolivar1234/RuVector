@@ -57,11 +57,12 @@ cargo test
 - [x] **P4 IO** (`lingbot-io`) — `FrameSink` trait, `PngSequenceSink`, streaming
   `Mp4Sink` (openh264 → mp4 mux). MP4 round-trips through the reader as a valid
   AVC track; PNG verified. 3 tests pass. ✅
-- [ ] **P5 Pipeline** (`lingbot-pipeline`) — streaming loop: frame → encode →
-  retrieve_context(top_k) → attention → point cloud; candle⇄&[f32] bridge to
-  `lingbot-memory`. Integration test over N synthetic frames.
-- [ ] **P6 Native demo** (`lingbot-cli`) — wgpu point-cloud viewer + headless
-  render-to-PNG/MP4. `--frames N --out out.mp4`.
+- [x] **P5 Pipeline** (`lingbot-pipeline`) — `StreamingReconstructor` (encode →
+  retrieve_context(top_k) → reconstruct → store), CPU orbit `SoftwareRenderer`,
+  deterministic `scene` source. 5 tests pass; anchors retrieved across stream. ✅
+- [x] **P6 Native demo** (`lingbot-cli`, bin `lingbot`) — `render` (→ PNG + MP4)
+  and `inspect` (checkpoint header) commands. Verified: produced a 480x360 MP4
+  + 48 PNGs + final still showing real 3D parallax. ✅
 - [ ] **P7 Web demo** (`lingbot-wasm` + `demo/`) — WebGPU renderer, wasm-bindgen
   bindings, static site. Builds with `wasm-pack` / `cargo build --target wasm32`.
 - [ ] **P8 Deploy** — `.github/workflows/lingbot-pages.yml` (workflow_dispatch +
@@ -80,5 +81,5 @@ cargo test
 
 ## Next step
 
-→ **P5**: `lingbot-pipeline` — streaming loop wiring model + memory + io
-(candle⇄&[f32] bridge), integration test over N synthetic frames.
+→ **P7**: `lingbot-wasm` + `demo/` — WebGPU point-cloud renderer + wasm-bindgen
+bindings exposing the pipeline; static site for GitHub Pages.
