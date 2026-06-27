@@ -69,7 +69,9 @@ impl Attention {
         let k = reshape(&k)?;
         let v = reshape(&v)?;
 
-        let att = q.matmul(&k.transpose(1, 2)?.contiguous()?)?.affine(scale, 0.0)?;
+        let att = q
+            .matmul(&k.transpose(1, 2)?.contiguous()?)?
+            .affine(scale, 0.0)?;
         let att = candle_nn::ops::softmax(&att, D::Minus1)?;
         let out = att.matmul(&v)?; // [heads, seq, hd]
         let out = out.transpose(0, 1)?.reshape((seq, dim))?;
@@ -119,7 +121,11 @@ impl GeometricContextTransformer {
             blocks.push(Block::new(&cfg, vb.pp(format!("blocks.{i}")))?);
         }
         let norm = layer_norm(cfg.hidden_dim, 1e-5, vb.pp("norm"))?;
-        let feature_head = linear(cfg.hidden_dim, cfg.keyframe_feature_dim, vb.pp("feature_head"))?;
+        let feature_head = linear(
+            cfg.hidden_dim,
+            cfg.keyframe_feature_dim,
+            vb.pp("feature_head"),
+        )?;
         Ok(Self {
             patch_embed,
             blocks,
@@ -176,7 +182,10 @@ impl GeometricContextTransformer {
         x = self.norm.forward(&x)?;
         // Mean-pool tokens → [hidden].
         let pooled = x.mean(0)?;
-        let mut feat = self.feature_head.forward(&pooled.unsqueeze(0)?)?.squeeze(0)?;
+        let mut feat = self
+            .feature_head
+            .forward(&pooled.unsqueeze(0)?)?
+            .squeeze(0)?;
         if let Some(anchors) = anchor_tokens {
             let bias = anchors.mean(0)?.affine(0.25, 0.0)?;
             feat = (feat + bias)?;

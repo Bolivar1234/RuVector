@@ -30,9 +30,7 @@
 //! so it builds fast and stays testable without a tensor backend. The
 //! `lingbot-pipeline` crate owns the `candle_core::Tensor` <-> `&[f32]` bridge.
 
-use ruvector_core::types::{
-    DbOptions, DistanceMetric, HnswConfig, SearchQuery, VectorEntry,
-};
+use ruvector_core::types::{DbOptions, DistanceMetric, HnswConfig, SearchQuery, VectorEntry};
 use ruvector_core::vector_db::VectorDB;
 
 /// Errors surfaced by the streaming memory layer.
@@ -210,13 +208,10 @@ impl StreamingMemory {
         Ok(results
             .into_iter()
             .filter_map(|r| {
-                r.id
-                    .parse::<u64>()
-                    .ok()
-                    .map(|frame_id| KeyframeMatch {
-                        frame_id,
-                        score: r.score,
-                    })
+                r.id.parse::<u64>().ok().map(|frame_id| KeyframeMatch {
+                    frame_id,
+                    score: r.score,
+                })
             })
             .collect())
     }

@@ -63,12 +63,14 @@ cargo test
 - [x] **P6 Native demo** (`lingbot-cli`, bin `lingbot`) — `render` (→ PNG + MP4)
   and `inspect` (checkpoint header) commands. Verified: produced a 480x360 MP4
   + 48 PNGs + final still showing real 3D parallax. ✅
-- [ ] **P7 Web demo** (`lingbot-wasm` + `demo/`) — WebGPU renderer, wasm-bindgen
-  bindings, static site. Builds with `wasm-pack` / `cargo build --target wasm32`.
-- [ ] **P8 Deploy** — `.github/workflows/lingbot-pages.yml` (workflow_dispatch +
-  path filter `lingbot-map-rs/**`) publishing `demo/` to GitHub Pages.
-- [ ] **P9 Polish** — top-level README with arch diagram, ADR index, CI for the
-  workspace (`build-lingbot.yml`), final `cargo test` + `cargo clippy` green.
+- [x] **P7 Web demo** (`lingbot-wasm` + `demo/`) — wasm-bindgen `LingbotDemo`
+  (portable brute-force anchor retrieval), WebGPU renderer + 2D fallback, static
+  site. Compiles to wasm32 (500 KB). ✅
+- [x] **P8 Deploy** — `.github/workflows/lingbot-pages.yml` (workflow_dispatch +
+  path filter) builds wasm-pack bundle and publishes `demo/` to GitHub Pages. ✅
+- [x] **P9 Polish** — README + demo README, ADR index, workspace CI
+  (`build-lingbot.yml`: fmt + clippy -D warnings + test + candle + wasm). Final
+  `cargo fmt`/`clippy -D warnings`/`test` all green (25 native + 8 candle). ✅
 
 ## ADRs (in `docs/adr/`)
 
@@ -79,7 +81,12 @@ cargo test
 - [x] ADR-0005 Streaming MP4 + PNG output pipeline
 - [x] ADR-0006 Synthetic-fallback strategy & checkpoint provenance
 
-## Next step
+## Status: COMPLETE
 
-→ **P7**: `lingbot-wasm` + `demo/` — WebGPU point-cloud renderer + wasm-bindgen
-bindings exposing the pipeline; static site for GitHub Pages.
+All phases P0–P9 done; all ADRs written. Workspace builds and tests green
+(native + candle + wasm32). The `/loop` stop condition is met — the recurring
+cron job (073057b0) should be deleted.
+
+Possible follow-ups (not in original scope): validate the candle backend against
+the real 4.63 GB checkpoint; in-browser HNSW via a wasm `ruvector` build; real
+video input (camera/image-sequence frame source) replacing the synthetic scene.

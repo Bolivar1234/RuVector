@@ -5,7 +5,7 @@
 //! a real video file. Replace with a real frame source (camera / image
 //! sequence) to drive the pipeline on actual footage.
 
-use lingbot_model::Frame;
+use crate::Frame;
 
 /// Generate frame `index` of a deterministic synthetic scene.
 pub fn synthetic_frame(index: u64, width: usize, height: usize) -> Frame {
@@ -61,11 +61,7 @@ pub fn synthetic_frame(index: u64, width: usize, height: usize) -> Frame {
 }
 
 /// An iterator over `count` synthetic frames.
-pub fn synthetic_stream(
-    count: u64,
-    width: usize,
-    height: usize,
-) -> impl Iterator<Item = Frame> {
+pub fn synthetic_stream(count: u64, width: usize, height: usize) -> impl Iterator<Item = Frame> {
     (0..count).map(move |i| synthetic_frame(i, width, height))
 }
 

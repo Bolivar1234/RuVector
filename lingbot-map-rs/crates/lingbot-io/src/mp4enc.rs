@@ -98,8 +98,7 @@ impl FrameSink for Mp4Sink {
         self.rgb_scratch.reserve(px * 3);
         for p in 0..px {
             let i = p * 4;
-            self.rgb_scratch
-                .extend_from_slice(&rgba[i..i + 3]);
+            self.rgb_scratch.extend_from_slice(&rgba[i..i + 3]);
         }
 
         let yuv = YUVBuffer::from_rgb_source(RgbSliceU8::new(&self.rgb_scratch, (width, height)));

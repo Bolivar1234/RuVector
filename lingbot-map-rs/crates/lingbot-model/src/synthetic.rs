@@ -45,7 +45,7 @@ impl SyntheticReconstructor {
         let rows = dim.div_ceil(cols);
         let mut feats = vec![0.0f32; dim];
 
-        for cell in 0..dim {
+        for (cell, feat) in feats.iter_mut().enumerate() {
             let cx = cell % cols;
             let cy = cell / cols;
             // Cell pixel range.
@@ -67,7 +67,7 @@ impl SyntheticReconstructor {
                 }
                 yy += 1;
             }
-            feats[cell] = if n > 0 { sum / n as f32 } else { 0.0 };
+            *feat = if n > 0 { sum / n as f32 } else { 0.0 };
         }
 
         // L2 normalize (unit vector → cosine similarity is well-behaved).

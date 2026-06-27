@@ -7,9 +7,11 @@ pure-Rust [candle](https://github.com/huggingface/candle) tensor backend and an
 HNSW trajectory-memory layer backed by
 [`ruvector-core`](../crates/ruvector-core).
 
-> **Status:** active port (see [`PROGRESS.md`](./PROGRESS.md)). The streaming
-> memory layer, model config, and safetensors loading are implemented and
-> tested; the model, IO, pipeline, and demo crates are landing iteratively.
+> **Status:** complete (see [`PROGRESS.md`](./PROGRESS.md)). All crates, ADRs,
+> the native CLI, and the WebGPU/WASM demo are implemented and tested (native +
+> candle + wasm32). The synthetic backend (ADR-0006) lets the whole pipeline run
+> end-to-end without the 4.63 GB checkpoint; the real-weights `candle` backend
+> and safetensors loading are wired and compile.
 
 ## Why a Rust port?
 
@@ -29,13 +31,31 @@ solving long-range drift without a forgetful sliding window. See
 
 | Crate | Purpose |
 |---|---|
-| [`lingbot-memory`](./crates/lingbot-memory) | Streaming trajectory memory over `ruvector-core` (KV-cache replacement) |
+| [`lingbot-memory`](./crates/lingbot-memory) | Streaming trajectory memory over `ruvector-core` HNSW (KV-cache replacement) |
 | [`lingbot-tensor`](./crates/lingbot-tensor) | `ModelConfig` + safetensors header indexing + candle weight loading |
-| `lingbot-model` *(landing)* | Geometric Context Transformer (candle) |
-| `lingbot-io` *(landing)* | Frame sources, PNG export, streaming MP4 |
-| `lingbot-pipeline` *(landing)* | Streaming inference orchestration |
-| `lingbot-cli` *(landing)* | Native wgpu demo + headless render |
-| `lingbot-wasm` *(landing)* | WebGPU/WASM browser demo |
+| [`lingbot-model`](./crates/lingbot-model) | `SyntheticReconstructor` (pure-Rust) + candle `GeometricContextTransformer` |
+| [`lingbot-io`](./crates/lingbot-io) | `FrameSink`, PNG export, streaming H.264/MP4 (`openh264` + `mp4`) |
+| [`lingbot-pipeline`](./crates/lingbot-pipeline) | Streaming loop + CPU orbit renderer + synthetic scene |
+| [`lingbot-cli`](./crates/lingbot-cli) | Native demo (`lingbot render` → PNG + MP4, `lingbot inspect`) |
+| [`lingbot-wasm`](./crates/lingbot-wasm) | WebGPU/WASM browser demo bindings |
+
+## Run the native demo
+
+```bash
+cargo run -p lingbot-cli --release -- render \
+  --frames 60 --width 640 --height 480 --fps 20 --top-k 16 \
+  --out out.mp4 --png-dir frames
+# validate a checkpoint header (no multi-GB load):
+cargo run -p lingbot-cli -- inspect --weights model.safetensors
+```
+
+Produces a streaming H.264 **MP4** (orbiting camera over the reconstructed point
+cloud), a **PNG** sequence, and a final still.
+
+## Run the web demo
+
+See [`demo/README.md`](./demo/README.md). Built and deployed to GitHub Pages by
+`.github/workflows/lingbot-pages.yml`.
 
 ## Build & test
 

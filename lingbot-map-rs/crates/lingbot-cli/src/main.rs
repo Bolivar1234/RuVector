@@ -18,7 +18,11 @@ use lingbot_tensor::WeightIndex;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "lingbot", version, about = "LingBot-Map Rust port — streaming 3D reconstruction demo")]
+#[command(
+    name = "lingbot",
+    version,
+    about = "LingBot-Map Rust port — streaming 3D reconstruction demo"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -93,7 +97,9 @@ fn render(a: RenderArgs) -> Result<()> {
                 idx.total_params(),
                 idx.total_params() as f64 * 4.0 / 1e9
             ),
-            Err(e) => eprintln!("warning: could not read checkpoint ({e}); using synthetic backend"),
+            Err(e) => {
+                eprintln!("warning: could not read checkpoint ({e}); using synthetic backend")
+            }
         }
         println!("note: reconstruction uses the synthetic backend (see ADR-0006).");
     }
@@ -104,8 +110,8 @@ fn render(a: RenderArgs) -> Result<()> {
         ..Default::default()
     };
     let model = SyntheticReconstructor::new(cfg).with_sample_step(4);
-    let mut pipeline = StreamingReconstructor::new(model, a.top_k)
-        .context("failed to init pipeline")?;
+    let mut pipeline =
+        StreamingReconstructor::new(model, a.top_k).context("failed to init pipeline")?;
     let renderer = SoftwareRenderer::new(a.width, a.height);
 
     // Build the sink fan-out: MP4 always, PNG sequence if requested.
@@ -167,7 +173,10 @@ fn inspect(a: InspectArgs) -> Result<()> {
     println!("checkpoint: {}", a.weights.display());
     println!("  tensors: {}", idx.tensors.len());
     println!("  params:  {}", idx.total_params());
-    println!("  approx:  {:.2} GB (f32-equivalent)", idx.total_params() as f64 * 4.0 / 1e9);
+    println!(
+        "  approx:  {:.2} GB (f32-equivalent)",
+        idx.total_params() as f64 * 4.0 / 1e9
+    );
     // Show a few tensors.
     for (name, info) in idx.tensors.iter().take(8) {
         println!("    {name}: {:?} {}", info.shape, info.dtype);

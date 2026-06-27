@@ -17,8 +17,8 @@
 //! regardless of how far back they occurred.
 
 pub mod render;
-pub mod scene;
 
+pub use lingbot_model::scene;
 pub use render::SoftwareRenderer;
 
 use lingbot_memory::{StreamingMemory, StreamingMemoryConfig};

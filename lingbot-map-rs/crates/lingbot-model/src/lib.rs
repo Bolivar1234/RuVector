@@ -24,6 +24,8 @@ pub use lingbot_tensor::ModelConfig;
 mod synthetic;
 pub use synthetic::SyntheticReconstructor;
 
+pub mod scene;
+
 #[cfg(feature = "candle")]
 pub mod transformer;
 
@@ -41,7 +43,11 @@ pub struct Frame {
 impl Frame {
     /// Construct, validating the buffer length.
     pub fn new(width: usize, height: usize, pixels: Vec<u8>) -> Self {
-        assert_eq!(pixels.len(), width * height * 4, "RGBA buffer size mismatch");
+        assert_eq!(
+            pixels.len(),
+            width * height * 4,
+            "RGBA buffer size mismatch"
+        );
         Self {
             width,
             height,

@@ -5,4 +5,5 @@
 *.png
 !demo/assets/*.png
 checkpoints/
+demo/pkg/
 .DS_Store
