@@ -368,14 +368,26 @@ impl VectorIndex for HnswIndex {
         // Update next_idx
         inner.next_idx += entries.len();
 
-        // Use hnsw_rs parallel insert (rayon-based) for batch builds.
-        // hnsw_rs::Hnsw is Sync (Arc<RwLock<...>> internals), so this is
-        // correct while we hold the outer write guard on HnswInner.
-        let datas: Vec<(&[f32], usize)> = data_with_ids
-            .iter()
-            .map(|(_id, idx, vector)| (vector.as_slice(), *idx))
-            .collect();
-        inner.hnsw.parallel_insert_slice(&datas);
+        // For large batches (>=PARALLEL_THRESHOLD), use hnsw_rs parallel
+        // insert (rayon-based) to cut build time.  Below this threshold,
+        // sequential insert maintains better graph connectivity — parallel
+        // workers can miss each other's in-flight inserts, producing fewer
+        // optimal neighbors and increasing search latency on small indexes.
+        //
+        // Rule of thumb from hnsw_rs: parallel is efficient only when
+        // n_inserts >= 1000 * num_threads.  We conservatively gate at 10 K.
+        const PARALLEL_THRESHOLD: usize = 10_000;
+        if data_with_ids.len() >= PARALLEL_THRESHOLD {
+            let datas: Vec<(&[f32], usize)> = data_with_ids
+                .iter()
+                .map(|(_id, idx, vector)| (vector.as_slice(), *idx))
+                .collect();
+            inner.hnsw.parallel_insert_slice(&datas);
+        } else {
+            for (_id, idx, vector) in &data_with_ids {
+                inner.hnsw.insert_data(vector, *idx);
+            }
+        }
 
         // Store mappings
         for (id, idx, vector) in data_with_ids {
