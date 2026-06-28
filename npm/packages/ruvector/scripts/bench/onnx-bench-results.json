@@ -114,5 +114,26 @@
     "target_eps": 80,
     "target_hit": false,
     "ts": "2026-05-30T21:44:18.994Z"
+  },
+  {
+    "iter": 5,
+    "label": "0.2.28-postfix-531",
+    "node": "v22.22.2",
+    "n": 64,
+    "p50_ms": 190.5102,
+    "p95_ms": 191.7792,
+    "mean_ms": 190.503,
+    "batch32_throughput_eps": 5.28,
+    "min_cosine_vs_baseline": 1,
+    "stats": {
+      "ready": true,
+      "dimension": 384,
+      "model": "all-MiniLM-L6-v2",
+      "simd": true,
+      "parallel": false,
+      "parallelWorkers": 0,
+      "parallelThreshold": 4
+    },
+    "ts": "2026-06-03T16:31:54.525Z"
   }
 ]
