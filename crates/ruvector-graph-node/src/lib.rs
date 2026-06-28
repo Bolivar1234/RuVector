@@ -17,6 +17,7 @@ use ruvector_graph::cypher::{parse_cypher, Statement};
 use ruvector_graph::node::NodeBuilder;
 use ruvector_graph::storage::GraphStorage;
 use ruvector_graph::GraphDB;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 mod streaming;
@@ -44,6 +45,56 @@ pub struct GraphDatabase {
     storage: Option<Arc<RwLock<GraphStorage>>>,
     /// Path to storage file (if persisted)
     storage_path: Option<String>,
+}
+
+/// Register a node into BOTH backing indexes so they stay consistent:
+///   1. the hypergraph adjacency / vector index (used by `kHopNeighbors`,
+///      `stats`, and `searchHyperedges`), and
+///   2. the property graph + label index (used by the Cypher
+///      `MATCH (n:Label) RETURN n` label scan).
+///
+/// This is the single source of truth shared by `create_node` and
+/// `batch_insert`. Previously `batch_insert` only populated the hypergraph,
+/// so bulk-loaded nodes were counted in `stats()` and traversable by
+/// `kHopNeighbors` but invisible to the label-scoped Cypher scan.
+fn register_node(
+    hg: &mut CoreHypergraphIndex,
+    gdb: &mut GraphDB,
+    storage: Option<&Arc<RwLock<GraphStorage>>>,
+    id: String,
+    embedding: Vec<f32>,
+    labels: Option<Vec<String>>,
+    properties: Option<HashMap<String, String>>,
+) -> Result<()> {
+    // 1. Adjacency / vector index (kHop, stats, hyperedge search).
+    hg.add_entity(id.clone(), embedding);
+
+    // 2. Property graph + label index (Cypher label scan).
+    let mut builder = NodeBuilder::new().id(&id);
+    if let Some(node_labels) = labels {
+        for label in node_labels {
+            builder = builder.label(&label);
+        }
+    }
+    if let Some(props) = properties {
+        for (key, value) in props {
+            builder = builder.property(&key, value);
+        }
+    }
+    let graph_node = builder.build();
+
+    // Persist to storage if enabled (mirrors create_node behaviour).
+    if let Some(storage_arc) = storage {
+        let storage_guard = storage_arc.write().expect("Storage RwLock poisoned");
+        storage_guard
+            .insert_node(&graph_node)
+            .map_err(|e| Error::from_reason(format!("Failed to persist node: {}", e)))?;
+    }
+
+    gdb.create_node(graph_node)
+        .map_err(|e| Error::from_reason(format!("Failed to create node: {}", e)))?;
+
+    Ok(())
 }
 
 #[napi]
@@ -145,40 +196,18 @@ impl GraphDatabase {
         let labels = node.labels.clone();
 
         tokio::task::spawn_blocking(move || {
-            // Add to hypergraph index
             let mut hg = hypergraph.write().expect("RwLock poisoned");
-            hg.add_entity(id.clone(), embedding);
-
-            // Add to property graph
             let mut gdb = graph_db.write().expect("RwLock poisoned");
-            let mut builder = NodeBuilder::new().id(&id);
 
-            // Add labels if provided
-            if let Some(node_labels) = labels {
-                for label in node_labels {
-                    builder = builder.label(&label);
-                }
-            }
-
-            // Add properties if provided
-            if let Some(props) = properties {
-                for (key, value) in props {
-                    builder = builder.property(&key, value);
-                }
-            }
-
-            let graph_node = builder.build();
-
-            // Persist to storage if enabled
-            if let Some(ref storage_arc) = storage {
-                let storage_guard = storage_arc.write().expect("Storage RwLock poisoned");
-                storage_guard
-                    .insert_node(&graph_node)
-                    .map_err(|e| Error::from_reason(format!("Failed to persist node: {}", e)))?;
-            }
-
-            gdb.create_node(graph_node)
-                .map_err(|e| Error::from_reason(format!("Failed to create node: {}", e)))?;
+            register_node(
+                &mut hg,
+                &mut gdb,
+                storage.as_ref(),
+                id.clone(),
+                embedding,
+                labels,
+                properties,
+            )?;
 
             Ok::<String, Error>(id)
         })
@@ -482,18 +511,32 @@ impl GraphDatabase {
     #[napi]
     pub async fn batch_insert(&self, batch: JsBatchInsert) -> Result<JsBatchResult> {
         let hypergraph = self.hypergraph.clone();
+        let graph_db = self.graph_db.clone();
+        let storage = self.storage.clone();
         let nodes = batch.nodes;
         let edges = batch.edges;
 
         tokio::task::spawn_blocking(move || {
             let mut hg = hypergraph.write().expect("RwLock poisoned");
+            let mut gdb = graph_db.write().expect("RwLock poisoned");
             let mut node_ids = Vec::new();
             let mut edge_ids = Vec::new();
 
-            // Insert nodes
+            // Insert nodes into BOTH the hypergraph index and the property
+            // graph + label index (so bulk-loaded nodes are also visible to
+            // the Cypher `MATCH (n:Label)` scan, not just kHop/stats).
             for node in nodes {
-                hg.add_entity(node.id.clone(), node.embedding.to_vec());
-                node_ids.push(node.id);
+                let id = node.id.clone();
+                register_node(
+                    &mut hg,
+                    &mut gdb,
+                    storage.as_ref(),
+                    id.clone(),
+                    node.embedding.to_vec(),
+                    node.labels,
+                    node.properties,
+                )?;
+                node_ids.push(id);
             }
 
             // Insert edges
@@ -684,4 +727,74 @@ pub fn version() -> String {
 #[napi]
 pub fn hello() -> String {
     "Hello from RuVector Graph Node.js bindings!".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the `batchInsert` ↔ label-index consistency bug.
+    ///
+    /// Both `create_node` and `batch_insert` funnel through `register_node`.
+    /// This test drives `register_node` directly (the same code path the batch
+    /// insert uses) and asserts that the resulting node is consistently visible
+    /// through all three read surfaces:
+    ///   1. `get_nodes_by_label` — the Cypher `MATCH (n:Label)` label scan,
+    ///   2. `k_hop_neighbors`    — undirected adjacency traversal,
+    ///   3. `stats`              — entity counts.
+    ///
+    /// Before the fix the batch path skipped (1), so this would report 0 nodes
+    /// for the label scan while (2) and (3) saw the nodes.
+    #[test]
+    fn batch_inserted_nodes_are_visible_to_label_scan_khop_and_stats() {
+        let mut hg = CoreHypergraphIndex::new(DistanceMetric::Cosine);
+        let mut gdb = GraphDB::new();
+
+        let n = 5usize;
+        // Insert N labeled nodes via the shared registration path.
+        for i in 0..n {
+            register_node(
+                &mut hg,
+                &mut gdb,
+                None,
+                format!("p{i}"),
+                vec![i as f32, i as f32, i as f32, i as f32],
+                Some(vec!["Person".to_string()]),
+                Some(HashMap::from([("name".to_string(), format!("name{i}"))])),
+            )
+            .expect("register_node should succeed");
+        }
+
+        // Chain edges p0->p1->...->p{n-1} so kHop has something to traverse.
+        for i in 0..(n - 1) {
+            let edge = CoreHyperedge::new(
+                vec![format!("p{i}"), format!("p{}", i + 1)],
+                "knows".to_string(),
+                vec![0.0, 0.0, 0.0, 1.0],
+                1.0,
+            );
+            hg.add_hyperedge(edge).expect("add_hyperedge should succeed");
+        }
+
+        // 1. Label scan (the bug): every batch-inserted node must appear.
+        let by_label = gdb.get_nodes_by_label("Person");
+        assert_eq!(
+            by_label.len(),
+            n,
+            "label-scoped MATCH must see all {n} batch-inserted nodes (regression: was 0)"
+        );
+
+        // 2. kHop adjacency: p0's 2-hop ball includes itself, p1 and p2.
+        let neighbors = hg.k_hop_neighbors("p0".to_string(), 2);
+        assert!(neighbors.contains("p0"), "kHop ball includes the start node");
+        assert!(neighbors.contains("p1"), "kHop ball includes 1-hop neighbor");
+        assert!(neighbors.contains("p2"), "kHop ball includes 2-hop neighbor");
+
+        // 3. stats entity count stays consistent with the above.
+        let stats = hg.stats();
+        assert_eq!(
+            stats.total_entities, n,
+            "stats() entity count must match the inserted node count"
+        );
+    }
 }
