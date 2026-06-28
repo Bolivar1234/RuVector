@@ -773,7 +773,8 @@ mod tests {
                 vec![0.0, 0.0, 0.0, 1.0],
                 1.0,
             );
-            hg.add_hyperedge(edge).expect("add_hyperedge should succeed");
+            hg.add_hyperedge(edge)
+                .expect("add_hyperedge should succeed");
         }
 
         // 1. Label scan (the bug): every batch-inserted node must appear.
@@ -786,9 +787,18 @@ mod tests {
 
         // 2. kHop adjacency: p0's 2-hop ball includes itself, p1 and p2.
         let neighbors = hg.k_hop_neighbors("p0".to_string(), 2);
-        assert!(neighbors.contains("p0"), "kHop ball includes the start node");
-        assert!(neighbors.contains("p1"), "kHop ball includes 1-hop neighbor");
-        assert!(neighbors.contains("p2"), "kHop ball includes 2-hop neighbor");
+        assert!(
+            neighbors.contains("p0"),
+            "kHop ball includes the start node"
+        );
+        assert!(
+            neighbors.contains("p1"),
+            "kHop ball includes 1-hop neighbor"
+        );
+        assert!(
+            neighbors.contains("p2"),
+            "kHop ball includes 2-hop neighbor"
+        );
 
         // 3. stats entity count stays consistent with the above.
         let stats = hg.stats();
