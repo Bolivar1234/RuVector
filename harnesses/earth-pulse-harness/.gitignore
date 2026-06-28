@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.metaharness/work/
+*.log
+.DS_Store
+# Real observation data is large and provenance-tracked elsewhere; keep only READMEs/fixtures.
+data/**/*.mseed
+data/**/*.sac
+data/**/*.h5
+data/**/*.nc
+data/**/*.parquet
