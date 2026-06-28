@@ -32,8 +32,7 @@ use ruvector_core::{
 
 /// Read an fvecs file: [d:u32, f[0]:f32, ..., f[d-1]:f32] × N
 fn read_fvecs(path: &Path, max_vecs: usize) -> anyhow::Result<(Vec<Vec<f32>>, usize)> {
-    let f = File::open(path)
-        .map_err(|e| anyhow::anyhow!("Cannot open {}: {e}", path.display()))?;
+    let f = File::open(path).map_err(|e| anyhow::anyhow!("Cannot open {}: {e}", path.display()))?;
     let mut r = BufReader::new(f);
 
     let mut vecs: Vec<Vec<f32>> = Vec::new();
@@ -55,9 +54,8 @@ fn read_fvecs(path: &Path, max_vecs: usize) -> anyhow::Result<(Vec<Vec<f32>>, us
             ));
         }
         let mut v = vec![0f32; d];
-        let byte_slice = unsafe {
-            std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, d * 4)
-        };
+        let byte_slice =
+            unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, d * 4) };
         r.read_exact(byte_slice)?;
         vecs.push(v);
         if vecs.len() >= max_vecs {
@@ -69,8 +67,7 @@ fn read_fvecs(path: &Path, max_vecs: usize) -> anyhow::Result<(Vec<Vec<f32>>, us
 
 /// Read an ivecs file: [d:u32, i[0]:i32, ..., i[d-1]:i32] × N
 fn read_ivecs(path: &Path, max_vecs: usize) -> anyhow::Result<Vec<Vec<u64>>> {
-    let f = File::open(path)
-        .map_err(|e| anyhow::anyhow!("Cannot open {}: {e}", path.display()))?;
+    let f = File::open(path).map_err(|e| anyhow::anyhow!("Cannot open {}: {e}", path.display()))?;
     let mut r = BufReader::new(f);
 
     let mut vecs: Vec<Vec<u64>> = Vec::new();
@@ -212,10 +209,7 @@ fn main() -> anyhow::Result<()> {
     // ── Load data ──────────────────────────────────────────────────────────
     print!("Loading corpus... ");
     let t0 = Instant::now();
-    let (corpus, dims) = read_fvecs(
-        &args.data_dir.join("sift_base.fvecs"),
-        args.corpus_limit,
-    )?;
+    let (corpus, dims) = read_fvecs(&args.data_dir.join("sift_base.fvecs"), args.corpus_limit)?;
     println!(
         "{} vectors × {}d  ({:.1}s)",
         corpus.len(),
@@ -225,10 +219,7 @@ fn main() -> anyhow::Result<()> {
 
     print!("Loading queries... ");
     let t1 = Instant::now();
-    let (queries, qdims) = read_fvecs(
-        &args.data_dir.join("sift_query.fvecs"),
-        args.query_limit,
-    )?;
+    let (queries, qdims) = read_fvecs(&args.data_dir.join("sift_query.fvecs"), args.query_limit)?;
     println!(
         "{} vectors × {}d  ({:.1}s)",
         queries.len(),
@@ -256,7 +247,10 @@ fn main() -> anyhow::Result<()> {
 
     // ── Build HNSW index ──────────────────────────────────────────────────
     println!();
-    println!("Building HNSW index (M={}, efC={})...", args.m, args.ef_construction);
+    println!(
+        "Building HNSW index (M={}, efC={})...",
+        args.m, args.ef_construction
+    );
     let cfg = HnswConfig {
         m: args.m,
         ef_construction: args.ef_construction,
@@ -287,8 +281,10 @@ fn main() -> anyhow::Result<()> {
 
     // ── ef_search sweep ────────────────────────────────────────────────────
     println!();
-    println!("{:<8}  {:>10}  {:>10}  {:>12}  {:>10}",
-             "ef", "recall@10", "QPS", "p50_us", "p99_us");
+    println!(
+        "{:<8}  {:>10}  {:>10}  {:>12}  {:>10}",
+        "ef", "recall@10", "QPS", "p50_us", "p99_us"
+    );
     println!("{}", "-".repeat(58));
 
     for ef in &args.ef_values {
