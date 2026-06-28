@@ -116,6 +116,27 @@ applied as secondary re-rankers depending on the question. ruVector's
 HNSW indexing keeps these queries fast enough to run interactively over
 years of events.
 
+### Implementation: agenticow (ruVector COW)
+
+The planetary memory is implemented in `src/memory.ts` on top of
+[`agenticow`](https://www.npmjs.com/package/agenticow) — ruvnet's
+"Git for Agent Memory": Copy-On-Write vector branching over the
+ruVector/`rvf` engine (HNSW, cosine). We chose it for one decisive
+reason beyond fast nearest-neighbor search: **branch isolation**.
+
+ADR-004 requires testing a hypothesis against a counterfactual ocean
+state (a "storm week" vs a "calm week") *without mutating the base
+record of real events*. `agenticow.branch(label)` forks the event
+memory in ~0.5 ms / 162 bytes regardless of base size, gives mutation
+isolation, and lets us `diff()` / `promote()` a scenario back only if it
+survives the gate — the freeze-the-physics / evolve-the-investigation
+pattern, expressed in storage. The `rvf` engine keys vectors by integer
+ids, so `PlanetaryMemory` maps each string `eventId` to a sequential id
+(shared across branches) and carries the `eventId` in the text payload.
+
+This path is exercised on **real GT.DBIC data** in
+`__tests__/real-data.test.ts` and `docs/research/real-data-proof.md`.
+
 ## Consequences
 
 ### Positive

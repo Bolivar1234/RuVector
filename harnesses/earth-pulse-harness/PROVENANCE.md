@@ -30,6 +30,24 @@ earth-pulse-harness/
   .harness/                  manifest.json + manifest.sha256 (witness)
 ```
 
+## Real-data proof (added after initial scaffold)
+
+The harness is validated on **real seismic observations**, not only synthetic
+fixtures:
+
+- **Data**: GT.DBIC (Côte d'Ivoire, Gulf of Guinea coast) LHZ, boreal winter
+  1995, from the IRIS/EarthScope FDSN `timeseries` web service. One full real
+  day is committed at `data/seismic/GT.DBIC.LHZ.1995-01-05.window.json`; the
+  12-day median PSD artifact is `data/seismic/dbic-1995-median-psd.json`.
+- **Result**: a persistent narrowband spectral line at **27.68 s (0.0361 Hz),
+  2.16× whitened prominence** over 252 segments / 288 h — the long-period
+  Gulf-of-Guinea microseism (the "26-second pulse"). Robust across record
+  lengths and instrument-response removal. See `docs/research/real-data-proof.md`.
+- **Memory**: implemented with `agenticow` (ruvnet's Copy-On-Write vector
+  branching over ruVector/`rvf`), exercised on the real events.
+- **Reproduce**: `npm run build && npm run fetch && npm run prove`; offline test
+  `npm test` → `__tests__/real-data.test.ts`.
+
 ## Scientific honesty contract
 
 - The harness **never fabricates** seismic, ocean, tide, or bathymetry observations.

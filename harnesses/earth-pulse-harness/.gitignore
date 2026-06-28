@@ -9,3 +9,6 @@ data/**/*.sac
 data/**/*.h5
 data/**/*.nc
 data/**/*.parquet
+
+# real-data fetch output (regenerate with npm run fetch)
+data/seismic/raw/

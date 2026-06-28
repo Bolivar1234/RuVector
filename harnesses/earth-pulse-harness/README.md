@@ -35,10 +35,36 @@ npm run build           # compile src/ -> dist/
 npm run pipeline        # run detect->extract->embed->score over the bundled fixtures
 ```
 
+## Proven on real data
+
+This is not a toy. Run against **real seismic observations** from IRIS/EarthScope
+(station **GT.DBIC**, Côte d'Ivoire — on the Gulf of Guinea coast), the harness
+finds the long-period microseism as a persistent narrowband spectral line:
+
+```
+PERSISTENT LINE: period = 27.68 s   frequency = 0.0361 Hz   whitened prominence = 2.16x
+                 (median Welch PSD over 252 segments / 288 h of real GT.DBIC LHZ data)
+detectPulse (band-passed real data): period = 27.51 s   coherence = 0.906   confidence = 0.937
+```
+
+The line reproduces across record lengths and survives instrument-response
+removal — it is a real geophysical signal, not an artifact. Full method, honest
+caveats, and references: **`docs/research/real-data-proof.md`**.
+
+```bash
+npm run build && npm run fetch && npm run prove   # fetch real IRIS data + prove
+npm test                                          # offline proof from one committed real day
+```
+
+Memory is the **agenticow** library (ruvnet's Copy-On-Write vector branching over
+ruVector/`rvf`) — see `src/memory.ts` and ADR-002.
+
 ## The pipeline (`src/`)
 
 | File | Role |
 |---|---|
+| `spectrum.ts` | FFT, median Welch PSD, spectral whitening, band-pass — the engine that isolates the 26 s line in real data. |
+| `memory.ts` | ruVector planetary memory backed by **agenticow** (COW vector branching): ingest, nearest-analog, branch scenarios. |
 | `detect-26s.ts` | DFT scan of the 24–28 s band → `PulseEvent` (period, amplitude, coherence, glide, confidence). |
 | `extract-features.ts` | Spectral sub-band shape, amplitude envelope, glide slope, station geometry, environment context. |
 | `embed-events.ts` | **Separate** L2-normalized waveform / environment / source embeddings (+combined), cosine NN search. |

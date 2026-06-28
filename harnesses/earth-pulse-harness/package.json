@@ -25,18 +25,21 @@
     "init": "node ./bin/cli.js init",
     "doctor": "node ./bin/cli.js doctor",
     "pipeline": "node ./bin/cli.js pipeline",
+    "fetch": "node ./scripts/fetch-dbic.mjs data/seismic/raw",
+    "prove": "npm run build && node ./scripts/prove-26s.mjs",
     "evolve": "metaharness-darwin evolve . --sandbox real --generations 3 --children 4 --seed 26",
     "evolve:dry": "metaharness-darwin evolve . --sandbox mock --generations 2 --children 3 --dry-run"
   },
   "dependencies": {
+    "@metaharness/host-claude-code": "^0.1.0",
     "@metaharness/kernel": "^0.1.0",
-    "@metaharness/host-claude-code": "^0.1.0"
+    "agenticow": "^0.2.3"
   },
   "devDependencies": {
+    "@metaharness/darwin": "^0.2.2",
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0",
-    "vitest": "^3.0.0",
-    "@metaharness/darwin": "^0.2.2"
+    "vitest": "^3.0.0"
   },
   "engines": {
     "node": ">=20.0.0"
