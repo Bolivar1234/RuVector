@@ -40,6 +40,10 @@ path = "src/bin/sota_hybrid.rs"
 name = "sota-all"
 path = "src/bin/sota_all.rs"
 
+[[bin]]
+name = "sota-sift1m-fvecs"
+path = "src/bin/sota_sift1m_fvecs.rs"
+
 [lib]
 name = "ruvector_sota_bench"
 path = "src/lib.rs"
