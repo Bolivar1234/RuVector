@@ -8,7 +8,7 @@
 //   - does the amplitude track the secondary (ocean-wave) microseism?
 // All from real GT.DBIC observations — no fabrication.
 
-import { welchPsd } from './spectrum.js';
+import { welchPsd, type Psd } from './spectrum.js';
 
 export interface LineMetrics {
   /** Peak frequency of the line in the long-period band. */
@@ -102,6 +102,96 @@ export function resonanceStats(metrics: LineMetrics[]): ResonanceStats {
     freqCv: meanF > 0 ? stdF / meanF : 0,
     amplitudeRange: Math.min(...ex) > 0 ? Math.max(...ex) / Math.min(...ex) : 0,
     freqAmpCorr: pearson(metrics.map((m) => m.peakFreqHz), metrics.map((m) => m.lineExcess)),
+  };
+}
+
+export interface LineQ {
+  f0Hz: number;
+  fwhmHz: number;
+  /** Quality factor Q = f0 / FWHM. From a time-averaged PSD this is a LOWER bound
+   * (slow frequency wander broadens the time-averaged line). */
+  q: number;
+  /** FWHM width in frequency bins — > a few means the line is resolved, not bin-limited. */
+  widthBins: number;
+}
+
+/**
+ * Resonance sharpness: full-width-half-maximum and Q of the spectral line in a
+ * band, measured above the local continuum. Higher Q ⇒ sharper resonance.
+ */
+export function spectralLineQ(spec: Psd, band: [number, number], continuum: [[number, number], [number, number]]): LineQ {
+  let pk = 0;
+  let kp = 0;
+  for (let k = 0; k < spec.freqs.length; k++) {
+    const f = spec.freqs[k];
+    if (f >= band[0] && f <= band[1] && spec.psd[k] > pk) { pk = spec.psd[k]; kp = k; }
+  }
+  const bgArr: number[] = [];
+  for (let k = 0; k < spec.freqs.length; k++) {
+    const f = spec.freqs[k];
+    if ((f >= continuum[0][0] && f <= continuum[0][1]) || (f >= continuum[1][0] && f <= continuum[1][1])) bgArr.push(spec.psd[k]);
+  }
+  bgArr.sort((a, b) => a - b);
+  const bg = bgArr.length ? bgArr[bgArr.length >> 1] : 0;
+  const half = bg + (pk - bg) / 2;
+  let kl = kp;
+  while (kl > 0 && spec.psd[kl] > half) kl--;
+  let kr = kp;
+  while (kr < spec.psd.length - 1 && spec.psd[kr] > half) kr++;
+  const res = spec.freqs[1] - spec.freqs[0];
+  const fwhm = (kr - kl) * res;
+  const f0 = spec.freqs[kp];
+  return { f0Hz: f0, fwhmHz: fwhm, q: fwhm > 0 ? f0 / fwhm : Infinity, widthBins: kr - kl };
+}
+
+export interface GlideStats {
+  /** Peak frequency of the line in each successive time window. */
+  series: number[];
+  cv: number;                 // coefficient of variation of the per-window peak freq
+  longestMonotonicRun: number; // consecutive same-direction steps (a glide would be long)
+  periodRangeS: [number, number];
+}
+
+/**
+ * Track the line's peak frequency through time (a coarse spectrogram) and report
+ * temporal stability + the longest monotonic frequency run. A sustained glide
+ * shows up as a long run with a large frequency change; hour-to-hour scatter does not.
+ */
+export function glideStats(
+  samples: number[] | Float64Array,
+  fs: number,
+  band: [number, number],
+  opts: { windowS?: number; hopS?: number; segment?: number } = {},
+): GlideStats {
+  const W = opts.windowS ?? 4 * 3600;
+  const hop = opts.hopS ?? 3600;
+  const seg = opts.segment ?? 2048;
+  const series: number[] = [];
+  for (let start = 0; start + W <= samples.length; start += hop) {
+    const sub = Array.prototype.slice.call(samples, start, start + W);
+    const sp = welchPsd(sub, { fs, segment: seg, overlap: seg / 2, average: 'median' });
+    let p = 0;
+    let pf = 0;
+    for (let k = 0; k < sp.freqs.length; k++) {
+      const f = sp.freqs[k];
+      if (f >= band[0] && f <= band[1] && sp.psd[k] > p) { p = sp.psd[k]; pf = f; }
+    }
+    if (pf > 0) series.push(pf);
+  }
+  const m = mean(series);
+  const sd = std(series);
+  let longest = 0;
+  let dir = 0;
+  let run = 0;
+  for (let i = 1; i < series.length; i++) {
+    const d = Math.sign(series[i] - series[i - 1]);
+    if (d !== 0 && d === dir) { run++; longest = Math.max(longest, run); } else { dir = d; run = 1; }
+  }
+  return {
+    series,
+    cv: m > 0 ? sd / m : 0,
+    longestMonotonicRun: longest,
+    periodRangeS: [1 / Math.max(...series), 1 / Math.min(...series)],
   };
 }
 

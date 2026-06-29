@@ -137,6 +137,32 @@ itself informative: the 27.7 s line is **regionally concentrated near its
 source**, not a globally-dominant teleseismic arrival — consistent with the
 multi-line long-period microseism picture seen in the cross-station test.
 
+## How sharp is the resonance, and does it glide? (Level 5)
+
+Two more measurements on the 12-day continuous Jan-1995 record
+(`data/seismic/dbic-resonance-q.json`, `src/climatology.ts`):
+
+```
+sharpness : f0 = 0.03607 Hz,  FWHM = 5.5e-4 Hz,  Q = f0/FWHM ≈ 66  (resolved, 9 bins)
+temporal  : 285 hourly windows — longest monotonic frequency run = 3 h (noise-level)
+```
+
+- **Q ≈ 66** is a genuine narrowband resonance (a broadband source would give
+  Q ≈ 1). This is a **lower bound**: a 12-day-averaged line is broadened by the
+  slow frequency wander documented above, so the *instantaneous* resonance is
+  sharper.
+- **The fundamental does not glide.** Tracking the line's peak frequency hour by
+  hour shows no sustained drift (the longest monotonic run is 3 h — consistent
+  with measurement scatter, not a sweep). The fundamental's frequency is fixed
+  in time, not just on average.
+
+This matters for the literature anomaly: the **gliding tremors** of Bruland &
+Hadziioannou (2023) are *companion* signals that glide *upward from* the 26 s
+fundamental — they are not the fundamental itself drifting. Our result is
+consistent with that picture: the carrier is a stable, narrowband resonance; any
+gliding lives in separate higher-frequency tremor episodes (a Level-5 target for
+future work).
+
 ## Why this matters
 
 Putting the four numbers together gives a coherent physical picture:
