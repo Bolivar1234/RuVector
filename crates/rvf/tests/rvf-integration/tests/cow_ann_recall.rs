@@ -348,7 +348,11 @@ fn cow_ann_recall_vs_exact_cosine() {
 
     // Exact cosine ground truth.
     let exact_top_k = exact_knn_cosine(&query, &ground_truth_corpus, K);
-    assert_eq!(exact_top_k.len(), K, "ground truth must return K={K} results");
+    assert_eq!(
+        exact_top_k.len(),
+        K,
+        "ground truth must return K={K} results"
+    );
 
     // COW ANN via dual-graph merge (the path that was broken before the fix).
     let ann_opts = QueryOptions {
