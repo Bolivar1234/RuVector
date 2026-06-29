@@ -123,6 +123,28 @@ frequency–amplitude decoupled, and **no significant correlation with the
 secondary microseism** (p > 0.18 each year; the sign even flips year to year).
 The result is not a one-off.
 
+### Cross-station — the 27.7 s line is not a DBIC instrument artifact
+
+The line's frequency is set by the source, so it should appear at the *same*
+frequency anywhere it is seen. Testing five stations on three networks at
+different azimuths/distances (Feb 1996, ≤ 12 days each):
+
+| station | network | distance / direction | dominant peak | prominence |
+|---|---|---|---|---|
+| GT.DBIC | GT | source-proximal (Côte d'Ivoire) | **27.77 s** (0.03601 Hz) | 2.07× |
+| G.SSB | G | ~4500 km N (France) | **27.68 s** (0.03613 Hz) | 1.24× |
+| II.ASCN | II | S Atlantic (Ascension) | 26.6 s | 1.19× |
+| G.TAM | G | Sahara (N) | 26.1 s | 1.49× |
+| IU.ANMO | IU | New Mexico (far control) | 26.6 s | 1.21× |
+
+**G.SSB independently shows the line at 27.68 s — agreeing with GT.DBIC's
+27.77 s to within 0.00012 Hz (one frequency bin), on a different network.** That
+rules out a DBIC instrument artifact: it is a real propagating signal, strongest
+at the source-proximal station. The distant stations (ASCN, TAM) and the far
+control (ANMO) show only a *marginal* ~26.6 s feature at ~1.2× — and since the
+control shows it too, we make **no** claim of a separate 26 s line from this
+short window. Data: `data/seismic/dbic-crossstation-1996.json`.
+
 ### Calm-sea "gold samples" — the strongest pulses in the quietest seas
 
 Windows with the 26 s line in the top third of strength **and** the secondary
@@ -135,9 +157,12 @@ single-window evidence for a non-local-ocean driver.
 
 ## Honest scope and caveats
 
-- **One station, four years.** GT.DBIC only, 1995–1998 (replicated per-year).
-  Not a global or multi-decadal claim, and not yet cross-station — the next step
-  is to confirm the 27.7 s line and its decoupling at independent stations.
+- **Mainly one station, four years.** Resonance/decoupling statistics are from
+  GT.DBIC, 1995–1998 (replicated per-year). The 27.7 s *frequency* is now
+  confirmed at one independent station (G.SSB), but the decoupling and
+  amplitude statistics have not yet been reproduced at a second station, and
+  this is not a global or multi-decadal claim. Full source localization (Level 2)
+  needs multi-station beamforming.
   The seasonal *phase* of the 26 s amplitude was **not** robust across years
   (annual-harmonic relative amplitude only ~0.17), so we make no seasonal-cycle
   claim — only the frequency stability, amplitude independence, and decoupling,

@@ -91,3 +91,17 @@ describe('discovery — adversarial follow-up (frequency, replication, gold samp
     }
   });
 });
+
+const xs = JSON.parse(
+  readFileSync(resolve(root, 'data/seismic/dbic-crossstation-1996.json'), 'utf8'),
+) as { dbic_freqHz: number; ssb_freqHz: number; freq_agreement_Hz: number; artifact_ruled_out: boolean };
+
+describe('discovery — cross-station confirmation (not a DBIC artifact)', () => {
+  it('an independent station (G.SSB) shows the same line frequency as GT.DBIC', () => {
+    // Both dominant long-period peaks land within ~one frequency bin of each other.
+    expect(xs.freq_agreement_Hz).toBeLessThan(0.0008);
+    expect(1 / xs.dbic_freqHz).toBeGreaterThan(27);
+    expect(1 / xs.ssb_freqHz).toBeGreaterThan(27);
+    expect(xs.artifact_ruled_out).toBe(true);
+  });
+});
