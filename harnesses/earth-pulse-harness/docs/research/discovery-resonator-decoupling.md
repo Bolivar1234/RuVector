@@ -206,6 +206,27 @@ long-period line genuinely sits at **27.7 s**, and the canonical 26.0 s shows no
 excess. We report this as the **27.7 s pulse** for this station/epoch and flag
 the ~6 % offset from the popular "26 s" figure for cross-station confirmation.
 
+### Decadal stability — the frequency holds across DBIC's full 8-year record
+
+Extending the frequency measurement across GT.DBIC's entire operational lifetime
+(`data/seismic/dbic-decadal-stability.json`):
+
+| year | 1995 | 1997 | 1998 | 1999 | 2000 | 2002 |
+|---|---|---|---|---|---|---|
+| period | 27.77 s | 27.77 s | 27.68 s | 27.77 s | 27.77 s | 27.68 s |
+
+Every year lands at **0.0360–0.0361 Hz — within one frequency bin** (mean 27.74 s,
+**CV 0.16%** over 8 years). This confirms the *decades-scale persistence* the
+literature emphasizes, measured from first principles at the source station.
+
+**Honest limit on a true ≥20-year claim.** DBIC — the only station that cleanly
+resolves the narrow line — ends in 2002. Distant stations do not isolate it (at
+II.ASCN in 1995 the whitened prominence *at* 27.7 s is 0.96, i.e. below
+background), and **no LHZ stations existed near the Gulf-of-Guinea source in
+2015** (the region is under-instrumented — itself part of why the phenomenon
+stays under-studied). So we confirm 8-year stability at the source, but cannot
+directly extend the measurement into the 2010s with available open data.
+
 ### Replication — same behavior across 4 independent years
 
 Per-year statistics (GT.DBIC, 2-day windows, 23–31 windows/year):
