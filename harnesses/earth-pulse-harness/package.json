@@ -33,6 +33,7 @@
   "dependencies": {
     "@metaharness/host-claude-code": "^0.1.0",
     "@metaharness/kernel": "^0.1.0",
+    "@ruvector/mincut-wasm": "^0.1.0",
     "agenticow": "^0.2.3"
   },
   "devDependencies": {

@@ -68,6 +68,14 @@ the real events, retrieves each event's own embedding as its nearest analog
 COW-isolated child — the ADR-002 / ADR-004 storage pattern, exercised on real
 data.
 
+Finally, **ruVector dynamic MinCut** (`@ruvector/mincut-wasm`, `src/partition.ts`,
+ADR-006) partitions the event-similarity graph: the real GT.DBIC events resolve
+to **one signal class** — the honest result that, at a single station and epoch,
+the 26 s microseism is a single coherent population, not a mix of mechanisms.
+The partitioner separates ≥ 2 classes on controlled inputs and flags a new class
+entering a stream (regime-change detection), verified in
+`__tests__/partition.test.ts`.
+
 ## Honest interpretation (what this does and does NOT show)
 
 - **The raw spectrum is dominated by the secondary microseism** (~6–16 s); the

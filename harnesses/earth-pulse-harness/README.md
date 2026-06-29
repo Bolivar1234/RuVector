@@ -65,6 +65,7 @@ ruVector/`rvf`) — see `src/memory.ts` and ADR-002.
 |---|---|
 | `spectrum.ts` | FFT, median Welch PSD, spectral whitening, band-pass — the engine that isolates the 26 s line in real data. |
 | `memory.ts` | ruVector planetary memory backed by **agenticow** (COW vector branching): ingest, nearest-analog, branch scenarios. |
+| `partition.ts` | Signal-class partition of the event graph via **ruVector dynamic MinCut** (`@ruvector/mincut-wasm`); detects when a new mechanism enters the record. |
 | `detect-26s.ts` | DFT scan of the 24–28 s band → `PulseEvent` (period, amplitude, coherence, glide, confidence). |
 | `extract-features.ts` | Spectral sub-band shape, amplitude envelope, glide slope, station geometry, environment context. |
 | `embed-events.ts` | **Separate** L2-normalized waveform / environment / source embeddings (+combined), cosine NN search. |

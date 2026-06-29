@@ -18,6 +18,7 @@ Consequences (positive/negative), Alternatives considered.
 | [ADR-003](./ADR-003-hypothesis-scoring-and-promotion-gate.md) | Hypothesis Scoring and Promotion Gate | Accepted | Weighted six-component discovery score; promote a child only on out-of-sample F1 +3%, no FPR increase, held-out error -5%, mapped citations, and zero leakage. |
 | [ADR-004](./ADR-004-validation-leakage-contradiction-logging.md) | Validation, Leakage Control, Contradiction Logging | Accepted | Hold out storm and calm-sea weeks, beat seasonal/swell/tide baselines out-of-sample, log contradictions; six-level discovery ladder with acceptance tests. |
 | [ADR-005](./ADR-005-darwin-mutation-surfaces-and-safety.md) | Darwin Mutation Surfaces and Safety Policy | Accepted | Declare the 7 mutable surfaces; deterministic air-gapped mutator default; every mutation passes `validateGeneratedCode` (no new imports/network/fs/shell/env/deps), sandboxed, promote only on measured gain. |
+| [ADR-006](./ADR-006-mincut-signal-class-partition.md) | Signal-Class Partition via ruVector Dynamic MinCut | Accepted | Partition the event-similarity graph into signal classes with `@ruvector/mincut-wasm` (dynamic min-cut / φ-expander hierarchy); `classes` = Level-2 cluster count; dynamic stream detects a new mechanism entering the record; graceful connected-components fallback. |
 
 ## Pipeline reference
 

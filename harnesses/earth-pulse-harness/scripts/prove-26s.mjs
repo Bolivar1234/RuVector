@@ -25,6 +25,7 @@ import { detectPulse } from '../dist/detect-26s.js';
 import { extractFeatures } from '../dist/extract-features.js';
 import { embedEvent } from '../dist/embed-events.js';
 import { PlanetaryMemory } from '../dist/memory.js';
+import { partitionEvents } from '../dist/partition.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -131,6 +132,12 @@ mem.close();
 calm.close();
 try { rmSync(memPath); } catch { /* cleanup */ }
 
+// ── 5b. ruVector dynamic MinCut — signal-class partition ───────────────────
+const part = await partitionEvents(events, { field: 'combined', threshold: 0.5 });
+console.log(
+  `[5b] ruVector dynamic MinCut (${part.backend}): ${part.vertices} real events, ${part.edges} similarity edges -> ${part.classes} signal class(es)${part.expanders !== undefined ? `, ${part.expanders} expanders` : ''}.`,
+);
+
 // ── 6. Emit proof summary + report ─────────────────────────────────────────
 const summary = {
   generatedFrom: source,
@@ -142,6 +149,7 @@ const summary = {
   persistentLine: { periodS: +line.periodS.toFixed(3), freqHz: +line.freqHz.toFixed(5), whitenedProminence: +line.prominence.toFixed(2) },
   harnessDetector: { periodS: +event.dominantPeriodS.toFixed(2), coherence: +event.phaseCoherence.toFixed(3), confidence: +event.confidence.toFixed(3) },
   memory: { backend: 'agenticow (ruVector COW)', ingested: ing.accepted, nearest: nn[0], baseStatus, calmStatus },
+  partition: { backend: part.backend, classes: part.classes, expanders: part.expanders, vertices: part.vertices, edges: part.edges },
 };
 writeFileSync(resolve(root, 'data/seismic/proof-summary.json'), JSON.stringify(summary, null, 2));
 console.log(`[6] Wrote data/seismic/proof-summary.json and dbic-1995-median-psd.json`);
