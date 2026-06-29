@@ -254,6 +254,31 @@ secondary up to 1.1×10⁷) coincided with the *weakest* 26 s. If the pulse were
 local-ocean-wave-driven this pattern should not exist. It is the cleanest
 single-window evidence for a non-local-ocean driver.
 
+## Searching for the gliding tremors — a rejected false positive (ADR-004)
+
+Bruland & Hadziioannou (2023) report **gliding tremors** that sweep upward in
+frequency from the 26 s band. We searched for them (`src/spectrogram.ts`,
+`data/seismic/dbic-gliding-search.json`) — and this is a worked example of the
+harness's contradiction discipline catching itself.
+
+A naive spectrogram ridge-tracker **does** find 15 apparent upward-gliding
+episodes (0.05 → 0.09 Hz over hours). But two checks reject them:
+
+1. **Bandwidth.** The dominant feature in the search band is **broad** (Q ≈ 3.7)
+   — the secondary microseism, not a narrow tremor line.
+2. **Source coherence (the decisive test).** A true tremor of the 26 s source
+   must arrive from the fundamental's back-azimuth (~95°, Gulf of Guinea, R 0.76).
+   The band where the "glides" live is **not source-coherent** (R = 0.17) and
+   points ~174° away (269°). It is the ordinary secondary microseism, whose peak
+   frequency wanders with ocean conditions — *masquerading* as a glide.
+
+**Verdict: rejected.** The candidates are secondary-microseism frequency wander,
+not gliding tremors of the Gulf-of-Guinea source. Isolating the real gliding
+tremors needs array/beamforming methods (as in B&H 2023); single-station
+raw-count spectral analysis cannot separate them. This honest null is logged
+rather than dressed up as a detection — exactly the ADR-004 behavior that keeps
+the rest of the findings trustworthy.
+
 ## Honest scope and caveats
 
 - **Mainly one station, four years.** Resonance/decoupling statistics are from
