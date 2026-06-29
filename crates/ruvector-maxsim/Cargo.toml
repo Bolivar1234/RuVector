@@ -1,0 +1,17 @@
+[package]
+name        = "ruvector-maxsim"
+version     = "0.1.0"
+edition     = "2021"
+description = "Multi-vector late interaction with MaxSim scoring — ruvector's ColBERT-style token retrieval engine"
+authors     = ["ruvnet", "claude-flow"]
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ruvnet/ruvector"
+keywords    = ["ann", "vector-search", "maxsim", "colbert", "multi-vector"]
+categories  = ["algorithms", "data-structures"]
+
+[[bin]]
+name = "maxsim-bench"
+path = "src/main.rs"
+
+[dependencies]
+rand = "0.8"
