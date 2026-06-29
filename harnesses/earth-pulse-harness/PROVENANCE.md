@@ -48,6 +48,19 @@ fixtures:
 - **Reproduce**: `npm run build && npm run fetch && npm run prove`; offline test
   `npm test` → `__tests__/real-data.test.ts`.
 
+## First discovery (real data)
+
+Pushing past detection, the harness produced a genuine empirical result
+(`docs/research/discovery-resonator-decoupling.md`): across 57 real GT.DBIC
+windows (1996–1997), the 26 s line is **frequency-stable to CV 0.59 %** while its
+**amplitude varies 36.5×**, with **corr(frequency, amplitude) = 0.17** (fixed
+resonance) and **corr(26 s amplitude, secondary microseism) = 0.04, perm-p =
+0.75** (decoupled from the local ocean-wave field). Derived data:
+`data/seismic/dbic-climatology-1996-1997.json`; reproduce with
+`npm run climatology`; offline check in `__tests__/discovery.test.ts`. Scope is
+stated honestly (one station, two years; null correlation rules out strong
+co-forcing, not all coupling).
+
 ## Scientific honesty contract
 
 - The harness **never fabricates** seismic, ocean, tide, or bathymetry observations.

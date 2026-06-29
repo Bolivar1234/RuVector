@@ -12,3 +12,4 @@ data/**/*.parquet
 
 # real-data fetch output (regenerate with npm run fetch)
 data/seismic/raw/
+data/seismic/clim/

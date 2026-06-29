@@ -51,6 +51,22 @@ The line reproduces across record lengths and survives instrument-response
 removal — it is a real geophysical signal, not an artifact. Full method, honest
 caveats, and references: **`docs/research/real-data-proof.md`**.
 
+### Discovery: a frequency-stable resonance, decoupled from the ocean-wave field
+
+Pushing further (GT.DBIC, 1996–1997, 57 windows), the harness finds the 26 s
+pulse behaves like a **fixed-frequency resonator driven at variable strength**:
+
+```
+frequency stable to CV 0.59 %  while  amplitude varies 36.5x
+corr(frequency, amplitude)            = 0.17   → frequency doesn't shift with drive
+corr(26 s amplitude, secondary microseism) = 0.04  (perm p = 0.75)  → NOT ocean-wave-driven
+```
+
+A fixed resonant frequency, excited > 36× independently of the local ocean-wave
+energy — an independent, quantitative argument that the 26 s pulse is *not* an
+ordinary microseism. Method, statistics, and honest scope:
+**`docs/research/discovery-resonator-decoupling.md`** (`npm run climatology`).
+
 ```bash
 npm run build && npm run fetch && npm run prove   # fetch real IRIS data + prove
 npm test                                          # offline proof from one committed real day
