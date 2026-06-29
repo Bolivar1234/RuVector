@@ -97,6 +97,46 @@ Two things this nails down:
   than the station's three components — corroborating the decades-old
   attribution from first principles. Data: `data/seismic/dbic-backazimuth-1996.json`.
 
+### The source direction is FIXED across seasons and years
+
+Re-measuring the DBIC back-azimuth in four windows
+(`data/seismic/dbic-backazimuth-stability.json`):
+
+| window | back-azimuth | R |
+|---|---|---|
+| 1996-01 (winter) | 86° | 0.68 |
+| 1996-06 (summer) | 101° | 0.76 |
+| 1996-09 (autumn) | 96° | 0.76 |
+| 1997-06 (year +1) | 100° | 0.87 |
+
+The bearing is stable at **~96° (spread 15°)** across winter/summer/autumn and two
+years — a **fixed source direction**, matching the decades-long persistence the
+literature reports. (It runs ~10–15° west of the exact São Tomé bearing (118°),
+within single-station polarization systematics.)
+
+### Why we cannot yet triangulate to a point (honest limit)
+
+We measured the back-azimuth at four stations to intersect the bearings
+(`data/seismic/triangulation-1996.json`, `npm run triangulate`):
+
+| station | role | measured baz | expected | concentration R |
+|---|---|---|---|---|
+| GT.DBIC | source-proximal | ~100° | 111° | **0.76** ✓ |
+| G.TAM | Sahara (N) | 234° | 176° | 0.47 ✗ |
+| II.ASCN | S Atlantic | 18° | 66° | 0.42 ✗ |
+| GT.LBTB | Botswana (SE) | 145° | 324° | 0.13 ✗ |
+| G.SSB | France (N) | 12°/316° | 176° | 0.24/0.39 ✗ |
+
+Only the source-proximal **DBIC** cleanly polarizes the 27.7 s line. At the
+distant stations the long-period band is dominated by *other* sources — TAM and
+ASCN peak near 26.1–26.6 s (outside the 27.7 s band), and SSB's polarization
+points NW/N at North Atlantic microseism sources — so their bearings have low R
+and do not point at the Gulf of Guinea. A tight point-triangulation is therefore
+**not achievable** with the sparse 1996-era three-component network. This is
+itself informative: the 27.7 s line is **regionally concentrated near its
+source**, not a globally-dominant teleseismic arrival — consistent with the
+multi-line long-period microseism picture seen in the cross-station test.
+
 ## Why this matters
 
 Putting the four numbers together gives a coherent physical picture:

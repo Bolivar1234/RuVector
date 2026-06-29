@@ -69,7 +69,11 @@ at **27.72 s** (0.03607 Hz) — the canonical 26.0 s shows no excess here.
 Digging deeper, three-component **polarization** localizes the source from a
 single station: the 27.7 s wave is a **retrograde Rayleigh wave with
 back-azimuth ~100°** (R = 0.76 over 96 windows) — pointing **straight into the
-Gulf of Guinea / Bight of Bonny** (expected 109–118°). A fixed resonant
+Gulf of Guinea / Bight of Bonny** (expected 109–118°). That bearing is **fixed
+to ~96° across winter/summer/autumn and two years** (a stable source). Tight
+triangulation to a point isn't yet possible — only the source-proximal DBIC
+cleanly polarizes the 27.7 s line (distant stations see other ~26 s sources), an
+honest limit that itself shows the line is regionally concentrated. A fixed resonant
 frequency, excited independently of local ocean-wave energy, radiating from the
 known source region: an independent, quantitative argument that the pulse is
 *not* an ordinary microseism. Method, statistics, replication, localization, and

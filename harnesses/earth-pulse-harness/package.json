@@ -29,6 +29,7 @@
     "prove": "npm run build && node ./scripts/prove-26s.mjs",
     "climatology": "npm run build && node ./scripts/climatology.mjs",
     "localize": "npm run build && node ./scripts/localize.mjs",
+    "triangulate": "npm run build && node ./scripts/triangulate.mjs",
     "evolve": "metaharness-darwin evolve . --sandbox real --generations 3 --children 4 --seed 26",
     "evolve:dry": "metaharness-darwin evolve . --sandbox mock --generations 2 --children 3 --dry-run"
   },
