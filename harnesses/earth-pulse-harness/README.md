@@ -64,11 +64,17 @@ corr(pulse amplitude, secondary microseism) ~0, p>0.18 every year → NOT ocean-
 
 Replicated independently in all 4 years; the strongest pulses occur in the
 *quietest* local seas ("gold samples"). A precise refit puts the dominant line
-at **27.72 s** (0.03607 Hz) — the canonical 26.0 s shows no excess here. A fixed
-resonant frequency, excited independently of local ocean-wave energy: an
-independent, quantitative argument that the pulse is *not* an ordinary
-microseism. Method, statistics, replication, and honest scope:
-**`docs/research/discovery-resonator-decoupling.md`** (`npm run climatology`).
+at **27.72 s** (0.03607 Hz) — the canonical 26.0 s shows no excess here.
+
+Digging deeper, three-component **polarization** localizes the source from a
+single station: the 27.7 s wave is a **retrograde Rayleigh wave with
+back-azimuth ~100°** (R = 0.76 over 96 windows) — pointing **straight into the
+Gulf of Guinea / Bight of Bonny** (expected 109–118°). A fixed resonant
+frequency, excited independently of local ocean-wave energy, radiating from the
+known source region: an independent, quantitative argument that the pulse is
+*not* an ordinary microseism. Method, statistics, replication, localization, and
+honest scope: **`docs/research/discovery-resonator-decoupling.md`**
+(`npm run climatology`, `npm run localize`).
 
 ```bash
 npm run build && npm run fetch && npm run prove   # fetch real IRIS data + prove
@@ -83,6 +89,8 @@ ruVector/`rvf`) — see `src/memory.ts` and ADR-002.
 | File | Role |
 |---|---|
 | `spectrum.ts` | FFT, median Welch PSD, spectral whitening, band-pass — the engine that isolates the 26 s line in real data. |
+| `polarization.ts` | 3-component Rayleigh-wave back-azimuth — single-station source localization (the 27.7 s wave points at the Gulf of Guinea). |
+| `climatology.ts` | line metrics, resonance/decoupling statistics, permutation tests. |
 | `memory.ts` | ruVector planetary memory backed by **agenticow** (COW vector branching): ingest, nearest-analog, branch scenarios. |
 | `partition.ts` | Signal-class partition of the event graph via **ruVector dynamic MinCut** (`@ruvector/mincut-wasm`); detects when a new mechanism enters the record. |
 | `detect-26s.ts` | DFT scan of the 24–28 s band → `PulseEvent` (period, amplitude, coherence, glide, confidence). |

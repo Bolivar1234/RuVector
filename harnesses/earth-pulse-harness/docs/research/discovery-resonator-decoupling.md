@@ -64,6 +64,39 @@ is consistent with zero. If the 26 s pulse were simply another ocean-wave
 microseism from the local sea state, you would expect a clear positive
 correlation. You do not see one.
 
+## Source localization — a Rayleigh wave from the Gulf of Guinea (Level 2)
+
+Digging deeper, we localized the source **from a single station** using
+three-component polarization (`src/polarization.ts`). A fundamental-mode
+Rayleigh wave is retrograde elliptical in the vertical–radial plane, so the
+particle motion encodes the back-azimuth to the source. The estimator is
+validated to recover known back-azimuths exactly on synthetic waves
+(`__tests__/polarization.test.ts`).
+
+Applied to real GT.DBIC LHZ/LHN/LHE (June 1996, 5 days, band-passed to the
+27.7 s line, 96 windows):
+
+```
+motion             : RETROGRADE  → fundamental-mode Rayleigh (surface wave)
+back-azimuth       : 99° (whole record),  101° (quality-weighted mean of 96 windows)
+concentration      : R = 0.76  (tight — a stable single direction, not noise)
+expected to source : Bight of Bonny 109°,  São Tomé 118°
+```
+
+The 27.7 s wave arrives from **~100° — straight into the Gulf of Guinea / Bight
+of Bonny** — within ~10–18° of the expected source bearing, comfortably inside
+single-station polarization uncertainty, and from the opposite side of the
+continental interior. Independent of any amplitude or frequency argument, the
+particle motion alone points at the known source region.
+
+Two things this nails down:
+- **It is a Rayleigh (surface) wave**, not a body wave — consistent with an
+  ocean/crustal source coupling at the surface, and inconsistent with a deep
+  teleseismic origin.
+- **The source direction is the Gulf of Guinea**, recovered with no prior other
+  than the station's three components — corroborating the decades-old
+  attribution from first principles. Data: `data/seismic/dbic-backazimuth-1996.json`.
+
 ## Why this matters
 
 Putting the four numbers together gives a coherent physical picture:
@@ -161,8 +194,9 @@ single-window evidence for a non-local-ocean driver.
   GT.DBIC, 1995–1998 (replicated per-year). The 27.7 s *frequency* is now
   confirmed at one independent station (G.SSB), but the decoupling and
   amplitude statistics have not yet been reproduced at a second station, and
-  this is not a global or multi-decadal claim. Full source localization (Level 2)
-  needs multi-station beamforming.
+  this is not a global or multi-decadal claim. The single-station polarization
+  localizes the source *direction* (~100°, Gulf of Guinea); pinpointing the
+  source *location* still needs multi-station triangulation/beamforming.
   The seasonal *phase* of the 26 s amplitude was **not** robust across years
   (annual-harmonic relative amplitude only ~0.17), so we make no seasonal-cycle
   claim — only the frequency stability, amplitude independence, and decoupling,
