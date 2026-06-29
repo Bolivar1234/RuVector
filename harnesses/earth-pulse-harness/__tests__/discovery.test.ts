@@ -54,3 +54,40 @@ describe('discovery — 26 s pulse is a frequency-stable, decoupled resonance', 
     expect(p).toBeGreaterThan(0.05);
   });
 });
+
+const repl = JSON.parse(
+  readFileSync(resolve(root, 'data/seismic/dbic-replication-1995-1998.json'), 'utf8'),
+) as {
+  precise_frequency: { f0_Hz: number; periodS: number; prominence_at_canonical_26s: number; prominence_at_27_7s: number };
+  replication_by_year: Record<string, { n: number; freqCvPct: number; amplitudeRange: number; freqAmpCorr: number; corr_line_secondary: number; permutation_p: number }>;
+  gold_samples: { count: number; total: number; windows: { date: string; periodS: number }[] };
+};
+
+describe('discovery — adversarial follow-up (frequency, replication, gold samples)', () => {
+  it('the dominant line is 27.7 s, and the canonical 26.0 s shows no excess', () => {
+    expect(repl.precise_frequency.periodS).toBeGreaterThan(27);
+    expect(repl.precise_frequency.periodS).toBeLessThan(28.5);
+    // 27.7 s is a real peak; 26.0 s is below the local background (< 1x).
+    expect(repl.precise_frequency.prominence_at_27_7s).toBeGreaterThan(1.5);
+    expect(repl.precise_frequency.prominence_at_canonical_26s).toBeLessThan(1.1);
+  });
+
+  it('replicates across at least 3 independent years', () => {
+    const years = Object.values(repl.replication_by_year);
+    expect(years.length).toBeGreaterThanOrEqual(3);
+    for (const y of years) {
+      expect(y.freqCvPct).toBeLessThan(1.5);              // frequency stable every year
+      expect(y.amplitudeRange).toBeGreaterThan(3);        // amplitude variable every year
+      expect(Math.abs(y.corr_line_secondary)).toBeLessThan(0.4); // never strongly coupled
+      expect(y.permutation_p).toBeGreaterThan(0.05);      // never significant
+    }
+  });
+
+  it('finds calm-sea gold samples (strong 26 s during quiet local seas)', () => {
+    expect(repl.gold_samples.count).toBeGreaterThanOrEqual(3);
+    for (const g of repl.gold_samples.windows) {
+      expect(g.periodS).toBeGreaterThan(26.5);
+      expect(g.periodS).toBeLessThan(29);
+    }
+  });
+});

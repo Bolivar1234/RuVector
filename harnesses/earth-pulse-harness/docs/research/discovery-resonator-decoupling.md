@@ -85,13 +85,63 @@ is directional swell rather than bulk wave energy, the 26 s amplitude should
 correlate with swell *direction/source-region* state, not with local microseism
 power — exactly the ruVector nearest-neighbor query ADR-002/ADR-003 set up.
 
+## Replication and refinement (adversarial follow-up)
+
+Three challenges were run against the result; it survived all three.
+Consolidated metrics: `data/seismic/dbic-replication-1995-1998.json`.
+
+### Refinement — the line is at 27.7 s, not 26.0 s
+
+The "26-second" label does not match this station. Searching the **wide** band
+0.0340–0.0400 Hz (which *includes* the canonical 26.0 s = 0.03846 Hz) at high
+resolution (6.1×10⁻⁵ Hz, 288 h record), with parabolic peak interpolation:
+
+```
+dominant line: f0 = 0.03607 Hz  (27.72 s)   prominence 2.05x
+prominence at 26.0 s (0.03846 Hz) = 0.82x   ← below background; NOT a peak
+prominence at 27.7 s (0.03610 Hz) = 2.05x   ← the real line
+```
+
+So 27.7 s is not a band-edge or binning artifact: at GT.DBIC the dominant
+long-period line genuinely sits at **27.7 s**, and the canonical 26.0 s shows no
+excess. We report this as the **27.7 s pulse** for this station/epoch and flag
+the ~6 % offset from the popular "26 s" figure for cross-station confirmation.
+
+### Replication — same behavior across 4 independent years
+
+Per-year statistics (GT.DBIC, 2-day windows, 23–31 windows/year):
+
+| year | n | freq CV | amp range | corr(freq, amp) | corr(line, secondary) | perm p |
+|------|---|---------|-----------|-----------------|-----------------------|--------|
+| 1995 | 31 | 0.67 % | 11.1× | 0.06 | −0.21 | 0.26 |
+| 1996 | 28 | 0.64 % | 13.6× | 0.08 | −0.14 | 0.48 |
+| 1997 | 29 | 0.53 % | 36.5× | 0.25 | +0.25 | 0.18 |
+| 1998 | 23 | 0.65 % | 5.2× | 0.03 | +0.12 | 0.59 |
+
+Every year independently shows: frequency stable to ~0.6 %, amplitude variable,
+frequency–amplitude decoupled, and **no significant correlation with the
+secondary microseism** (p > 0.18 each year; the sign even flips year to year).
+The result is not a one-off.
+
+### Calm-sea "gold samples" — the strongest pulses in the quietest seas
+
+Windows with the 26 s line in the top third of strength **and** the secondary
+microseism in the bottom third (10 of 111 windows). The single strongest 26 s
+window (1996-06-22, excess 8.1×10⁴) occurred while local seas were quiet
+(secondary 1.8×10⁶); conversely the loudest seas (boreal-winter storms,
+secondary up to 1.1×10⁷) coincided with the *weakest* 26 s. If the pulse were
+local-ocean-wave-driven this pattern should not exist. It is the cleanest
+single-window evidence for a non-local-ocean driver.
+
 ## Honest scope and caveats
 
-- **One station, two years.** GT.DBIC only, 1996–1997. Not a global or
-  multi-decadal claim. The seasonal *phase* of the 26 s amplitude was not robust
-  across the two years (the annual-harmonic relative amplitude is only ~0.17),
-  so we do **not** claim a clean seasonal cycle — only the decoupling and the
-  frequency stability, which are robust.
+- **One station, four years.** GT.DBIC only, 1995–1998 (replicated per-year).
+  Not a global or multi-decadal claim, and not yet cross-station — the next step
+  is to confirm the 27.7 s line and its decoupling at independent stations.
+  The seasonal *phase* of the 26 s amplitude was **not** robust across years
+  (annual-harmonic relative amplitude only ~0.17), so we make no seasonal-cycle
+  claim — only the frequency stability, amplitude independence, and decoupling,
+  which replicate.
 - **Null correlation ≠ proof of zero coupling.** With n = 57 the correlation's
   95 % interval still admits weak coupling; what is ruled out is a *strong*
   positive correlation (the signature of common ocean-wave forcing).

@@ -53,18 +53,21 @@ caveats, and references: **`docs/research/real-data-proof.md`**.
 
 ### Discovery: a frequency-stable resonance, decoupled from the ocean-wave field
 
-Pushing further (GT.DBIC, 1996–1997, 57 windows), the harness finds the 26 s
+Pushing further (GT.DBIC, **1995–1998**, 111 windows), the harness finds the
 pulse behaves like a **fixed-frequency resonator driven at variable strength**:
 
 ```
-frequency stable to CV 0.59 %  while  amplitude varies 36.5x
-corr(frequency, amplitude)            = 0.17   → frequency doesn't shift with drive
-corr(26 s amplitude, secondary microseism) = 0.04  (perm p = 0.75)  → NOT ocean-wave-driven
+frequency stable to CV ~0.6 %  while  amplitude varies up to 36x
+corr(frequency, amplitude)                 weak    → frequency doesn't shift with drive
+corr(pulse amplitude, secondary microseism) ~0, p>0.18 every year → NOT ocean-wave-driven
 ```
 
-A fixed resonant frequency, excited > 36× independently of the local ocean-wave
-energy — an independent, quantitative argument that the 26 s pulse is *not* an
-ordinary microseism. Method, statistics, and honest scope:
+Replicated independently in all 4 years; the strongest pulses occur in the
+*quietest* local seas ("gold samples"). A precise refit puts the dominant line
+at **27.72 s** (0.03607 Hz) — the canonical 26.0 s shows no excess here. A fixed
+resonant frequency, excited independently of local ocean-wave energy: an
+independent, quantitative argument that the pulse is *not* an ordinary
+microseism. Method, statistics, replication, and honest scope:
 **`docs/research/discovery-resonator-decoupling.md`** (`npm run climatology`).
 
 ```bash
