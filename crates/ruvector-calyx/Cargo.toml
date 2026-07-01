@@ -13,6 +13,10 @@ categories  = ["algorithms", "data-structures"]
 name = "calyx-bench"
 path = "src/main.rs"
 
+[[bin]]
+name = "calyx-routing-bench"
+path = "src/bin/routing_bench.rs"
+
 [lib]
 name = "ruvector_calyx"
 path = "src/lib.rs"

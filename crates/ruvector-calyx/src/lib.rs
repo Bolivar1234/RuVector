@@ -51,18 +51,25 @@
 
 pub mod anneal;
 pub mod assay;
+pub mod calibrate;
 pub mod constellation;
 pub mod engine;
 pub mod fusion;
 pub mod ledger;
 pub mod lens;
 pub mod loom;
+pub mod routing;
 pub mod rng;
 pub mod scoring;
 pub mod ward;
 
 pub use anneal::{anneal_weights, AnnealConfig, AnnealOutcome};
 pub use assay::{mutual_information_bits, signal_density, LensSignal, Observation};
+pub use calibrate::{
+    abstention_quality, expected_calibration_error, raw_confidence, AbstentionQuality, Calibrator,
+    ConfidenceSignals,
+};
+pub use routing::{route, RoutingConfig, RoutingMode, RoutingOutcome, Witness};
 pub use constellation::{Constellation, ConstellationStore, StoreError};
 pub use engine::{CalyxEngine, CalyxResult, Query};
 pub use fusion::{rrf, weighted_rrf, DEFAULT_RRF_K};

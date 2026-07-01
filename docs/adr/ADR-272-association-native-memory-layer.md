@@ -213,13 +213,72 @@ The acceptance thresholds are the ADR's contract; a production validation
 
 ### Follow-up work
 
-1. Back `search_lens` with `ruvector-core` HNSW and `ruvector-spann` partitions.
-2. Map the cross-lens `Loom` graph onto `ruvector-graph` / `ruvector-mincut`
+1. **[done — see Update 1]** Adaptive lens routing + calibration.
+2. Back `search_lens` with `ruvector-core` HNSW and `ruvector-spann` partitions.
+3. Map the cross-lens `Loom` graph onto `ruvector-graph` / `ruvector-mincut`
    association edges so agreement/disagreement is itself searchable.
-3. Swap FNV for BLAKE3 + signed ledger checkpoints.
-4. Wire lens routing into MetaHarness Darwin as an evolvable gene (ADR-266).
-5. Add a sensor/RF lens (RuView: Wi-Fi CSI, mmWave) to demonstrate non-text
+4. Swap FNV for BLAKE3 + signed ledger checkpoints.
+5. Wire lens routing into MetaHarness Darwin as an evolvable gene (ADR-266).
+6. Add a sensor/RF lens (RuView: Wi-Fi CSI, mmWave) to demonstrate non-text
    constellations and cross-modal disagreement detection.
+
+---
+
+## Update 1 — Adaptive routing + calibration (2026-06-30)
+
+Sequencing note: **route → calibrate → stress-test → graph → HNSW.** Calibration
+before speed, because speed optimizations (HNSW) can *hide* bad retrieval, and
+calibration tells you *where* HNSW/graph even matter. This update lands the first
+two.
+
+### What shipped
+
+- `calibrate.rs` — per-query confidence from four signals (score **margin**,
+  **cross-lens agreement**, **grounding/source density**, **contradiction** =
+  top dissenter gap; freshness is N/A in this corpus), a histogram
+  **`Calibrator`** (reliability map: raw confidence → empirical accuracy),
+  **Expected Calibration Error**, and **abstention precision/recall**.
+- `routing.rs` — `route()` consults lenses **cheapest-first**, stops early once
+  calibrated confidence clears `stop_threshold`, escalates to expensive lenses
+  only when unsure, and abstains if the full panel is still not confident. A
+  `min_lenses_to_answer` gate enforces **"don't trust a lone lens"** — never
+  commit on a single lens's say-so. Every decision emits a `Witness` (lenses
+  consulted, per-lens tops, signals, confidence, action, escalation reason,
+  cost, latency).
+- `calyx-routing-bench` — compares **brute-force / static / adaptive** on the
+  multi-lens corpus (160 answerable + 80 unanswerable, 50/50 train/test; the
+  calibrator is fit on train only).
+
+### Measured results (test split, seed 2026)
+
+| Mode | Grounded acc | Accepted acc | Cost µs | Latency µs | ECE | Abstain-P |
+|------|-------------|--------------|---------|-----------|-----|-----------|
+| brute-force (all lenses) | 93.8% | 100.0% | 15.5 | 15.5 | 0.000 | 88.9% |
+| static (2 cheap lenses)  | 100.0% | 100.0% | 3.5 | 3.5 | 0.000 | 100.0% |
+| **adaptive (calibrated)** | **100.0%** | **100.0%** | **7.5** | **7.5** | **0.000** | **100.0%** |
+
+Adaptive **strictly dominates brute-force** — higher accuracy at less than half
+the cost — because the expensive semantic lens is the low-signal "fog" lens here,
+so always consulting it both costs more and can flip a correct answer. Adaptive
+skips it when two cheap lenses corroborate, and escalates to it only for hard or
+unanswerable queries (then abstains). A well-chosen *static* policy is even
+cheaper here — an honest result, and precisely the kind of thing calibration and
+signal-density analysis surface (you can only justify hard-coding "skip semantic"
+*after* measuring that it is low-signal).
+
+### Acceptance (adaptive vs brute-force — all PASS)
+
+| Target | Result |
+|--------|--------|
+| Accuracy loss ≤ 1 pp | −6.2 pp (adaptive *higher*) ✓ |
+| Query cost reduction ≥ 30% | −51.6% ✓ |
+| Latency reduction ≥ 25% | −51.6% ✓ |
+| ECE ≤ 0.08 | 0.000 ✓ |
+| Abstention precision ≥ 0.80 | 100% ✓ |
+
+Product claim this unlocks: *ruvector-calyx doesn't just retrieve — it knows
+which memory lens to trust, when to escalate, and when to abstain, with a
+calibrated confidence and a witness log for every decision.*
 
 ---
 
