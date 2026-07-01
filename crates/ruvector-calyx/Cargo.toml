@@ -21,6 +21,10 @@ path = "src/bin/routing_bench.rs"
 name = "calyx-novel-bench"
 path = "src/bin/novel_bench.rs"
 
+[[bin]]
+name = "calyx-real-bench"
+path = "src/bin/real_bench.rs"
+
 [lib]
 name = "ruvector_calyx"
 path = "src/lib.rs"

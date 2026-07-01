@@ -350,6 +350,73 @@ guarantee. Benchmarks are synthetic and illustrative; real-corpus validation
 
 ---
 
+## Update 3 — Real-data path (`.calyx` format + CodeSearchNet, 2026-06-30)
+
+Addresses the standing honesty gap: how to move from synthetic to *real* data.
+The key architectural decision is to **separate lens production from the
+association layer**. Producing lenses (embedding models, BM25) needs models,
+GPUs, and network; the layer we benchmark (fusion, routing, conformal,
+disagreement) is pure Rust. So real embeddings are computed **offline, once**,
+and serialized — the crate loads precomputed vectors + ground truth (the same
+pattern as ann-benchmarks' precomputed HDF5).
+
+### What shipped
+
+- **`.calyx` v1 binary format** + a dependency-free `std::io` loader
+  (`corpus.rs`): lens manifests, records (slots + grounding anchors), and
+  queries with relevance ground truth. `n_relevant == 0` marks an *unanswerable*
+  query (abstaining is correct) — which is what makes conformal risk meaningful.
+- **`calyx-real-bench`** — loads a `.calyx` and reports the standard IR metrics
+  published baselines use (**MRR@10, Recall@1/10, nDCG@10**) for single-lens vs
+  multi-lens fusion, plus conformal abstention risk and code↔doc disagreement.
+  With no file it synthesizes a CodeSearchNet-shaped stand-in and round-trips it
+  through the loader, so the whole load→metrics path is provable offline.
+- **`tools/build_codesearchnet.py`** — the one model/network step: embeds each
+  function through a joint NL↔code model (`code` lens), a text model (`doc`
+  lens), and a dependency-free hashed-token lens (`lexical`); docstrings become
+  NL queries; a fraction of golds are held out to create unanswerable queries.
+  Emits byte-exact `.calyx`.
+
+### Why CodeSearchNet
+
+Code and docstring are genuinely different views, so cross-lens disagreement is
+real (a stale/incorrect docstring = code lens and doc lens point to different
+neighbourhoods), and it is a standard code-search retrieval benchmark with
+published MRR baselines.
+
+### Stand-in results (synthetic, CodeSearchNet-shaped — *not* a real-data claim)
+
+Each single lens is individually weak (code/doc resolve only to a module,
+lexical to a cross-cutting token cluster); only their fusion pins the exact
+function:
+
+| System | MRR@10 | R@1 | R@10 | nDCG@10 |
+|--------|--------|-----|------|---------|
+| single-lens [code] | 0.185 | 0.039 | 0.650 | 0.292 |
+| single-lens [doc] | 0.173 | 0.039 | 0.617 | 0.275 |
+| single-lens [lexical] | 0.204 | 0.078 | 0.689 | 0.314 |
+| **fusion (all lenses)** | **0.492** | **0.372** | **0.789** | **0.555** |
+
+Fusion beats the best single lens by **+0.288 MRR**. Conformal abstention holds
+its guarantee on real-style labels (test risk 5.0% ≤ α=0.10, 2.5% ≤ 0.05);
+planted stale docstrings surface at **100% precision** via code↔doc
+disagreement. These are stand-in numbers to validate the *pipeline*; real
+numbers require running the converter on CodeSearchNet.
+
+### To produce real numbers
+
+```
+pip install datasets sentence-transformers numpy
+python crates/ruvector-calyx/tools/build_codesearchnet.py --lang python --n 5000 --out corpus.calyx
+cargo run --release -p ruvector-calyx --bin calyx-real-bench -- corpus.calyx
+```
+
+Validity to enforce on real runs: official train/test splits (no leakage),
+bootstrap CIs, and the conformal exchangeability assumption (calibration and
+test drawn from the same distribution).
+
+---
+
 ## References
 
 - Royse 2026, "Calyx: An Association-Native Database and Its Path to

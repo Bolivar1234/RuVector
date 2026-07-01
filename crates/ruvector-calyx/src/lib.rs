@@ -54,6 +54,7 @@ pub mod assay;
 pub mod calibrate;
 pub mod conformal;
 pub mod constellation;
+pub mod corpus;
 pub mod disagreement;
 pub mod engine;
 pub mod fusion;
@@ -80,6 +81,7 @@ pub use disagreement::{
     find_conflicts, intrinsic_disagreement, neighbor_set, query_disagreement,
 };
 pub use ledger_policy::{learn as learn_policy, Action, Episode, LearnedPolicy};
+pub use corpus::{load as load_corpus, save as save_corpus, Corpus, RealQuery};
 pub use constellation::{Constellation, ConstellationStore, StoreError};
 pub use engine::{CalyxEngine, CalyxResult, Query};
 pub use fusion::{rrf, weighted_rrf, DEFAULT_RRF_K};
