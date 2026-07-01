@@ -282,6 +282,74 @@ calibrated confidence and a witness log for every decision.*
 
 ---
 
+## Update 2 — Three novel capabilities (2026-06-30)
+
+Beyond recombining known techniques, three capabilities that are genuinely
+fresh — one with a theorem behind it. Bench: `calyx-novel-bench`.
+
+### A. Conformal cross-lens abstention (the defensible one)
+
+Replaces the hand-tuned guard threshold with **conformal risk control**
+(Angelopoulos et al. 2022) over the cross-lens agreement score. Given a
+calibration set, `conformal::calibrate` picks the agreement threshold `t̂ =
+inf{ t : (n/(n+1))·R̂ₙ(t) + 1/(n+1) ≤ α }`; the router answers iff agreement
+`≥ t̂`. The result is a **distribution-free, finite-sample guarantee**: the
+expected rate of confident-but-wrong answers on exchangeable test queries is
+`≤ α`. "Fail closed" stops being a heuristic and becomes a number.
+
+Measured (Monte-Carlo over 200 splits, seed 90210):
+
+| α | threshold | coverage | test risk | selective err | MC mean risk |
+|---|-----------|----------|-----------|---------------|--------------|
+| hand-tuned (agree≥0.45) | 0.45 | 56.3% | **11.3%** | 20.1% | — (uncontrolled) |
+| 0.10 | 0.471 | 51.3% | 9.3% | 18.2% | **9.5% ≤ 0.10** ✓ |
+| 0.05 | 0.540 | 49.3% | 1.3% | 2.7% | **4.2% ≤ 0.05** ✓ |
+| 0.01 | 0.987 | 38.7% | 0.0% | 0.0% | **0.0% ≤ 0.01** ✓ |
+
+The hand-tuned guard's 11.3% wrong-answer rate is whatever fell out of a magic
+number; conformal turns it into a dial with a proof (tighten α → coverage
+drops, risk guaranteed). Applying conformal risk control specifically to
+*multi-lens routing/abstention* is close to open ground.
+
+### B. Disagreement as a query primitive
+
+`disagreement::find_conflicts(lens_a, lens_b)` ranks records by how much two
+lenses disagree — `1 − Jaccard` of a record's lens-A vs lens-B neighbourhoods
+(intrinsic), or `simₐ − s_b` against a query (query-relative). This is a
+retrieval operation a single-embedding store *cannot express* ("find where the
+structural lens and the semantic lens most disagree" — the "comment says one
+thing, the code does another" detector). Planted 6 conflict records
+(semantic ∈ topic X, structural ∈ another class); `find_conflicts@6` surfaced
+**6/6 (100% precision)** at disagreement score 1.0.
+
+### C. Learning the router from the ledger
+
+The `Witness` log is a trajectory dataset. `ledger_policy::learn` runs
+first-visit Monte-Carlo control over exploratory witness trajectories
+(state = `(lenses_consulted, agreement_bin)`, action = stop/continue) to learn a
+routing policy from logged provenance — the retrieval analogue of MetaHarness
+learning a harness from its trace.
+
+| Policy | Accuracy | Cost µs | Utility |
+|--------|----------|---------|---------|
+| brute-force | 48.0% | 15.5 | −0.057 |
+| static(2) | 65.3% | 3.5 | 0.620 |
+| **ledger-learned** | 65.3% | **2.9** | **0.661** |
+
+The learned policy *beats* both fixed baselines: it discovered it can bail after
+a single lens on low-agreement (likely-unanswerable) queries and abstain, saving
+cost, while consulting two lenses to corroborate answerable ones.
+
+### Honesty note
+
+Individually, most ingredients are established (multi-vector records, RRF,
+histogram calibration, conformal prediction, MC control). The contribution is
+the *synthesis over frozen heterogeneous lenses* plus (A) which has a real
+guarantee. Benchmarks are synthetic and illustrative; real-corpus validation
+(ADR-267) remains the bar for a research claim.
+
+---
+
 ## References
 
 - Royse 2026, "Calyx: An Association-Native Database and Its Path to
@@ -294,5 +362,7 @@ calibrated confidence and a witness log for every decision.*
   ResearchGate preprint (pub. 405933676).
 - Cormack, Clarke & Buettcher 2009, "Reciprocal Rank Fusion Outperforms
   Condorcet and Individual Rank Learning Methods", SIGIR.
+- Angelopoulos, Bates, Fisch, Lei & Schuster 2022, "Conformal Risk Control"
+  (arXiv:2208.02814).
 - ADR-269, ADR-270 (graph memory over RuVector); ADR-266, ADR-271 (Darwin/SONA
   self-improvement).

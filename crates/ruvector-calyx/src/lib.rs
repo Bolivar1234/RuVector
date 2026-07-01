@@ -52,10 +52,13 @@
 pub mod anneal;
 pub mod assay;
 pub mod calibrate;
+pub mod conformal;
 pub mod constellation;
+pub mod disagreement;
 pub mod engine;
 pub mod fusion;
 pub mod ledger;
+pub mod ledger_policy;
 pub mod lens;
 pub mod loom;
 pub mod routing;
@@ -70,6 +73,13 @@ pub use calibrate::{
     ConfidenceSignals,
 };
 pub use routing::{route, RoutingConfig, RoutingMode, RoutingOutcome, Witness};
+pub use conformal::{
+    calibrate as conformal_calibrate, coverage, empirical_risk, selective_error, ConformalSelector,
+};
+pub use disagreement::{
+    find_conflicts, intrinsic_disagreement, neighbor_set, query_disagreement,
+};
+pub use ledger_policy::{learn as learn_policy, Action, Episode, LearnedPolicy};
 pub use constellation::{Constellation, ConstellationStore, StoreError};
 pub use engine::{CalyxEngine, CalyxResult, Query};
 pub use fusion::{rrf, weighted_rrf, DEFAULT_RRF_K};
