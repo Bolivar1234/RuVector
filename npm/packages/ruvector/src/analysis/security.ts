@@ -57,6 +57,39 @@ export const SECURITY_PATTERNS: SecurityPattern[] = [
 ];
 
 /**
+ * Build a table of line-start offsets for a file (offsets[i] = index of the
+ * first character of line i+1). Computed once per file so per-match line
+ * numbers are O(log n) instead of an O(n) slice+split per match (ADR-275).
+ */
+function buildLineOffsets(content: string): number[] {
+  const offsets = [0];
+  for (let i = 0; i < content.length; i++) {
+    if (content.charCodeAt(i) === 10 /* '\n' */) {
+      offsets.push(i + 1);
+    }
+  }
+  return offsets;
+}
+
+/**
+ * Binary-search the offset table for the 1-based line number containing
+ * the given character index.
+ */
+function lineNumberAt(offsets: number[], index: number): number {
+  let lo = 0;
+  let hi = offsets.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (offsets[mid] <= index) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo + 1;
+}
+
+/**
  * Scan a single file for security issues
  */
 export function scanFile(
@@ -70,11 +103,13 @@ export function scanFile(
     const fileContent = content ?? (fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '');
     if (!fileContent) return findings;
 
+    const lineOffsets = buildLineOffsets(fileContent);
+
     for (const { pattern, rule, severity, message, suggestion } of patterns) {
       const regex = new RegExp(pattern.source, pattern.flags);
       let match;
       while ((match = regex.exec(fileContent)) !== null) {
-        const lineNum = fileContent.slice(0, match.index).split('\n').length;
+        const lineNum = lineNumberAt(lineOffsets, match.index);
         findings.push({
           file: filePath,
           line: lineNum,

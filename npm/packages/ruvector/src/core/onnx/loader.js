@@ -440,7 +440,30 @@ export async function createEmbedder(modelName = DEFAULT_MODEL, wasmModule = nul
 }
 
 /**
- * Quick helper for one-off embedding (loads model, embeds, returns)
+ * Memoized embedder instances for the convenience helpers, keyed by model
+ * name. Without this, every embed()/similarity() call re-instantiated the
+ * full WASM module and re-parsed the ONNX graph (hundreds of ms per call,
+ * ADR-275). The promise (not the resolved embedder) is stored so concurrent
+ * first calls share one in-flight initialization; a failed init is evicted
+ * so a later call can retry.
+ */
+const _embedderMemo = new Map();
+
+function getMemoizedEmbedder(modelName) {
+    let embedderPromise = _embedderMemo.get(modelName);
+    if (!embedderPromise) {
+        embedderPromise = createEmbedder(modelName).catch((err) => {
+            _embedderMemo.delete(modelName);
+            throw err;
+        });
+        _embedderMemo.set(modelName, embedderPromise);
+    }
+    return embedderPromise;
+}
+
+/**
+ * Quick helper for one-off embedding (loads model once per model name,
+ * embeds, returns — repeat calls reuse the same embedder instance)
  *
  * @example
  * ```javascript
@@ -451,7 +474,7 @@ export async function createEmbedder(modelName = DEFAULT_MODEL, wasmModule = nul
  * ```
  */
 export async function embed(text, modelName = DEFAULT_MODEL) {
-    const embedder = await createEmbedder(modelName);
+    const embedder = await getMemoizedEmbedder(modelName);
 
     if (Array.isArray(text)) {
         return embedder.embedBatch(text);
@@ -460,7 +483,7 @@ export async function embed(text, modelName = DEFAULT_MODEL) {
 }
 
 /**
- * Quick helper for similarity comparison
+ * Quick helper for similarity comparison (reuses the memoized embedder)
  *
  * @example
  * ```javascript
@@ -471,7 +494,7 @@ export async function embed(text, modelName = DEFAULT_MODEL) {
  * ```
  */
 export async function similarity(text1, text2, modelName = DEFAULT_MODEL) {
-    const embedder = await createEmbedder(modelName);
+    const embedder = await getMemoizedEmbedder(modelName);
     return embedder.similarity(text1, text2);
 }
 

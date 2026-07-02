@@ -129,23 +129,37 @@ type WorkerTask = BaseTask & (
   | { type: 'deduplicate'; items: string[]; threshold: number }
 );
 
+interface PendingWorkerTask {
+  task: WorkerTask;
+  resolve: (value: any) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
+/** File-keyed cache entry with the file's mtime captured at insert time */
+interface FileCacheEntry<T> {
+  value: T;
+  mtimeMs: number;
+}
+
 // ============================================================================
 // Extended Worker Pool
 // ============================================================================
 
 export class ExtendedWorkerPool {
+  /** Max entries per file cache (Map-order LRU, mtime-validated) */
+  private static readonly MAX_CACHE_ENTRIES = 500;
+
   private workers: Worker[] = [];
-  private taskQueue: Array<{
-    task: WorkerTask;
-    resolve: (value: any) => void;
-    reject: (error: Error) => void;
-    timeout: NodeJS.Timeout;
-  }> = [];
+  /** Tasks waiting for a free worker */
+  private taskQueue: PendingWorkerTask[] = [];
+  /** Tasks dispatched to a worker, keyed by task id (ADR-276) */
+  private pendingTasks: Map<string, PendingWorkerTask> = new Map();
   private busyWorkers: Map<Worker, string> = new Map();
   private config: Required<WorkerPoolConfig>;
   private initialized = false;
-  private speculativeCache: Map<string, SpeculativeEmbedding> = new Map();
-  private astCache: Map<string, ASTAnalysis> = new Map();
+  private speculativeCache: Map<string, FileCacheEntry<SpeculativeEmbedding>> = new Map();
+  private astCache: Map<string, FileCacheEntry<ASTAnalysis>> = new Map();
 
   constructor(config: WorkerPoolConfig = {}) {
     const isCLI = process.env.RUVECTOR_CLI === '1';
@@ -161,9 +175,6 @@ export class ExtendedWorkerPool {
 
   async init(): Promise<void> {
     if (this.initialized || !this.config.enabled) return;
-
-    const workerCode = this.getWorkerCode();
-    const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
 
     for (let i = 0; i < this.config.numWorkers; i++) {
       // Create worker from inline code
@@ -189,13 +200,6 @@ export class ExtendedWorkerPool {
     }
 
     this.initialized = true;
-  }
-
-  private getWorkerCode(): string {
-    return `
-      const { parentPort, workerData } = require('worker_threads');
-      ${this.getWorkerHandlers()}
-    `;
   }
 
   private getWorkerHandlers(): string {
@@ -638,16 +642,16 @@ export class ExtendedWorkerPool {
   private handleWorkerResult(worker: Worker, result: any): void {
     this.busyWorkers.delete(worker);
 
-    // Find and resolve the corresponding task
-    const taskIndex = this.taskQueue.findIndex(t => t.task.taskId === result.taskId);
-    if (taskIndex >= 0) {
-      const task = this.taskQueue.splice(taskIndex, 1)[0];
-      clearTimeout(task.timeout);
+    // Resolve the dispatched task from the pending map (O(1) by task id)
+    const pending = result ? this.pendingTasks.get(result.taskId) : undefined;
+    if (pending) {
+      this.pendingTasks.delete(result.taskId);
+      clearTimeout(pending.timeout);
 
       if (result.success) {
-        task.resolve(result.data);
+        pending.resolve(result.data);
       } else {
-        task.reject(new Error(result.error));
+        pending.reject(new Error(result.error));
       }
     }
 
@@ -659,9 +663,13 @@ export class ExtendedWorkerPool {
       const availableWorker = this.workers.find(w => !this.busyWorkers.has(w));
       if (!availableWorker) break;
 
-      const task = this.taskQueue[0];
-      this.busyWorkers.set(availableWorker, task.task.type);
-      availableWorker.postMessage(task.task);
+      // Shift the task off the queue into the pending map at dispatch, so a
+      // task is posted to exactly one worker (previously taskQueue[0] was
+      // never removed and got dispatched to every idle worker — ADR-276).
+      const pending = this.taskQueue.shift()!;
+      this.pendingTasks.set(pending.task.taskId!, pending);
+      this.busyWorkers.set(availableWorker, pending.task.type);
+      availableWorker.postMessage(pending.task);
     }
   }
 
@@ -680,23 +688,74 @@ export class ExtendedWorkerPool {
       }
 
       const timeout = setTimeout(() => {
+        // The task is either still queued or already dispatched (pending)
         const idx = this.taskQueue.findIndex(t => t.task.taskId === taskId);
         if (idx >= 0) {
           this.taskQueue.splice(idx, 1);
           reject(new Error('Task timeout'));
+        } else if (this.pendingTasks.delete(taskId)) {
+          reject(new Error('Task timeout'));
         }
       }, this.config.taskTimeout);
 
+      const pending: PendingWorkerTask = { task: taskWithId, resolve, reject, timeout };
       const availableWorker = this.workers.find(w => !this.busyWorkers.has(w));
 
       if (availableWorker) {
+        this.pendingTasks.set(taskId, pending);
         this.busyWorkers.set(availableWorker, task.type);
-        this.taskQueue.push({ task: taskWithId, resolve, reject, timeout });
         availableWorker.postMessage(taskWithId);
       } else {
-        this.taskQueue.push({ task: taskWithId, resolve, reject, timeout });
+        this.taskQueue.push(pending);
       }
     });
+  }
+
+  // =========================================================================
+  // Bounded, mtime-validated file caches (ADR-276)
+  // =========================================================================
+
+  private static fileMtimeMs(file: string): number {
+    try {
+      return fs.statSync(file).mtimeMs;
+    } catch {
+      return -1; // missing/unreadable files share a sentinel mtime
+    }
+  }
+
+  /**
+   * Get a cached value for a file; a changed mtime means the entry is stale
+   * (miss + evict). Hits are moved to the end of the Map (LRU recency).
+   */
+  private cacheGet<T>(cache: Map<string, FileCacheEntry<T>>, file: string): T | undefined {
+    const entry = cache.get(file);
+    if (!entry) return undefined;
+
+    if (ExtendedWorkerPool.fileMtimeMs(file) !== entry.mtimeMs) {
+      cache.delete(file);
+      return undefined;
+    }
+
+    // Refresh LRU recency (Map insertion order)
+    cache.delete(file);
+    cache.set(file, entry);
+    return entry.value;
+  }
+
+  /**
+   * Insert a value for a file, evicting the least recently used entry when
+   * the cache is at capacity.
+   */
+  private cacheSet<T>(cache: Map<string, FileCacheEntry<T>>, file: string, value: T): void {
+    if (cache.has(file)) {
+      cache.delete(file);
+    } else if (cache.size >= ExtendedWorkerPool.MAX_CACHE_ENTRIES) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey !== undefined) {
+        cache.delete(oldestKey);
+      }
+    }
+    cache.set(file, { value, mtimeMs: ExtendedWorkerPool.fileMtimeMs(file) });
   }
 
   // =========================================================================
@@ -714,24 +773,33 @@ export class ExtendedWorkerPool {
     const likelyFiles = coEditGraph.get(currentFile) || [];
     if (likelyFiles.length === 0) return [];
 
-    // Check cache first
-    const uncached = likelyFiles.filter(f => !this.speculativeCache.has(f));
-    if (uncached.length === 0) {
-      return likelyFiles.map(f => this.speculativeCache.get(f)!);
+    // Check cache first (bounded LRU, invalidated when the file's mtime changes)
+    const cached = new Map<string, SpeculativeEmbedding>();
+    const uncached: string[] = [];
+    for (const f of likelyFiles) {
+      const hit = this.cacheGet(this.speculativeCache, f);
+      if (hit) {
+        cached.set(f, hit);
+      } else {
+        uncached.push(f);
+      }
     }
 
-    const results = await this.execute<SpeculativeEmbedding[]>({
-      type: 'speculative-embed',
-      files: uncached,
-      coEditGraph,
-    });
+    if (uncached.length > 0) {
+      const results = await this.execute<SpeculativeEmbedding[]>({
+        type: 'speculative-embed',
+        files: uncached,
+        coEditGraph,
+      });
 
-    // Update cache
-    for (const result of results) {
-      this.speculativeCache.set(result.file, result);
+      // Update cache
+      for (const result of results) {
+        this.cacheSet(this.speculativeCache, result.file, result);
+        cached.set(result.file, result);
+      }
     }
 
-    return likelyFiles.map(f => this.speculativeCache.get(f)!).filter(Boolean);
+    return likelyFiles.map(f => cached.get(f)!).filter(Boolean);
   }
 
   // =========================================================================
@@ -743,23 +811,32 @@ export class ExtendedWorkerPool {
    * Hook: pre-edit, route
    */
   async analyzeAST(files: string[]): Promise<ASTAnalysis[]> {
-    // Check cache
-    const uncached = files.filter(f => !this.astCache.has(f));
-    if (uncached.length === 0) {
-      return files.map(f => this.astCache.get(f)!);
+    // Check cache (bounded LRU, invalidated when the file's mtime changes)
+    const cached = new Map<string, ASTAnalysis>();
+    const uncached: string[] = [];
+    for (const f of files) {
+      const hit = this.cacheGet(this.astCache, f);
+      if (hit) {
+        cached.set(f, hit);
+      } else {
+        uncached.push(f);
+      }
     }
 
-    const results = await this.execute<ASTAnalysis[]>({
-      type: 'ast-analyze',
-      files: uncached,
-    });
+    if (uncached.length > 0) {
+      const results = await this.execute<ASTAnalysis[]>({
+        type: 'ast-analyze',
+        files: uncached,
+      });
 
-    // Update cache
-    for (const result of results) {
-      this.astCache.set(result.file, result);
+      // Update cache
+      for (const result of results) {
+        this.cacheSet(this.astCache, result.file, result);
+        cached.set(result.file, result);
+      }
     }
 
-    return files.map(f => this.astCache.get(f)!).filter(Boolean);
+    return files.map(f => cached.get(f)!).filter(Boolean);
   }
 
   /**
@@ -873,12 +950,18 @@ export class ExtendedWorkerPool {
   }
 
   async shutdown(): Promise<void> {
-    // Clear pending tasks
+    // Clear queued and dispatched tasks
     for (const task of this.taskQueue) {
       clearTimeout(task.timeout);
       task.reject(new Error('Worker pool shutting down'));
     }
     this.taskQueue = [];
+
+    for (const task of this.pendingTasks.values()) {
+      clearTimeout(task.timeout);
+      task.reject(new Error('Worker pool shutting down'));
+    }
+    this.pendingTasks.clear();
 
     // Terminate workers
     await Promise.all(this.workers.map(w => w.terminate()));

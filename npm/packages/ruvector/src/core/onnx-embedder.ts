@@ -75,6 +75,11 @@ export interface OnnxEmbedderConfig {
 let simdAvailable = false;
 let parallelAvailable = false;
 
+// Memoized file-existence probes (ADR-275): the bundled files can't appear or
+// disappear mid-process, so stat the filesystem once instead of per call.
+let _onnxAvailable: boolean | null = null;
+let _parallelPoolAvailable: boolean | null = null;
+
 export interface EmbeddingResult {
   embedding: number[];
   dimension: number;
@@ -121,12 +126,15 @@ const DEFAULT_MODEL = 'all-MiniLM-L6-v2';
  * or `isReady()`. See https://github.com/ruvnet/RuVector/issues/523.
  */
 export function isOnnxAvailable(): boolean {
-  try {
-    const pkgPath = path.join(__dirname, 'onnx', 'pkg', 'ruvector_onnx_embeddings_wasm.js');
-    return fs.existsSync(pkgPath);
-  } catch {
-    return false;
+  if (_onnxAvailable === null) {
+    try {
+      const pkgPath = path.join(__dirname, 'onnx', 'pkg', 'ruvector_onnx_embeddings_wasm.js');
+      _onnxAvailable = fs.existsSync(pkgPath);
+    } catch {
+      _onnxAvailable = false;
+    }
   }
+  return _onnxAvailable;
 }
 
 /**
@@ -137,14 +145,16 @@ export function isOnnxAvailable(): boolean {
  * in ADR-194. See https://github.com/ruvnet/RuVector/issues/531.
  */
 function detectParallelAvailable(): boolean {
-  try {
-    const poolPath = path.join(__dirname, 'onnx', 'bundled-parallel.mjs');
-    parallelAvailable = fs.existsSync(poolPath);
-    return parallelAvailable;
-  } catch {
-    parallelAvailable = false;
-    return false;
+  if (_parallelPoolAvailable === null) {
+    try {
+      const poolPath = path.join(__dirname, 'onnx', 'bundled-parallel.mjs');
+      _parallelPoolAvailable = fs.existsSync(poolPath);
+    } catch {
+      _parallelPoolAvailable = false;
+    }
   }
+  parallelAvailable = _parallelPoolAvailable;
+  return _parallelPoolAvailable;
 }
 
 /**
@@ -158,6 +168,39 @@ function detectSimd(): boolean {
     }
   } catch {}
   return false;
+}
+
+/**
+ * Get the single shared bundled worker pool, creating it on first use.
+ *
+ * ADR-276: `tryInitParallel()` (the embedBatch path) and
+ * `initParallelEmbedder()`/`embedBulk()` (the bulk path) must share ONE
+ * `ParallelEmbedder` instance — previously each path built its own pool over
+ * the same model, doubling worker threads and per-worker model copies.
+ * Whichever pool variable is already populated is reused; a new pool is
+ * created only when neither exists.
+ */
+async function getOrCreateBundledPool(numWorkers?: number): Promise<any> {
+  if (bundledPool) return bundledPool;
+  if (parallelEmbedder) {
+    bundledPool = parallelEmbedder;
+    return bundledPool;
+  }
+  if (!loadedModelBytes || !loadedTokenizerJson) {
+    throw new Error('model bytes unavailable for bundled pool');
+  }
+  const poolUrl = pathToFileURL(path.join(__dirname, 'onnx', 'bundled-parallel.mjs')).href;
+  const { ParallelEmbedder } = await dynamicImport(poolUrl);
+  const pool = new ParallelEmbedder({
+    modelBytes: loadedModelBytes,
+    tokenizerJson: loadedTokenizerJson,
+    maxLength: loadedMaxLength,
+    dimension: embedder ? embedder.dimension() : 384,
+    numWorkers,
+  });
+  await pool.init();
+  bundledPool = pool;
+  return pool;
 }
 
 /**
@@ -183,19 +226,7 @@ async function tryInitParallel(config: OnnxEmbedderConfig): Promise<boolean> {
     return false;
   }
   try {
-    if (!loadedModelBytes || !loadedTokenizerJson) {
-      throw new Error('model bytes unavailable for bundled pool');
-    }
-    const poolUrl = pathToFileURL(path.join(__dirname, 'onnx', 'bundled-parallel.mjs')).href;
-    const { ParallelEmbedder } = await dynamicImport(poolUrl);
-    const pool = new ParallelEmbedder({
-      modelBytes: loadedModelBytes,
-      tokenizerJson: loadedTokenizerJson,
-      maxLength: loadedMaxLength,
-      dimension: embedder ? embedder.dimension() : 384,
-      numWorkers: config.numWorkers,
-    });
-    await pool.init();
+    const pool = await getOrCreateBundledPool(config.numWorkers);
     parallelEmbedder = pool;
     parallelThreshold = config.parallelThreshold || 4;
     parallelEnabled = true;
@@ -528,9 +559,15 @@ export function getStats(): {
  */
 export async function shutdown(): Promise<void> {
   if (parallelEmbedder) {
-    await parallelEmbedder.shutdown();
+    const pool = parallelEmbedder;
     parallelEmbedder = null;
     parallelEnabled = false;
+    // Both paths share one pool instance (ADR-276) — clear the other
+    // reference before shutting down so it isn't shut down twice.
+    if (bundledPool === pool) {
+      bundledPool = null;
+    }
+    await pool.shutdown();
   }
   await shutdownParallelEmbedder();
 }
@@ -546,20 +583,12 @@ export async function shutdown(): Promise<void> {
 export async function initParallelEmbedder(numWorkers?: number): Promise<boolean> {
   if (bundledPool) return true;
   if (!isInitialized) await initOnnxEmbedder();
-  if (!loadedModelBytes || !loadedTokenizerJson) {
+  // Reuses the pool started by tryInitParallel when one exists (ADR-276:
+  // one pool instance per process, never two pools over the same model).
+  if (!parallelEmbedder && (!loadedModelBytes || !loadedTokenizerJson)) {
     throw new Error('Model bytes unavailable; cannot start parallel embedder.');
   }
-  const poolUrl = pathToFileURL(path.join(__dirname, 'onnx', 'bundled-parallel.mjs')).href;
-  const { ParallelEmbedder } = await dynamicImport(poolUrl);
-  const pool = new ParallelEmbedder({
-    modelBytes: loadedModelBytes,
-    tokenizerJson: loadedTokenizerJson,
-    maxLength: loadedMaxLength,
-    dimension: getDimension(),
-    numWorkers,
-  });
-  await pool.init();
-  bundledPool = pool;
+  await getOrCreateBundledPool(numWorkers);
   return true;
 }
 
@@ -631,8 +660,14 @@ export async function embedBulk(
 /** Shut down the bundled worker pool and release its threads. */
 export async function shutdownParallelEmbedder(): Promise<void> {
   if (bundledPool) {
-    await bundledPool.shutdown();
+    const pool = bundledPool;
     bundledPool = null;
+    // Shared instance (ADR-276): clear the embedBatch-path reference too.
+    if (parallelEmbedder === pool) {
+      parallelEmbedder = null;
+      parallelEnabled = false;
+    }
+    await pool.shutdown();
   }
 }
 

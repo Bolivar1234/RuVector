@@ -23,7 +23,14 @@ import * as os from 'os';
 export interface ParallelConfig {
   /** Number of worker threads (default: CPU cores - 1) */
   numWorkers?: number;
-  /** Enable parallel processing (default: true for MCP, false for CLI) */
+  /**
+   * Enable parallel processing (default: false).
+   *
+   * ADR-276: the worker task handlers below are still stubs, so the pool is
+   * disabled by default (it previously auto-enabled under MCP and spawned
+   * threads that produced fabricated results). Opt in explicitly via this
+   * flag or by setting RUVECTOR_PARALLEL_INTELLIGENCE=1.
+   */
   enabled?: boolean;
   /** Minimum batch size to use parallel (default: 4) */
   batchThreshold?: number;
@@ -56,18 +63,22 @@ export interface CoEditAnalysis {
 
 export class ParallelIntelligence {
   private workers: Worker[] = [];
-  private taskQueue: Array<{ task: any; resolve: Function; reject: Function }> = [];
+  /** Queued task messages (each already carries its correlation id) */
+  private taskQueue: any[] = [];
   private busyWorkers: Set<Worker> = new Set();
+  /** Pending settlements keyed by task id (id-correlated protocol, ADR-276) */
+  private pending: Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }> = new Map();
+  private nextTaskId = 0;
   private config: Required<ParallelConfig>;
   private initialized = false;
 
   constructor(config: ParallelConfig = {}) {
-    const isCLI = process.env.RUVECTOR_CLI === '1';
-    const isMCP = process.env.MCP_SERVER === '1';
-
     this.config = {
       numWorkers: config.numWorkers ?? Math.max(1, os.cpus().length - 1),
-      enabled: config.enabled ?? (isMCP || (!isCLI && process.env.RUVECTOR_PARALLEL === '1')),
+      // ADR-276: disabled by default while the worker handlers are stubs.
+      // Explicit constructor opt-in or RUVECTOR_PARALLEL_INTELLIGENCE=1
+      // re-enables the pool.
+      enabled: config.enabled ?? (process.env.RUVECTOR_PARALLEL_INTELLIGENCE === '1'),
       batchThreshold: config.batchThreshold ?? 4,
     };
   }
@@ -83,8 +94,12 @@ export class ParallelIntelligence {
         workerData: { workerId: i },
       });
 
+      // Single permanent listener per worker: settle the pending promise by
+      // task id (per-dispatch temporary listeners leaked and queued tasks
+      // never got resolve/reject wired — ADR-276).
       worker.on('message', (result) => {
         this.busyWorkers.delete(worker);
+        this.settleTask(result);
         this.processQueue();
       });
 
@@ -100,19 +115,38 @@ export class ParallelIntelligence {
     console.error(`ParallelIntelligence: ${this.config.numWorkers} workers ready`);
   }
 
+  /**
+   * Settle the pending promise for a worker response by task id
+   */
+  private settleTask(result: any): void {
+    const entry = result === null || result === undefined
+      ? undefined
+      : this.pending.get(result.id);
+    if (!entry) return;
+
+    this.pending.delete(result.id);
+    if (result.error) {
+      entry.reject(new Error(result.error));
+    } else {
+      entry.resolve(result.data);
+    }
+  }
+
   private processQueue(): void {
     while (this.taskQueue.length > 0 && this.busyWorkers.size < this.workers.length) {
       const availableWorker = this.workers.find(w => !this.busyWorkers.has(w));
       if (!availableWorker) break;
 
-      const task = this.taskQueue.shift()!;
+      const message = this.taskQueue.shift()!;
       this.busyWorkers.add(availableWorker);
-      availableWorker.postMessage(task.task);
+      availableWorker.postMessage(message);
     }
   }
 
   /**
-   * Execute task in worker pool
+   * Execute task in worker pool. Each task gets a correlation id; the
+   * permanent per-worker message listener settles it via the pending map,
+   * so queued tasks resolve too (previously they hung forever — ADR-276).
    */
   private async executeInWorker<T>(task: any): Promise<T> {
     if (!this.initialized || !this.config.enabled) {
@@ -120,25 +154,16 @@ export class ParallelIntelligence {
     }
 
     return new Promise((resolve, reject) => {
-      const availableWorker = this.workers.find(w => !this.busyWorkers.has(w));
+      const id = this.nextTaskId++;
+      const message = { ...task, id };
+      this.pending.set(id, { resolve, reject });
 
+      const availableWorker = this.workers.find(w => !this.busyWorkers.has(w));
       if (availableWorker) {
         this.busyWorkers.add(availableWorker);
-
-        const handler = (result: any) => {
-          this.busyWorkers.delete(availableWorker);
-          availableWorker.off('message', handler);
-          if (result.error) {
-            reject(new Error(result.error));
-          } else {
-            resolve(result.data);
-          }
-        };
-
-        availableWorker.on('message', handler);
-        availableWorker.postMessage(task);
+        availableWorker.postMessage(message);
       } else {
-        this.taskQueue.push({ task, resolve, reject });
+        this.taskQueue.push(message);
       }
     });
   }
@@ -149,11 +174,19 @@ export class ParallelIntelligence {
 
   /**
    * Batch Q-learning episode recording (3-4x faster)
+   *
+   * Returns the number of episodes processed. Sub-threshold batches (or a
+   * disabled/uninitialized pool) are processed sequentially on the main
+   * thread instead of being silently dropped (ADR-276). The sequential path
+   * mirrors the worker-side `processEpisodes` handler exactly — both are
+   * currently stubs pending real Q-learning batch handlers.
    */
-  async recordEpisodesBatch(episodes: BatchEpisode[]): Promise<void> {
-    if (episodes.length < this.config.batchThreshold || !this.config.enabled) {
-      // Fall back to sequential
-      return;
+  async recordEpisodesBatch(episodes: BatchEpisode[]): Promise<number> {
+    if (episodes.length === 0) return 0;
+
+    if (episodes.length < this.config.batchThreshold || !this.config.enabled || !this.initialized) {
+      // Sequential fallback: same per-episode work as the worker handler
+      return processEpisodesSequential(episodes);
     }
 
     // Split into chunks for workers
@@ -163,9 +196,11 @@ export class ParallelIntelligence {
       chunks.push(episodes.slice(i, i + chunkSize));
     }
 
-    await Promise.all(chunks.map(chunk =>
-      this.executeInWorker({ type: 'recordEpisodes', episodes: chunk })
+    const counts = await Promise.all(chunks.map(chunk =>
+      this.executeInWorker<number>({ type: 'recordEpisodes', episodes: chunk })
     ));
+
+    return counts.reduce((sum, count) => sum + count, 0);
   }
 
   /**
@@ -285,12 +320,29 @@ export class ParallelIntelligence {
    * Shutdown worker pool
    */
   async shutdown(): Promise<void> {
+    // Reject anything still pending so callers don't hang on shutdown
+    for (const { reject } of this.pending.values()) {
+      reject(new Error('ParallelIntelligence shutting down'));
+    }
+    this.pending.clear();
+
     await Promise.all(this.workers.map(w => w.terminate()));
     this.workers = [];
     this.busyWorkers.clear();
     this.taskQueue = [];
     this.initialized = false;
   }
+}
+
+/**
+ * Sequential (main-thread) equivalent of the worker-side `processEpisodes`
+ * handler, used for sub-threshold batches and when the pool is disabled.
+ * The worker handlers are stubs today (ADR-276), so this mirrors them:
+ * it accounts for the episodes and returns the processed count. When real
+ * batch handlers land in the workers, this must be updated to match.
+ */
+function processEpisodesSequential(episodes: BatchEpisode[]): number {
+  return episodes.length;
 }
 
 // ============================================================================
@@ -340,9 +392,10 @@ if (!isMainThread && parentPort) {
           throw new Error(`Unknown task type: ${task.type}`);
       }
 
-      parentPort!.postMessage({ data: result });
+      // Echo the correlation id so the main thread can settle by id
+      parentPort!.postMessage({ id: task.id, data: result });
     } catch (error: any) {
-      parentPort!.postMessage({ error: error.message });
+      parentPort!.postMessage({ id: task.id, error: error.message });
     }
   });
 

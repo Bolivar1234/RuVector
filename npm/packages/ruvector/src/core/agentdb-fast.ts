@@ -74,12 +74,13 @@ export interface EpisodeSearchResult {
  * Fast in-memory AgentDB implementation
  */
 export class FastAgentDB {
+  // LRU via Map insertion order: delete+set refreshes recency, the first key
+  // is always the least recently used (O(1) instead of an order array).
   private episodes: Map<string, Episode> = new Map();
   private trajectories: Map<string, Trajectory> = new Map();
   private vectorDb: any = null;
   private dimensions: number;
   private maxEpisodes: number;
-  private episodeOrder: string[] = []; // For LRU eviction
 
   /**
    * Create a new FastAgentDB instance
@@ -126,16 +127,7 @@ export class FastAgentDB {
       timestamp: episode.timestamp ?? Date.now(),
     };
 
-    // LRU eviction if needed
-    if (this.episodes.size >= this.maxEpisodes) {
-      const oldestId = this.episodeOrder.shift();
-      if (oldestId) {
-        this.episodes.delete(oldestId);
-      }
-    }
-
-    this.episodes.set(id, fullEpisode);
-    this.episodeOrder.push(id);
+    this.insertEpisode(fullEpisode);
 
     // Index in vector DB if available
     if (this.vectorDb && fullEpisode.state.length === this.dimensions) {
@@ -153,9 +145,61 @@ export class FastAgentDB {
   }
 
   /**
+   * Insert an episode into the in-memory store with O(1) LRU eviction
+   */
+  private insertEpisode(episode: Episode): void {
+    if (this.episodes.has(episode.id)) {
+      // Delete + set refreshes recency for re-stored episodes
+      this.episodes.delete(episode.id);
+    } else if (this.episodes.size >= this.maxEpisodes) {
+      // Evict the least recently used episode (oldest in insertion order)
+      const oldestId = this.episodes.keys().next().value;
+      if (oldestId !== undefined) {
+        this.episodes.delete(oldestId);
+      }
+    }
+    this.episodes.set(episode.id, episode);
+  }
+
+  /**
    * Store multiple episodes in batch
+   *
+   * Uses the native `insertBatch` binding (one round-trip) when available,
+   * falling back to per-item `storeEpisode` otherwise.
    */
   async storeEpisodes(episodes: (Omit<Episode, 'id'> & { id?: string })[]): Promise<string[]> {
+    await this.initVectorDb();
+
+    if (this.vectorDb && typeof this.vectorDb.insertBatch === 'function') {
+      const ids: string[] = [];
+      const batch: Array<{ id: string; vector: Float32Array }> = [];
+
+      for (const episode of episodes) {
+        const id = episode.id ?? this.generateId();
+        const fullEpisode: Episode = {
+          ...episode,
+          id,
+          timestamp: episode.timestamp ?? Date.now(),
+        };
+        this.insertEpisode(fullEpisode);
+        if (fullEpisode.state.length === this.dimensions) {
+          batch.push({ id, vector: new Float32Array(fullEpisode.state) });
+        }
+        ids.push(id);
+      }
+
+      if (batch.length > 0) {
+        try {
+          await this.vectorDb.insertBatch(batch);
+        } catch {
+          // Ignore indexing errors (same as storeEpisode)
+        }
+      }
+
+      return ids;
+    }
+
+    // Fallback: per-item inserts
     const ids: string[] = [];
     for (const episode of episodes) {
       const id = await this.storeEpisode(episode);
@@ -170,12 +214,9 @@ export class FastAgentDB {
   async getEpisode(id: string): Promise<Episode | null> {
     const episode = this.episodes.get(id);
     if (episode) {
-      // Update LRU order
-      const idx = this.episodeOrder.indexOf(id);
-      if (idx > -1) {
-        this.episodeOrder.splice(idx, 1);
-        this.episodeOrder.push(id);
-      }
+      // Update LRU recency: delete + set moves the entry to the end (O(1))
+      this.episodes.delete(id);
+      this.episodes.set(id, episode);
     }
     return episode ?? null;
   }
@@ -345,7 +386,6 @@ export class FastAgentDB {
   clear(): void {
     this.episodes.clear();
     this.trajectories.clear();
-    this.episodeOrder = [];
   }
 
   /**

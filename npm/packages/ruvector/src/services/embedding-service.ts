@@ -21,6 +21,8 @@ export interface EmbeddingProvider {
  * Cached embedding entry
  */
 interface CacheEntry {
+  /** Original text, kept to guard against 32-bit hash-key collisions */
+  text: string;
   embedding: number[];
   timestamp: number;
   hits: number;
@@ -198,9 +200,14 @@ export class EmbeddingService {
       const cacheKey = `${providerName}:${hashText(texts[i])}`;
       const cached = this.cache.get(cacheKey);
 
-      if (cached && now - cached.timestamp < this.config.cacheTtl) {
+      // Collision guard: the 32-bit hash key can collide, so only trust the
+      // entry when it was stored for this exact text (mismatch = cache miss).
+      if (cached && cached.text === texts[i] && now - cached.timestamp < this.config.cacheTtl) {
         results[i] = cached.embedding;
         cached.hits++;
+        // Refresh LRU recency (Map insertion order)
+        this.cache.delete(cacheKey);
+        this.cache.set(cacheKey, cached);
       } else {
         uncachedIndices.push(i);
         uncachedTexts.push(texts[i]);
@@ -224,7 +231,7 @@ export class EmbeddingService {
 
           // Cache the result
           const cacheKey = `${providerName}:${hashText(texts[originalIndex])}`;
-          this.addToCache(cacheKey, embeddings[j], now);
+          this.addToCache(cacheKey, texts[originalIndex], embeddings[j], now);
         }
 
         batchOffset += batch.length;
@@ -243,30 +250,21 @@ export class EmbeddingService {
   }
 
   /**
-   * Add entry to cache with LRU eviction
+   * Add entry to cache with O(1) LRU eviction (Map insertion order)
    */
-  private addToCache(key: string, embedding: number[], timestamp: number): void {
-    // Evict old entries if cache is full
-    if (this.cache.size >= this.config.maxCacheSize) {
-      // Find and remove least recently used entry
-      let oldestKey = '';
-      let oldestTime = Infinity;
-      let lowestHits = Infinity;
-
-      for (const [k, v] of this.cache.entries()) {
-        if (v.hits < lowestHits || (v.hits === lowestHits && v.timestamp < oldestTime)) {
-          oldestKey = k;
-          oldestTime = v.timestamp;
-          lowestHits = v.hits;
-        }
-      }
-
-      if (oldestKey) {
+  private addToCache(key: string, text: string, embedding: number[], timestamp: number): void {
+    if (this.cache.has(key)) {
+      // Delete + set refreshes recency (also overwrites a colliding entry)
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.config.maxCacheSize) {
+      // Evict the least recently used entry: oldest in insertion order
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) {
         this.cache.delete(oldestKey);
       }
     }
 
-    this.cache.set(key, { embedding, timestamp, hits: 0 });
+    this.cache.set(key, { text, embedding, timestamp, hits: 0 });
   }
 
   /**
