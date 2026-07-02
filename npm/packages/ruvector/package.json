@@ -14,7 +14,8 @@
   },
   "sideEffects": false,
   "bin": {
-    "ruvector": "./bin/cli.js"
+    "ruvector": "./bin/cli.js",
+    "ruvector-hooks": "./bin/hooks.js"
   },
   "scripts": {
     "build": "tsc && node -e \"require('fs').cpSync('src/core/onnx','dist/core/onnx',{recursive:true,filter:(s)=>!/\\.(db|sqlite|sqlite3|log|tgz)$/i.test(s)})\"",

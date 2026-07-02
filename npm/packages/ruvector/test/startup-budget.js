@@ -31,21 +31,27 @@ const DELTA_BUDGET_MS = Number(process.env.RUVECTOR_STARTUP_DELTA_MS || 120);
 // (ADR-274). `hooks stats` loads the intelligence engine today, so its budget
 // is looser than the harness delta; tighten as ADR-274 phases land.
 const HOOKS_DELTA_BUDGET_MS = Number(process.env.RUVECTOR_HOOKS_DELTA_MS || 1000);
+// ADR-274 phase 1: the commander-free micro-entry (bin/hooks.js) must stay
+// near bare Node boot cost. Measured median ~50ms; the default budget is ~2x
+// that for CI headroom — a regression to full-CLI cost (commander/chalk/445KB
+// parse leaking into the module path) blows well past it on CI boxes.
+const HOOKS_ENTRY = path.join(__dirname, '..', 'bin', 'hooks.js');
+const HOOKS_ENTRY_BUDGET_MS = Number(process.env.RUVECTOR_HOOKS_ENTRY_BUDGET_MS || 100);
 const SAMPLES = Number(process.env.RUVECTOR_STARTUP_SAMPLES || 5);
 
-function timeMs(args) {
+function timeMs(args, entry = CLI) {
   const start = process.hrtime.bigint();
   try {
-    execSync(`node ${CLI} ${args}`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 20000, cwd: CWD });
+    execSync(`node ${entry} ${args}`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 20000, cwd: CWD });
   } catch {
     // non-zero exit still yields a valid timing
   }
   return Number(process.hrtime.bigint() - start) / 1e6;
 }
 
-function median(args) {
+function median(args, entry = CLI) {
   const t = [];
-  for (let i = 0; i < SAMPLES; i++) t.push(timeMs(args));
+  for (let i = 0; i < SAMPLES; i++) t.push(timeMs(args, entry));
   t.sort((a, b) => a - b);
   return t[Math.floor(t.length / 2)];
 }
@@ -63,16 +69,19 @@ console.log(`  samples=${SAMPLES}  abs_budget=${ABS_BUDGET_MS}ms  delta_budget=$
 
 // Warm up (filesystem cache, AV scan of the file, etc.)
 timeMs('--version');
+timeMs('stats', HOOKS_ENTRY);
 
 const helpMs = median('--help');
 const harnessMs = median('harness status --json');
 const hooksMs = median('hooks stats');
+const hooksEntryMs = median('stats', HOOKS_ENTRY);
 const delta = harnessMs - helpMs;
 const hooksDelta = hooksMs - helpMs;
 
 console.log(`  --help (cold):            ${helpMs.toFixed(0)}ms`);
 console.log(`  harness status --json:    ${harnessMs.toFixed(0)}ms  (Δ ${delta >= 0 ? '+' : ''}${delta.toFixed(0)}ms vs --help)`);
-console.log(`  hooks stats:              ${hooksMs.toFixed(0)}ms  (Δ ${hooksDelta >= 0 ? '+' : ''}${hooksDelta.toFixed(0)}ms vs --help)\n`);
+console.log(`  hooks stats:              ${hooksMs.toFixed(0)}ms  (Δ ${hooksDelta >= 0 ? '+' : ''}${hooksDelta.toFixed(0)}ms vs --help)`);
+console.log(`  hooks.js stats (micro):   ${hooksEntryMs.toFixed(0)}ms\n`);
 
 test(`--help cold start under ${ABS_BUDGET_MS}ms absolute budget`, () => {
   assert(helpMs < ABS_BUDGET_MS,
@@ -87,6 +96,12 @@ test(`harness status adds < ${DELTA_BUDGET_MS}ms over --help baseline (no lazy-l
 test(`hooks stats adds < ${HOOKS_DELTA_BUDGET_MS}ms over --help baseline (hooks hot path, ADR-274)`, () => {
   assert(hooksDelta < HOOKS_DELTA_BUDGET_MS,
     `hooks stats added ${hooksDelta.toFixed(0)}ms over --help — the hooks hot path regressed (fires on every Claude Code tool use)`);
+});
+
+test(`hooks micro-entry (bin/hooks.js stats) under ${HOOKS_ENTRY_BUDGET_MS}ms (ADR-274 phase 1)`, () => {
+  assert(hooksEntryMs < HOOKS_ENTRY_BUDGET_MS,
+    `bin/hooks.js stats took ${hooksEntryMs.toFixed(0)}ms, exceeds ${HOOKS_ENTRY_BUDGET_MS}ms — commander/chalk or an eager dist module ` +
+    `may have leaked into the micro-entry (set RUVECTOR_HOOKS_ENTRY_BUDGET_MS to override)`);
 });
 
 console.log('\n' + '='.repeat(60));

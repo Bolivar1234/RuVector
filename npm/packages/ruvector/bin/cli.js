@@ -2983,6 +2983,30 @@ function loadIntelligenceEngine() {
   return IntelligenceEngine;
 }
 
+// ADR-274 phase 1: the hooks lifecycle handlers (pre-edit/post-edit/
+// pre-command/post-command/stats) live in bin/hooks.js so this CLI and the
+// commander-free micro-entry (`ruvector-hooks`) share ONE implementation.
+// Lazy: --help and non-hooks commands never load it. Requiring hooks.js as a
+// module is side-effect free (its dispatch runs only under require.main).
+let hooksImplMod = null;
+function loadHooksImpl() {
+  if (!hooksImplMod) hooksImplMod = require('./hooks.js');
+  return hooksImplMod;
+}
+// Chalk-backed style for the shared handlers (the micro-entry uses identity).
+function hooksChalkStyle() {
+  return {
+    bold: chalk.bold,
+    boldCyan: chalk.bold.cyan,
+    cyan: chalk.cyan,
+    green: chalk.green,
+    greenBold: chalk.green.bold,
+    dim: chalk.dim,
+    red: chalk.red,
+    yellow: chalk.yellow,
+  };
+}
+
 // ADR-210 D0: shared embedding-provenance invariant (compare/refuse logic,
 // legacy-default derivation, rollout-flag resolution). Lazy, same pattern as
 // the engine: when dist is missing the CLI degrades to pre-ADR-210 behavior.
@@ -4598,17 +4622,8 @@ npx ruvector hooks init --force      # Overwrite existing configuration
 });
 
 hooksCmd.command('stats').description('Show intelligence statistics').action(() => {
-  const intel = new Intelligence();
-  const stats = intel.stats();
-  const swarm = intel.swarmStats();
-  console.log(chalk.bold.cyan('\n🧠 RuVector Intelligence Stats\n'));
-  console.log(`  ${chalk.green(stats.total_patterns)} Q-learning patterns`);
-  console.log(`  ${chalk.green(stats.total_memories)} vector memories`);
-  console.log(`  ${chalk.green(stats.total_trajectories)} learning trajectories`);
-  console.log(`  ${chalk.green(stats.total_errors)} error patterns\n`);
-  console.log(chalk.bold('Swarm Status:'));
-  console.log(`  ${chalk.cyan(swarm.agents)} agents registered`);
-  console.log(`  ${chalk.cyan(swarm.edges)} coordination edges`);
+  // ADR-274: shared handler in bin/hooks.js (also the `ruvector-hooks` micro-entry)
+  loadHooksImpl().stats(new Intelligence(), hooksChalkStyle());
 });
 
 hooksCmd.command('session-start').description('Session start hook').option('--resume', 'Resume previous session').action(() => {
@@ -4628,62 +4643,23 @@ hooksCmd.command('session-end').description('Session end hook').option('--export
 });
 
 hooksCmd.command('pre-edit').description('Pre-edit intelligence').argument('<file>', 'File path').action((file) => {
-  const intel = new Intelligence();
-  const fileName = path.basename(file);
-  const crateMatch = file.match(/crates\/([^/]+)/);
-  const crate = crateMatch?.[1];
-  const { agent, confidence, reason } = intel.route(`edit ${fileName}`, file, crate, 'edit');
-  console.log(chalk.bold('🧠 Intelligence Analysis:'));
-  console.log(`   📁 ${chalk.cyan(crate ?? 'project')}/${fileName}`);
-  console.log(`   🤖 Recommended: ${chalk.green.bold(agent)} (${(confidence * 100).toFixed(0)}% confidence)`);
-  if (reason) console.log(`      → ${chalk.dim(reason)}`);
-  const nextFiles = intel.suggestNext(file, 3);
-  if (nextFiles.length > 0) {
-    console.log('   📎 Likely next files:');
-    nextFiles.forEach(n => console.log(`      - ${n.file} (${n.score} edits)`));
-  }
+  // ADR-274: shared handler in bin/hooks.js (also the `ruvector-hooks` micro-entry)
+  loadHooksImpl().preEdit(new Intelligence(), file, hooksChalkStyle());
 });
 
 hooksCmd.command('post-edit').description('Post-edit learning').argument('<file>', 'File path').option('--success', 'Edit succeeded').option('--error <msg>', 'Error message').action((file, opts) => {
-  const intel = new Intelligence();
-  const success = opts.error ? false : (opts.success ?? true);
-  const ext = path.extname(file).slice(1);
-  const crateMatch = file.match(/crates\/([^/]+)/);
-  const crate = crateMatch?.[1] ?? 'project';
-  const state = `edit_${ext}_in_${crate}`;
-  const lastFile = intel.getLastEditedFile();
-  if (lastFile && lastFile !== file) intel.recordFileSequence(lastFile, file);
-  intel.learn(state, success ? 'successful-edit' : 'failed-edit', success ? 'completed' : 'failed', success ? 1.0 : -0.5);
-  // Best-effort: a provenance-locked store (ADR-210) must not fail the hook
-  intel.tryRemember('edit', `${success ? 'successful' : 'failed'} edit of ${ext} in ${crate}`);
-  intel.save();
-  console.log(`📊 Learning recorded: ${success ? '✅' : '❌'} ${path.basename(file)}`);
-  const test = intel.shouldTest(file);
-  if (test.suggest) console.log(`   🧪 Consider: ${chalk.cyan(test.command)}`);
+  // ADR-274: shared handler in bin/hooks.js (also the `ruvector-hooks` micro-entry)
+  loadHooksImpl().postEdit(new Intelligence(), file, opts, hooksChalkStyle());
 });
 
 hooksCmd.command('pre-command').description('Pre-command intelligence').argument('<command...>', 'Command').action((command) => {
-  const intel = new Intelligence();
-  const cmd = command.join(' ');
-  const classification = intel.classifyCommand(cmd);
-  console.log(chalk.bold('🧠 Command Analysis:'));
-  console.log(`   📦 Category: ${chalk.cyan(classification.category)}`);
-  console.log(`   🏷️  Type: ${classification.subcategory}`);
-  if (classification.risk === 'high') console.log(`   ⚠️  Risk: ${chalk.red('HIGH')} - Review carefully`);
-  else if (classification.risk === 'medium') console.log(`   ⚡ Risk: ${chalk.yellow('MEDIUM')}`);
-  else console.log(`   ✅ Risk: ${chalk.green('LOW')}`);
+  // ADR-274: shared handler in bin/hooks.js (also the `ruvector-hooks` micro-entry)
+  loadHooksImpl().preCommand(new Intelligence(), command.join(' '), hooksChalkStyle());
 });
 
 hooksCmd.command('post-command').description('Post-command learning').argument('<command...>', 'Command').option('--success', 'Success').option('--error <msg>', 'Error message').action((command, opts) => {
-  const intel = new Intelligence();
-  const cmd = command.join(' ');
-  const success = opts.error ? false : (opts.success ?? true);
-  const classification = intel.classifyCommand(cmd);
-  intel.learn(`cmd_${classification.category}_${classification.subcategory}`, success ? 'success' : 'failure', success ? 'completed' : 'failed', success ? 0.8 : -0.3);
-  // Best-effort: a provenance-locked store (ADR-210) must not fail the hook
-  intel.tryRemember('command', `${cmd} ${success ? 'succeeded' : 'failed'}`);
-  intel.save();
-  console.log(`📊 Command ${success ? '✅' : '❌'} recorded`);
+  // ADR-274: shared handler in bin/hooks.js (also the `ruvector-hooks` micro-entry)
+  loadHooksImpl().postCommand(new Intelligence(), command.join(' '), opts);
 });
 
 hooksCmd.command('route').description('Route task to agent').argument('<task...>', 'Task').option('--file <file>', 'File').option('--crate <crate>', 'Crate').action((task, opts) => {
