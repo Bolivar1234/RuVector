@@ -46,6 +46,12 @@ index.d.ts
 # optimizer test could not resolve it.
 !npm/packages/ruvector/src/optimizer/index.js
 
+# Packed tarballs and stray tsc output must never be committed under npm
+# packages (ADR-272): tsc emits to dist/, and .npmignore cannot protect git.
+npm/packages/*/*.tgz
+npm/packages/ruvector/src/**/*.js.map
+npm/packages/ruvector/src/**/*.d.ts.map
+
 # Environment variables and secrets
 .env
 **/.env

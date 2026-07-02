@@ -25,8 +25,12 @@ const assert = require('assert');
 const CLI = path.join(__dirname, '..', 'bin', 'cli.js');
 const CWD = path.join(__dirname, '..');
 
-const ABS_BUDGET_MS = Number(process.env.RUVECTOR_STARTUP_BUDGET_MS || 2000);
+const ABS_BUDGET_MS = Number(process.env.RUVECTOR_STARTUP_BUDGET_MS || 500);
 const DELTA_BUDGET_MS = Number(process.env.RUVECTOR_STARTUP_DELTA_MS || 120);
+// Hooks fire on every Claude Code tool use, so they get their own delta guard
+// (ADR-274). `hooks stats` loads the intelligence engine today, so its budget
+// is looser than the harness delta; tighten as ADR-274 phases land.
+const HOOKS_DELTA_BUDGET_MS = Number(process.env.RUVECTOR_HOOKS_DELTA_MS || 1000);
 const SAMPLES = Number(process.env.RUVECTOR_STARTUP_SAMPLES || 5);
 
 function timeMs(args) {
@@ -62,10 +66,13 @@ timeMs('--version');
 
 const helpMs = median('--help');
 const harnessMs = median('harness status --json');
+const hooksMs = median('hooks stats');
 const delta = harnessMs - helpMs;
+const hooksDelta = hooksMs - helpMs;
 
 console.log(`  --help (cold):            ${helpMs.toFixed(0)}ms`);
-console.log(`  harness status --json:    ${harnessMs.toFixed(0)}ms  (Δ ${delta >= 0 ? '+' : ''}${delta.toFixed(0)}ms vs --help)\n`);
+console.log(`  harness status --json:    ${harnessMs.toFixed(0)}ms  (Δ ${delta >= 0 ? '+' : ''}${delta.toFixed(0)}ms vs --help)`);
+console.log(`  hooks stats:              ${hooksMs.toFixed(0)}ms  (Δ ${hooksDelta >= 0 ? '+' : ''}${hooksDelta.toFixed(0)}ms vs --help)\n`);
 
 test(`--help cold start under ${ABS_BUDGET_MS}ms absolute budget`, () => {
   assert(helpMs < ABS_BUDGET_MS,
@@ -75,6 +82,11 @@ test(`--help cold start under ${ABS_BUDGET_MS}ms absolute budget`, () => {
 test(`harness status adds < ${DELTA_BUDGET_MS}ms over --help baseline (no lazy-load regression)`, () => {
   assert(delta < DELTA_BUDGET_MS,
     `harness status added ${delta.toFixed(0)}ms over --help — a heavy module may have leaked into the startup path`);
+});
+
+test(`hooks stats adds < ${HOOKS_DELTA_BUDGET_MS}ms over --help baseline (hooks hot path, ADR-274)`, () => {
+  assert(hooksDelta < HOOKS_DELTA_BUDGET_MS,
+    `hooks stats added ${hooksDelta.toFixed(0)}ms over --help — the hooks hot path regressed (fires on every Claude Code tool use)`);
 });
 
 console.log('\n' + '='.repeat(60));

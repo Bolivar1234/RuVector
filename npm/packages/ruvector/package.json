@@ -4,11 +4,20 @@
   "description": "Self-learning vector database for Node.js \u2014 hybrid search, Graph RAG, FlashAttention-3, HNSW, 50+ attention mechanisms",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
   "bin": {
     "ruvector": "./bin/cli.js"
   },
   "scripts": {
-    "build": "tsc && node -e \"require('fs').cpSync('src/core/onnx','dist/core/onnx',{recursive:true})\"",
+    "build": "tsc && node -e \"require('fs').cpSync('src/core/onnx','dist/core/onnx',{recursive:true,filter:(s)=>!/\\.(db|sqlite|sqlite3|log|tgz)$/i.test(s)})\"",
     "verify-dist": "node scripts/verify-dist.js",
     "prepack": "npm run build && npm run verify-dist",
     "prepublishOnly": "npm run build && npm run verify-dist",
@@ -78,12 +87,11 @@
     "@ruvector/sona": "^0.1.4",
     "chalk": "^4.1.2",
     "commander": "^11.1.0",
-    "js-beautify": "^1.15.4",
     "ora": "^5.4.1"
   },
   "optionalDependencies": {
-    "@ruvector/rvf": "^0.1.0",
-    "@ruvector/tiny-dancer": "^0.1.22"
+    "@ruvector/tiny-dancer": "^0.1.22",
+    "js-beautify": "^1.15.4"
   },
   "devDependencies": {
     "@types/node": "^20.10.5",
@@ -102,10 +110,14 @@
     "@ruvector/diskann": ">=0.1.0",
     "@ruvector/pi-brain": ">=0.1.0",
     "@ruvector/router": ">=0.1.0",
-    "@ruvector/ruvllm": ">=2.0.0"
+    "@ruvector/ruvllm": ">=2.0.0",
+    "@ruvector/rvf": ">=0.1.0"
   },
   "peerDependenciesMeta": {
     "@ruvector/pi-brain": {
+      "optional": true
+    },
+    "@ruvector/rvf": {
       "optional": true
     },
     "@ruvector/ruvllm": {

@@ -3,6 +3,10 @@
 // Signal CLI context (disables parallel workers - hooks are short-lived)
 process.env.RUVECTOR_CLI = '1';
 
+// On-disk V8 compile cache (Node >=22, no-op elsewhere): cuts repeat parse
+// cost of this large single-file CLI across invocations (ADR-274).
+try { require('node:module').enableCompileCache?.(); } catch { /* best-effort */ }
+
 const { Command } = require('commander');
 const _chalk = require('chalk');
 const chalk = _chalk.default || _chalk;
