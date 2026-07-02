@@ -16,92 +16,114 @@ export * from './types';
 export * from './core';
 export * from './services';
 
-let implementation: any;
-let implementationType: 'native' | 'rvf' | 'wasm' = 'wasm';
+type ImplementationType = 'native' | 'rvf' | 'wasm';
 
-// Check for explicit --backend rvf flag or RUVECTOR_BACKEND env var
-const rvfRequested = process.env.RUVECTOR_BACKEND === 'rvf' ||
-  process.argv.includes('--backend') && process.argv[process.argv.indexOf('--backend') + 1] === 'rvf';
+interface SelectedImplementation {
+  implementation: any;
+  implementationType: ImplementationType;
+}
 
-if (rvfRequested) {
-  // Explicit rvf backend requested - fail hard if not available
-  try {
-    implementation = require('@ruvector/rvf');
-    implementationType = 'rvf';
-  } catch (e: any) {
-    throw new Error(
-      '@ruvector/rvf is not installed.\n' +
-      '  Run: npm install @ruvector/rvf\n' +
-      '  The --backend rvf flag requires this package.'
-    );
-  }
-} else {
-  try {
-    // Try to load native module first
-    implementation = require('@ruvector/core');
-    implementationType = 'native';
+// Memoized backend selection (ADR-274 phase 2): the native NAPI dlopen /
+// fallback chain runs on first use, NOT at require('ruvector') time.
+// Mirrors the lazy pattern in src/core/router-wrapper.ts.
+let selectedImplementation: SelectedImplementation | null = null;
+let implementationLoadError: Error | null = null;
 
-    // Verify it's actually working (native module exports VectorDb, not VectorDB)
-    if (typeof implementation.VectorDb !== 'function') {
-      throw new Error('Native module loaded but VectorDb class not found');
-    }
-  } catch (e: any) {
-    // Try rvf (persistent store) as second fallback
+function getImplementation(): SelectedImplementation {
+  if (selectedImplementation) return selectedImplementation;
+  if (implementationLoadError) throw implementationLoadError;
+
+  let implementation: any;
+  let implementationType: ImplementationType = 'wasm';
+
+  // Check for explicit --backend rvf flag or RUVECTOR_BACKEND env var
+  const rvfRequested = process.env.RUVECTOR_BACKEND === 'rvf' ||
+    process.argv.includes('--backend') && process.argv[process.argv.indexOf('--backend') + 1] === 'rvf';
+
+  if (rvfRequested) {
+    // Explicit rvf backend requested - fail hard if not available
     try {
       implementation = require('@ruvector/rvf');
       implementationType = 'rvf';
-    } catch (rvfErr: any) {
-      // Graceful fallback - don't crash, just warn
-      console.warn('[RuVector] Native module not available:', e.message);
-      console.warn('[RuVector] RVF module not available:', rvfErr.message);
-      console.warn('[RuVector] Vector operations will be limited. Install @ruvector/core or @ruvector/rvf for full functionality.');
+    } catch (e: any) {
+      implementationLoadError = new Error(
+        '@ruvector/rvf is not installed.\n' +
+        '  Run: npm install @ruvector/rvf\n' +
+        '  The --backend rvf flag requires this package.'
+      );
+      throw implementationLoadError;
+    }
+  } else {
+    try {
+      // Try to load native module first
+      implementation = require('@ruvector/core');
+      implementationType = 'native';
 
-      // Create a stub implementation that provides basic functionality
-      implementation = {
-        VectorDb: class StubVectorDb {
-          constructor() {
-            console.warn('[RuVector] Using stub VectorDb - install @ruvector/core for native performance');
+      // Verify it's actually working (native module exports VectorDb, not VectorDB)
+      if (typeof implementation.VectorDb !== 'function') {
+        throw new Error('Native module loaded but VectorDb class not found');
+      }
+    } catch (e: any) {
+      // Try rvf (persistent store) as second fallback
+      try {
+        implementation = require('@ruvector/rvf');
+        implementationType = 'rvf';
+      } catch (rvfErr: any) {
+        // Graceful fallback - don't crash, just warn (once, thanks to memoization)
+        console.warn('[RuVector] Native module not available:', e.message);
+        console.warn('[RuVector] RVF module not available:', rvfErr.message);
+        console.warn('[RuVector] Vector operations will be limited. Install @ruvector/core or @ruvector/rvf for full functionality.');
+
+        // Create a stub implementation that provides basic functionality
+        implementation = {
+          VectorDb: class StubVectorDb {
+            constructor() {
+              console.warn('[RuVector] Using stub VectorDb - install @ruvector/core for native performance');
+            }
+            async insert() { return 'stub-id-' + Date.now(); }
+            async insertBatch(entries: any[]) { return entries.map(() => 'stub-id-' + Date.now()); }
+            async search() { return []; }
+            async delete() { return true; }
+            async get() { return null; }
+            async len() { return 0; }
+            async isEmpty() { return true; }
           }
-          async insert() { return 'stub-id-' + Date.now(); }
-          async insertBatch(entries: any[]) { return entries.map(() => 'stub-id-' + Date.now()); }
-          async search() { return []; }
-          async delete() { return true; }
-          async get() { return null; }
-          async len() { return 0; }
-          async isEmpty() { return true; }
-        }
-      };
-      implementationType = 'wasm'; // Mark as fallback mode
+        };
+        implementationType = 'wasm'; // Mark as fallback mode
+      }
     }
   }
+
+  selectedImplementation = { implementation, implementationType };
+  return selectedImplementation;
 }
 
 /**
  * Get the current implementation type
  */
 export function getImplementationType(): 'native' | 'rvf' | 'wasm' {
-  return implementationType;
+  return getImplementation().implementationType;
 }
 
 /**
  * Check if native implementation is being used
  */
 export function isNative(): boolean {
-  return implementationType === 'native';
+  return getImplementation().implementationType === 'native';
 }
 
 /**
  * Check if RVF implementation is being used
  */
 export function isRvf(): boolean {
-  return implementationType === 'rvf';
+  return getImplementation().implementationType === 'rvf';
 }
 
 /**
  * Check if stub/fallback implementation is being used
  */
 export function isWasm(): boolean {
-  return implementationType === 'wasm';
+  return getImplementation().implementationType === 'wasm';
 }
 
 /**
@@ -111,7 +133,7 @@ export function getVersion(): { version: string; implementation: string } {
   const pkg = require('../package.json');
   return {
     version: pkg.version,
-    implementation: implementationType
+    implementation: getImplementation().implementationType
   };
 }
 
@@ -159,7 +181,7 @@ class VectorDBWrapper {
     if (distanceMetric !== undefined) {
       nativeOptions.distanceMetric = distanceMetric;
     }
-    this.db = new implementation.VectorDb(nativeOptions);
+    this.db = new (getImplementation().implementation.VectorDb)(nativeOptions);
   }
 
   /**
@@ -258,8 +280,14 @@ class VectorDBWrapper {
 export const VectorDb = VectorDBWrapper;
 export const VectorDB = VectorDBWrapper;
 
-// Also export the raw native implementation for advanced users
-export const NativeVectorDb = implementation.VectorDb;
+// Also export the raw native implementation for advanced users.
+// Lazy getter: touching this property triggers backend selection.
+export declare const NativeVectorDb: any;
+Object.defineProperty(module.exports, 'NativeVectorDb', {
+  enumerable: true,
+  configurable: true,
+  get: () => getImplementation().implementation.VectorDb,
+});
 
 // ────────────────────────────────────────────────────────────────────────────
 // Backwards-compat surface used by tests and older integrations
@@ -334,7 +362,7 @@ export class VectorIndex {
 
 /** Get backend info (compat with old getBackendInfo() call). */
 export function getBackendInfo(): { type: 'native' | 'wasm'; version: string; features: string[] } {
-  const type = implementationType === 'native' ? 'native' : 'wasm';
+  const type = getImplementation().implementationType === 'native' ? 'native' : 'wasm';
   const { version } = getVersion();
   const features: string[] = type === 'native'
     ? ['SIMD', 'Multi-threading', 'Rust-native']
@@ -344,7 +372,7 @@ export function getBackendInfo(): { type: 'native' | 'wasm'; version: string; fe
 
 /** Check native availability (compat alias for isNative()). */
 export function isNativeAvailable(): boolean {
-  return implementationType === 'native';
+  return getImplementation().implementationType === 'native';
 }
 
 /** Vector utility functions used by tests and downstream packages. */
@@ -371,5 +399,20 @@ export const Utils = {
   },
 };
 
-// Export everything from the implementation
-export default implementation;
+// Export everything from the implementation (lazy: selecting the backend is
+// deferred until the default export is first accessed).
+const _defaultExport: any = undefined;
+export default _defaultExport;
+Object.defineProperty(module.exports, 'default', {
+  enumerable: true,
+  configurable: true,
+  get: () => getImplementation().implementation,
+});
+
+// Annotate the CommonJS export names for ESM import in node (cjs-module-lexer).
+// The value must be a plain local identifier (NOT the exported name — tsc would
+// rewrite it to `exports.NativeVectorDb`, which the lexer does not recognise);
+// the `0 &&` guard means this is never evaluated at runtime.
+declare const _: unknown;
+// eslint-disable-next-line no-constant-binary-expression, @typescript-eslint/no-unused-expressions
+0 && (module.exports = { NativeVectorDb: _ });
