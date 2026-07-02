@@ -301,11 +301,21 @@ export class NativeWorker {
     // Collect texts to embed
     const texts: Array<{ text: string; file?: string }> = [];
 
-    // Embed file content summaries
+    // Embed file content summaries (first 512 bytes as preview text).
+    // ADR-275: read only the preview window instead of the whole file.
+    // toString('utf8') on a partial buffer may truncate a trailing multibyte
+    // character, which is acceptable for preview text.
+    const previewBuf = Buffer.allocUnsafe(512);
     for (const file of context.files.slice(0, 50)) {
       try {
-        const content = fs.readFileSync(file, 'utf-8');
-        const summary = content.slice(0, 512); // First 512 chars
+        const fd = fs.openSync(file, 'r');
+        let summary: string;
+        try {
+          const bytesRead = fs.readSync(fd, previewBuf, 0, 512, 0);
+          summary = previewBuf.toString('utf8', 0, bytesRead);
+        } finally {
+          fs.closeSync(fd);
+        }
         texts.push({ text: summary, file });
       } catch {
         // Skip
@@ -346,21 +356,40 @@ export class NativeWorker {
       return context;
     }
 
+    const toEntry = (item: any) => ({
+      vector: new Float32Array(item.embedding),
+      metadata: {
+        text: item.text.slice(0, 200),
+        file: item.file,
+        worker: this.config.name,
+        timestamp: Date.now(),
+      },
+    });
+
     let stored = 0;
-    for (const item of context.embeddings) {
+
+    // ADR-275: one native round-trip via insertBatch when available (mirrors
+    // agentdb-fast.ts storeEpisodes). On batch failure, fall back to the
+    // per-item loop so partial-success counts stay accurate.
+    let batchDone = false;
+    if (typeof this.vectorDb.insertBatch === 'function' && context.embeddings.length > 0) {
       try {
-        await this.vectorDb.insert({
-          vector: new Float32Array(item.embedding),
-          metadata: {
-            text: item.text.slice(0, 200),
-            file: item.file,
-            worker: this.config.name,
-            timestamp: Date.now(),
-          },
-        });
-        stored++;
+        await this.vectorDb.insertBatch(context.embeddings.map(toEntry));
+        stored = context.embeddings.length;
+        batchDone = true;
       } catch {
-        // Skip duplicates/errors
+        // Fall through to per-item inserts below
+      }
+    }
+
+    if (!batchDone) {
+      for (const item of context.embeddings) {
+        try {
+          await this.vectorDb.insert(toEntry(item));
+          stored++;
+        } catch {
+          // Skip duplicates/errors
+        }
       }
     }
 

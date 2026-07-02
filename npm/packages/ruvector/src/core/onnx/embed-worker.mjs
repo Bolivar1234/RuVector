@@ -51,11 +51,15 @@ parentPort.on('message', (msg) => {
   if (msg.type !== 'embed') return;
   try {
     const dim = embedder.dimension();
+    // wasm-bindgen already copies the result out of WASM linear memory into a
+    // fresh Float32Array (`getArrayF32FromWasm0(...).slice()` in the generated
+    // glue), so `flat.buffer` is a standalone ArrayBuffer — NOT a view into
+    // WASM memory — and can be transferred directly without a second copy
+    // (ADR-275).
     const flat = embedder.embedBatch(msg.texts); // length = texts.length * dim
-    const arr = Float32Array.from(flat);
     parentPort.postMessage(
-      { type: 'result', id: msg.id, dim, count: msg.texts.length, buffer: arr.buffer },
-      [arr.buffer],
+      { type: 'result', id: msg.id, dim, count: msg.texts.length, buffer: flat.buffer },
+      [flat.buffer],
     );
   } catch (e) {
     parentPort.postMessage({ type: 'error', id: msg.id, error: e?.message || String(e) });

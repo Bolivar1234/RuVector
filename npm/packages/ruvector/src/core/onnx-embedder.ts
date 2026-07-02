@@ -410,12 +410,19 @@ export async function embedBatch(texts: string[]): Promise<EmbeddingResult[]> {
 
   // Use parallel workers for large batches
   if (parallelEnabled && parallelEmbedder && prepared.length >= parallelThreshold) {
-    const batchResults = await parallelEmbedder.embedBatch(prepared);
+    // ADR-275: prefer the internal zero-copy path (Float32Array row views over
+    // the transferred buffers) and convert to number[] exactly once per row.
+    // External drop-in pools without embedBatchFloat32 already return fresh
+    // number[] rows, which are used as-is (no redundant second copy).
+    const batchResults: Array<Float32Array | number[]> =
+      typeof parallelEmbedder.embedBatchFloat32 === 'function'
+        ? await parallelEmbedder.embedBatchFloat32(prepared)
+        : await parallelEmbedder.embedBatch(prepared);
     const totalTime = performance.now() - start;
     const dimension = parallelEmbedder.dimension || 384;
 
-    return batchResults.map((emb: number[]) => ({
-      embedding: Array.from(emb),
+    return batchResults.map((emb) => ({
+      embedding: Array.isArray(emb) ? emb : Array.from(emb),
       dimension,
       timeMs: totalTime / texts.length,
     }));
@@ -429,9 +436,11 @@ export async function embedBatch(texts: string[]): Promise<EmbeddingResult[]> {
   const results: EmbeddingResult[] = [];
 
   for (let i = 0; i < prepared.length; i++) {
-    const embedding = batchEmbeddings.slice(i * dimension, (i + 1) * dimension);
+    // ADR-275: subarray is a zero-copy view; Array.from is the single
+    // Float32Array -> number[] conversion (previously slice() + Array.from
+    // copied each row twice).
     results.push({
-      embedding: Array.from(embedding),
+      embedding: Array.from(batchEmbeddings.subarray(i * dimension, (i + 1) * dimension)) as number[],
       dimension,
       timeMs: totalTime / texts.length,
     });

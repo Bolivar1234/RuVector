@@ -440,6 +440,21 @@ export class IntelligenceEngine {
     }
   }
 
+  // Memoized native attention objects, keyed by kind + config (ADR-275):
+  // constructing a fresh FlashAttention/MultiHeadAttention per embed call
+  // dominated this hot path. A failed constructor is not cached, so behavior
+  // on error (fall through to hashEmbed) is unchanged.
+  private attentionOps: Map<string, any> = new Map();
+
+  private getAttentionOp(key: string, create: () => any): any {
+    let op = this.attentionOps.get(key);
+    if (!op) {
+      op = create();
+      this.attentionOps.set(key, op);
+    }
+    return op;
+  }
+
   /**
    * Attention-based embedding using Flash or Multi-head attention
    */
@@ -452,36 +467,37 @@ export class IntelligenceEngine {
     }
 
     try {
+      // Keys and values are identical inputs. The native binding copies
+      // arguments at the napi boundary and never mutates them (verified:
+      // passing the same array for K and V yields identical results), so one
+      // shared materialization replaces the two per-call copies (ADR-275).
+      const kv = tokenEmbeddings.map(e => new Float32Array(e));
+
       // Try FlashAttention first (fastest)
       if (this.attention?.FlashAttention) {
-        const flash = new this.attention.FlashAttention(dim);
+        const flash = this.getAttentionOp(`flash:${dim}`, () => new this.attention.FlashAttention(dim));
         const query = new Float32Array(this.meanPool(tokenEmbeddings));
-        const keys = tokenEmbeddings.map(e => new Float32Array(e));
-        const values = tokenEmbeddings.map(e => new Float32Array(e));
-        const result = flash.forward(query, keys, values);
+        const result = flash.forward(query, kv, kv);
         return Array.from(result);
       }
 
       // Try MultiHeadAttention (better quality)
       if (this.attention?.MultiHeadAttention) {
         const numHeads = Math.min(8, Math.floor(dim / 32)); // 8 heads max
-        const mha = new this.attention.MultiHeadAttention(dim, numHeads);
+        const mha = this.getAttentionOp(
+          `mha:${dim}:${numHeads}`,
+          () => new this.attention.MultiHeadAttention(dim, numHeads)
+        );
         const query = new Float32Array(this.meanPool(tokenEmbeddings));
-        const keys = tokenEmbeddings.map(e => new Float32Array(e));
-        const values = tokenEmbeddings.map(e => new Float32Array(e));
-        const result = mha.forward(query, keys, values);
+        const result = mha.forward(query, kv, kv);
         return Array.from(result);
       }
 
       // Fall back to DotProductAttention
       if (this.attention?.DotProductAttention) {
-        const attn = new this.attention.DotProductAttention();
+        const attn = this.getAttentionOp('dot', () => new this.attention.DotProductAttention());
         const query = this.meanPool(tokenEmbeddings);
-        const result = attn.forward(
-          new Float32Array(query),
-          tokenEmbeddings.map(e => new Float32Array(e)),
-          tokenEmbeddings.map(e => new Float32Array(e))
-        );
+        const result = attn.forward(new Float32Array(query), kv, kv);
         return Array.from(result);
       }
     } catch {
@@ -621,15 +637,18 @@ export class IntelligenceEngine {
       }
     }
 
-    // Fallback: brute-force cosine similarity
-    const scored = Array.from(this.memories.values()).map(m => ({
-      ...m,
-      score: this.cosineSimilarity(queryEmbed, m.embedding),
-    }));
+    // Fallback: brute-force cosine similarity. Score without cloning every
+    // memory (ADR-275); only the top-k results are materialized into the
+    // same `{ ...memory, score }` shape as before.
+    const scored: Array<{ memory: MemoryEntry; score: number }> = [];
+    for (const m of this.memories.values()) {
+      scored.push({ memory: m, score: this.cosineSimilarity(queryEmbed, m.embedding) });
+    }
 
     return scored
       .sort((a, b) => (b.score || 0) - (a.score || 0))
-      .slice(0, topK);
+      .slice(0, topK)
+      .map(({ memory, score }) => ({ ...memory, score }));
   }
 
   private cosineSimilarity(a: number[], b: number[]): number {

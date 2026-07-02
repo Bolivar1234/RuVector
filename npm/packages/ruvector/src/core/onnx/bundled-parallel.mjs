@@ -122,7 +122,12 @@ export class ParallelEmbedder {
   }
 
   /**
-   * Embed many texts across workers. Returns number[][] in input order.
+   * Internal zero-copy variant (ADR-275): embed many texts across workers and
+   * return Float32Array rows in input order. Each row is a `subarray` view
+   * over the flat per-chunk result buffer transferred from the worker (no
+   * per-row copy). Rows alias their chunk buffer, so retaining one row keeps
+   * the whole chunk (default 8 rows) alive — fine for consumers that convert
+   * or hand rows to native bindings immediately.
    *
    * Texts are dispatched in bounded chunks (default 8) that workers pull as
    * they finish (work-stealing), rather than one giant shard per worker:
@@ -130,7 +135,7 @@ export class ParallelEmbedder {
    * per-request timeout (~400ms/text in WASM x hundreds of texts), and a
    * single slow worker would gate the whole batch.
    */
-  async embedBatch(texts, opts = {}) {
+  async embedBatchFloat32(texts, opts = {}) {
     if (!texts || texts.length === 0) return [];
     const chunkSize = Math.max(1, opts.chunkSize ?? 8);
     const chunks = [];
@@ -146,12 +151,21 @@ export class ParallelEmbedder {
         const { start, texts: chunkTexts } = chunks[idx];
         const { dim, count, flat } = await this._send(worker, chunkTexts);
         for (let j = 0; j < count; j++) {
-          out[start + j] = Array.from(flat.subarray(j * dim, (j + 1) * dim));
+          out[start + j] = flat.subarray(j * dim, (j + 1) * dim);
         }
       }
     };
     await Promise.all(this._workers.map(drain));
     return out;
+  }
+
+  /**
+   * Embed many texts across workers. Returns number[][] in input order.
+   * Thin wrapper over embedBatchFloat32 — one number[] conversion per row.
+   */
+  async embedBatch(texts, opts = {}) {
+    const rows = await this.embedBatchFloat32(texts, opts);
+    return rows.map((row) => Array.from(row));
   }
 
   async shutdown() {
