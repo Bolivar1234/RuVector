@@ -53,25 +53,12 @@ ignore = [
     # constant-time fix (track: https://github.com/RustCrypto/RSA/issues/626).
     "RUSTSEC-2023-0071",
 
-    # ── Unsoundness (no exploit path in our usage) ───────────────────
-
-    # rand 0.8.5 — unsound only when paired with a *custom logger* that
-    # logs during random number generation (RUSTSEC-2026-0097). We use
-    # `tracing` and never log inside RNG draws; the unsound condition
-    # cannot be triggered. Re-review on `rand 0.9` adoption across the
-    # workspace.
-    "RUSTSEC-2026-0097",
-
-    # imageproc 0.25.0 — three unsoundness advisories around image
-    # sampling / bounds checks. Pulled transitively via the scipix
-    # examples crate, never reached by the publish artifacts of any
-    # crates.io-published member. Unsound != exploitable here: inputs
-    # are caller-controlled image buffers in offline experiments.
-    # Re-review on 2026-08-01 or when imageproc publishes 0.26 with
-    # the fixes.
-    "RUSTSEC-2026-0115",
-    "RUSTSEC-2026-0116",
-    "RUSTSEC-2026-0117",
+    # NOTE: quick-xml 0.26.0's two DoS advisories (RUSTSEC-2026-0194,
+    # RUSTSEC-2026-0195, transitive via inferno <- pprof's optional
+    # `profiling` feature) are ignored in `.cargo/audit.toml` instead of
+    # here — `cargo deny check` doesn't enable that optional feature
+    # during resolution and never encounters the advisory, so an ignore
+    # entry here would just be permanent dead-warning noise.
 
     # ── Unmaintained transitive deps (informational, no CVE) ─────────
 
@@ -105,13 +92,20 @@ ignore = [
     # pin instant directly. Re-review on 2026-07-15.
     "RUSTSEC-2024-0384",
 
-    # rand_os 0.x — unmaintained, replaced by getrandom. Transitive via
-    # legacy rand internals; modern paths use getrandom directly.
+    # rusttype 0.9.3 — unmaintained (RUSTSEC-2021-0140). Direct dep of
+    # the `ruvector-scipix` example crate (not a crates.io-published
+    # member); not exercised outside offline image-processing demos.
+    # No safe upgrade available. Re-review 2026-08-01.
+    #
+    # NOTE: this ID and RUSTSEC-2025-0124 below were previously swapped
+    # between each other (and RUSTSEC-2026-0105 mislabeled "rusttype")
+    # in this file — corrected against the authoritative advisory-db
+    # `package` field. The IDs themselves were always right; only the
+    # human-readable comments were crossed.
     "RUSTSEC-2021-0140",
 
-    # core2 0.4.0 — yanked, but pulled transitively via the rav1e/
-    # image/imageproc chain (offline-only scipix examples crate).
-    # Re-review when imageproc bumps off ravif 0.13.
+    # rand_os 0.x — unmaintained, replaced by getrandom. Transitive via
+    # legacy rand internals; modern paths use getrandom directly.
     "RUSTSEC-2025-0124",
 
     # rustls-pemfile 1.x — unmaintained, replaced by rustls-pki-types'
@@ -119,11 +113,15 @@ ignore = [
     # Migration is a transitive bump; Dependabot tracking.
     "RUSTSEC-2025-0134",
 
-    # rusttype 0.9 — unmaintained (RUSTSEC-2026-0105). Used by
-    # imageproc's text-rendering path which we don't exercise (scipix
-    # offline experiments only). No safe upgrade available. Re-review
-    # 2026-08-01.
-    "RUSTSEC-2026-0105",
+    # ttf-parser — unmaintained (RUSTSEC-2026-0192), "no safe upgrade
+    # available" per the advisory itself. Pulled via three unrelated
+    # chains, each in a different resolved version: rusttype 0.9.3 ->
+    # owned_ttf_parser 0.15.2 (ruvector-scipix example), ab_glyph 0.2.32
+    # -> owned_ttf_parser 0.25.1 -> imageproc -> ruvector-scipix
+    # example, and plotters 0.3.7 (crates/ruvector-bench chart
+    # rendering, dev-only). All three consumer paths are example/bench
+    # code, never reachable via untrusted input. Re-review 2026-08-01.
+    "RUSTSEC-2026-0192",
 
     # memmap2 0.9.x — unsound `Unchecked pointer offset` API (RUSTSEC-2026-0186,
     # "unsound", not an exploitable vuln). Transitive via safetensors/candle
