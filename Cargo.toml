@@ -264,6 +264,7 @@ members = [
     "crates/ruvector-sota-bench",
     # Capability-gated ANN: per-vector read access control with bitset tokens (ADR-268)
     "crates/ruvector-capgated",
+    "crates/ruvector-recall-bounded",
     # SPANN partition spilling for boundary-safe ANN (ADR-268)
     "crates/ruvector-spann",
     # ColBERT-style multi-vector MaxSim late-interaction search

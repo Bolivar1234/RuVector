@@ -10231,6 +10231,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruvector-recall-bounded"
+version = "2.3.0"
+
+[[package]]
 name = "ruvector-replication"
 version = "2.3.0"
 dependencies = [
