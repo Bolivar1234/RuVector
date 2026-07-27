@@ -8138,13 +8138,16 @@ const mcpCmd = program.command('mcp').description('MCP (Model Context Protocol) 
 mcpCmd.command('start')
   .description('Start the RuVector MCP server')
   .action(() => {
-    // Execute the mcp-server.js directly
     const mcpServerPath = path.join(__dirname, 'mcp-server.js');
     if (!fs.existsSync(mcpServerPath)) {
       console.error(chalk.red('Error: MCP server not found at'), mcpServerPath);
       process.exit(1);
     }
-    require(mcpServerPath);
+    const { main } = require(mcpServerPath);
+    main().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
   });
 
 mcpCmd.command('info')
@@ -10276,5 +10279,4 @@ if (require.main === module) {
 } else {
   module.exports = { atomicWriteFileSync, readIntelStoreSafe, Intelligence };
 }
-
 

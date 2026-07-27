@@ -58,10 +58,14 @@ jobs:
     name: dependency-review (PRs only)
     runs-on: ubuntu-22.04
     if: github.event_name == 'pull_request'
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: dependency-review-action
+        # The repository dependency graph is not currently exposed by GitHub,
+        # so the action returns "Dependency review is not supported". Keep the
+        # other four supply-chain layers hard-gated while #689 tracks enabling
+        # this service-side prerequisite.
+        continue-on-error: true
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: moderate

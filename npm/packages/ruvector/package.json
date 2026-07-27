@@ -1,18 +1,18 @@
 {
   "name": "ruvector",
-  "version": "0.2.35",
+  "version": "0.2.37",
   "description": "Self-learning vector database for Node.js \u2014 hybrid search, Graph RAG, FlashAttention-3, HNSW, 50+ attention mechanisms",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "ruvector": "./bin/cli.js"
+    "ruvector": "bin/cli.js"
   },
   "scripts": {
     "build": "tsc && node -e \"require('fs').cpSync('src/core/onnx','dist/core/onnx',{recursive:true})\"",
     "verify-dist": "node scripts/verify-dist.js",
     "prepack": "npm run build && npm run verify-dist",
     "prepublishOnly": "npm run build && npm run verify-dist",
-    "test": "node test/integration.js && node test/cli-commands.js && node test/db-workflow.js && node test/sigterm-cleanup.js && node test/mcp-policy.js && node test/startup-budget.js"
+    "test": "node test/integration.js && node test/cli-commands.js && node test/db-workflow.js && node test/mcp-stdio.js && node test/sigterm-cleanup.js && node test/mcp-policy.js && node test/startup-budget.js"
   },
   "keywords": [
     "vector",
@@ -67,18 +67,17 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ruvnet/ruvector.git",
+    "url": "git+https://github.com/ruvnet/ruvector.git",
     "directory": "npm/packages/ruvector"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@ruvector/attention": "^0.1.3",
     "@ruvector/core": "^0.1.25",
     "@ruvector/gnn": "^0.1.22",
     "@ruvector/sona": "^0.1.4",
     "chalk": "^4.1.2",
     "commander": "^11.1.0",
-    "js-beautify": "^1.15.4",
     "ora": "^5.4.1"
   },
   "optionalDependencies": {
