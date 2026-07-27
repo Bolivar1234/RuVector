@@ -21,7 +21,8 @@ The difference is significant:
 - **Top-k search** is bounded in output size but unbounded in quality.  You always
   get exactly k results, some of which may be irrelevant.
 - **Recall-bounded search** is bounded in quality but variable in output size.  You
-  get every relevant vector (within a statistical guarantee) and nothing more.
+  request vectors above a similarity threshold and audit empirical recall
+  against an exact baseline.
 
 This matters for:
 1. **Agent memory** — "fetch every memory about OAuth" must not omit relevant traces.
@@ -46,7 +47,7 @@ Add `crates/ruvector-recall-bounded` to the workspace implementing:
 2. Three concrete variants benchmarked under identical conditions:
    - `LinearScan` — exact O(n·d) brute-force baseline.
    - `HnswBeamSearch` — single-layer proximity graph with adaptive ef expansion.
-   - `ThresholdBeam` — beam search that early-stops when the beam minimum falls below θ.
+   - `ThresholdBeam` — graph search with a fixed node-expansion budget.
 3. A deterministic `Lcg`-seeded dataset generator (no external deps).
 4. A `benchmark` binary that reports mean/p50/p95 latency, throughput, memory, hit count,
    and measured recall against the linear-scan ground truth.

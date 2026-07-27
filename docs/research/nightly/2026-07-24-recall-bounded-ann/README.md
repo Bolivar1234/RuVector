@@ -1,6 +1,6 @@
 # Recall-Bounded Approximate Nearest-Neighbour Search in Rust
 
-**150-char summary:** Quality-first ANN that returns all vectors above a cosine threshold, not a fixed k — measured recall vs. exact baseline, zero external deps, edge-deployable.
+**Summary:** Threshold-driven ANN research with empirical recall measured against an exact baseline; approximate variants can miss qualifying vectors.
 
 ---
 
@@ -18,7 +18,7 @@ inside `crates/ruvector-recall-bounded`:
 |---------|----------|-------------------|----------------|
 | `LinearScan` | exact brute force | 1.00 | O(1) per insert |
 | `HnswBeamSearch` | graph walk + adaptive ef | ≥ 0.80 | O(n) per insert (PoC) |
-| `ThresholdBeam` | beam search + early stop | ≥ 0.65 | O(n) per insert (PoC) |
+| `ThresholdBeam` | graph search + fixed expansion budget | ≥ 0.65 in acceptance data | O(n) per insert (PoC) |
 
 All numbers come from `cargo run --release -p ruvector-recall-bounded --bin benchmark`
 on an x86_64 Linux host.
@@ -148,14 +148,13 @@ n < 10 000 or as a ground-truth reference.
 
 **HnswBeamSearch** — builds a single-layer proximity graph (M neighbours per node).
 At query time, performs greedy descent starting from a fixed entry point, expanding
-the candidate set.  When too few results exceed θ, ef_search doubles up to a ceiling.
-This adaptive expansion is the key mechanism: rather than choosing ef_search
-statically, it grows until the recall plateau or the ef ceiling is reached.
+the candidate set. The search doubles ef until the returned opaque-ID set
+stabilises or reaches a ceiling. This remains a heuristic: rather than choosing ef_search
+statically, it grows until the result-set plateau or the ef ceiling is reached.
 
 **ThresholdBeam** — maintains a beam of `beam_width` candidates.  Expands the beam
-at each step by following neighbour edges.  Early-stops when the highest-similarity
-candidate in the beam falls below θ — because greedy descent will only find
-lower-similarity nodes from that point.
+at each step by following neighbour edges. Stops after a configured expansion
+budget; graph similarity does not provide a safe lower bound on unseen nodes.
 
 ---
 
@@ -167,7 +166,7 @@ graph TD
 
     Dispatcher --> |variant 1| LS[LinearScan<br/>O(n·d) exact scan]
     Dispatcher --> |variant 2| HB[HnswBeamSearch<br/>graph walk + adaptive ef]
-    Dispatcher --> |variant 3| TB[ThresholdBeam<br/>beam walk + early stop]
+    Dispatcher --> |variant 3| TB[ThresholdBeam<br/>fixed expansion budget]
 
     LS --> GT[Ground truth: all hits above θ]
     HB --> AH1[Approximate hits]
@@ -198,13 +197,12 @@ Fixed ef_search requires the caller to know the result cardinality in advance �
 the information recall-bounded search avoids.  Adaptive ef starts conservative and
 expands only when the current ef produces too few qualifying results.
 
-### Why beam early-stop?
+### Why a fixed expansion budget?
 
-In a proximity graph, greedy descent reaches successively lower-similarity nodes.
-Once the best candidate in the beam is below θ, all future candidates will also be
-below θ (by the greedy construction).  Early-stopping here avoids wasted expansion.
-This is not exact — the graph may have "bridges" to high-similarity clusters that
-require traversing a low-similarity node — but it is a useful heuristic in practice.
+The budget makes the cost/recall trade-off explicit. A low-scoring frontier
+does not prove that unseen graph nodes are also below θ.
+The graph may have bridges to high-similarity clusters that require traversing
+a low-similarity node, so workload-specific recall audits remain necessary.
 
 ### LCG dataset generator
 

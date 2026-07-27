@@ -1,8 +1,8 @@
 # ruvector 2026: Recall-Bounded ANN Search for High-Performance Rust Agent Memory Retrieval
 
-**150-char SEO summary:** Quality-first ANN that returns every vector above a cosine threshold with measured recall — Rust, zero deps, edge-deployable, agent memory ready.
+**Summary:** Threshold-driven ANN research with empirical recall measured against an exact baseline; approximate graph variants can miss qualifying vectors.
 
-**One sentence:** RuVector now exposes a `search_above_threshold(query, θ)` API that retrieves every qualifying vector with measurable recall guarantees — not an arbitrary top-k.
+**One sentence:** This PoC exposes a threshold-search API and measures approximate results against an exact scan instead of assuming completeness.
 
 - GitHub: https://github.com/ruvnet/ruvector
 - Research branch: `research/nightly/2026-07-24-recall-bounded-ann`
@@ -17,7 +17,10 @@ This API is a legacy of image retrieval and recommendation systems, where a rank
 
 An agent fetching its memory to answer *"what do I know about OAuth token refresh?"* does not know k. It knows its confidence floor: retrieve everything with cosine similarity ≥ 0.75. Missing a relevant memory causes a factual error in the agent's reasoning. Returning 10 arbitrary results — some below the confidence floor, some above — forces the agent to do post-filtering that the vector index should be doing.
 
-**Recall-bounded search** is the primitive that fixes this. Instead of `search(query, k) → Vec<Hit>`, the API is `search(query, threshold) → Vec<Hit>` — return every vector whose similarity to the query exceeds θ. The cardinality is determined by the data, not the caller's guess.
+**Threshold search** changes the request from `search(query, k)` to
+`search(query, threshold)`. Exact scan returns every qualifying vector; the
+graph variants return a data-dependent approximate subset whose recall must be
+measured.
 
 Current vector databases handle this only as post-filtering: run top-k, then discard results below θ. If k is too small, you miss qualifying vectors. If k is too large, you waste compute. There is no principled way to set k without knowing the answer in advance.
 
@@ -36,7 +39,7 @@ This nightly research implements three Rust variants of recall-bounded search in
 | `RecallBoundedIndex` trait | `search(query, threshold) → Vec<Hit>` | Quality-first API contract | Implemented in PoC |
 | `LinearScan` variant | Exact O(n·d) brute force | Ground truth oracle | Implemented, measured |
 | `HnswBeamSearch` variant | Graph walk + adaptive ef expansion | ~87% recall, faster than exact at scale | Implemented, measured |
-| `ThresholdBeam` variant | Greedy descent + early stop | Perfect recall, faster than HnswBeam | Implemented, measured |
+| `ThresholdBeam` variant | Greedy descent + fixed expansion budget | Empirical recall/cost trade-off | Implemented, measured |
 | `recall(found, gt)` utility | Measures |found ∩ ground_truth| / |ground_truth| | Honest quality accounting | Implemented |
 | `Lcg` dataset generator | Deterministic seeded unit vectors | Reproducible benchmarks, zero deps | Implemented |
 | Acceptance gate | All variants must hit recall ≥ 0.80 | Prevents shipping low-quality indexes | Implemented, measured |
@@ -70,7 +73,10 @@ pub struct LinearScan { entries: Vec<Entry> }
 
 ### Variant A: `HnswBeamSearch`
 
-Builds a single-layer proximity graph (M neighbours per node, bidirectional). At query time, performs greedy descent from the entry point, maintaining a max-heap of ef candidates. When too few results exceed θ, ef_search doubles (up to ef_max). The adaptive doubling is the key mechanism — it avoids the user having to pre-tune ef.
+Builds a single-layer proximity graph (M neighbours per node, bidirectional).
+At query time, it performs greedy descent from the entry point and doubles
+`ef_search` until the returned opaque-ID set stabilises or reaches `ef_max`.
+This reduces—but does not remove—the need for workload calibration.
 
 ```rust
 pub struct HnswBeamSearch { entries, graph, m, ef_search_base, ef_search_max }
@@ -78,7 +84,9 @@ pub struct HnswBeamSearch { entries, graph, m, ef_search_base, ef_search_max }
 
 ### Variant B: `ThresholdBeam`
 
-Greedy descent with early stopping. Maintains a max-heap of candidates by similarity. Expands neighbours freely. Stops when the best remaining candidate falls below `θ × 0.5` and a minimum node budget has been explored. Achieves perfect recall by exploring more of the graph than HnswBeamSearch, trading some speed.
+Greedy descent with a fixed expansion budget. It maintains a max-heap of
+candidates by similarity and expands at most `beam_width × 4` nodes. No
+frontier score is treated as a proof about unseen nodes.
 
 ```rust
 pub struct ThresholdBeam { entries, graph, m, beam_width }
@@ -103,7 +111,7 @@ graph TD
 
     API --> LS[LinearScan<br/>O(n·d) exact]
     API --> HB[HnswBeamSearch<br/>adaptive ef, graph walk]
-    API --> TB[ThresholdBeam<br/>greedy descent + early stop]
+    API --> TB[ThresholdBeam<br/>fixed expansion budget]
 
     LS --> GT[Ground truth]
     HB --> AH1[Approximate hits]
@@ -167,7 +175,7 @@ Recall ≥  : 0.80 (acceptance)
 
 1. **ThresholdBeam beats HnswBeam on both speed and recall.** At n=5000: 655μs vs 876μs, recall 1.000 vs 0.873.
 2. **Neither graph variant beats LinearScan in this PoC.** Root cause: O(n²) graph construction produces a connectivity structure not better than the linear layout for n < 10k. Production layered HNSW with ef_construction would reverse this.
-3. **Recall scales well.** ThresholdBeam maintains perfect recall as n doubles from 2000 to 5000.
+3. **Recall was stable in this synthetic run.** That observation is not a guarantee under distribution or graph changes.
 4. **Memory overhead is modest.** Graph index costs 1.7× raw vectors.
 
 ### Benchmark caveats

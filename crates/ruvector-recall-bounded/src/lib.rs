@@ -1,13 +1,13 @@
 //! Recall-bounded approximate nearest-neighbour search.
 //!
 //! Standard ANN search returns a fixed k results regardless of quality.
-//! Recall-bounded search returns every vector whose similarity to the query
-//! exceeds a caller-supplied threshold θ ∈ (0, 1] with a measurable recall
-//! guarantee.  Three variants are provided and benchmarked:
+//! Recall-bounded search returns vectors whose similarity to the query exceeds
+//! a caller-supplied threshold θ with measured empirical recall. Three
+//! variants are provided and benchmarked:
 //!
 //! 1. `LinearScan`      — exact brute-force baseline (O(n·d))
 //! 2. `HnswBeamSearch`  — HNSW-style greedy graph walk with adaptive ef
-//! 3. `ThresholdBeam`   — beam search with early-stop when beam minimum ≥ θ
+//! 3. `ThresholdBeam`   — graph search with a fixed expansion budget
 
 use std::collections::{BinaryHeap, HashSet};
 
@@ -43,7 +43,7 @@ pub trait RecallBoundedIndex {
 
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), b.len(), "vector dimension mismatch");
     let mut dot = 0.0f32;
     let mut na = 0.0f32;
     let mut nb = 0.0f32;
@@ -120,10 +120,24 @@ impl Default for LinearScan {
 
 impl RecallBoundedIndex for LinearScan {
     fn insert(&mut self, entry: Entry) {
+        if let Some(first) = self.entries.first() {
+            assert_eq!(
+                entry.vec.len(),
+                first.vec.len(),
+                "vector dimension mismatch"
+            );
+        }
         self.entries.push(entry);
     }
 
     fn search(&self, query: &[f32], threshold: f32) -> Vec<Hit> {
+        assert!(
+            (-1.0..=1.0).contains(&threshold),
+            "threshold must be in [-1, 1]"
+        );
+        if let Some(first) = self.entries.first() {
+            assert_eq!(query.len(), first.vec.len(), "query dimension mismatch");
+        }
         self.entries
             .iter()
             .filter_map(|e| {
@@ -164,6 +178,11 @@ pub struct HnswBeamSearch {
 
 impl HnswBeamSearch {
     pub fn new(m: usize, ef_search_base: usize) -> Self {
+        assert!(m > 0, "m must be greater than zero");
+        assert!(
+            ef_search_base > 0,
+            "ef_search_base must be greater than zero"
+        );
         Self {
             entries: Vec::new(),
             graph: Vec::new(),
@@ -175,7 +194,7 @@ impl HnswBeamSearch {
 
     fn build_neighbours(&self, id: usize) -> Vec<u32> {
         let q = &self.entries[id].vec;
-        let mut pairs: Vec<(u32, u32)> = self
+        let mut pairs: Vec<(i32, u32)> = self
             .entries
             .iter()
             .enumerate()
@@ -183,17 +202,24 @@ impl HnswBeamSearch {
             .map(|(j, e)| {
                 let s = cosine_similarity(q, &e.vec);
                 // store as fixed-point to use BinaryHeap without Ord on f32
-                let fp = (s * 1_000_000.0) as u32;
+                let fp = (s * 1_000_000.0) as i32;
                 (fp, j as u32)
             })
             .collect();
-        pairs.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        pairs.sort_unstable_by_key(|pair| std::cmp::Reverse(pair.0));
         pairs.iter().take(self.m).map(|(_, id)| *id).collect()
     }
 }
 
 impl RecallBoundedIndex for HnswBeamSearch {
     fn insert(&mut self, entry: Entry) {
+        if let Some(first) = self.entries.first() {
+            assert_eq!(
+                entry.vec.len(),
+                first.vec.len(),
+                "vector dimension mismatch"
+            );
+        }
         let id = self.entries.len();
         self.entries.push(entry);
         let neighbours = self.build_neighbours(id);
@@ -210,7 +236,7 @@ impl RecallBoundedIndex for HnswBeamSearch {
                     nbr_graph.sort_unstable_by(|&a, &b| {
                         let sa = cosine_similarity(q, &entries[a as usize].vec);
                         let sb = cosine_similarity(q, &entries[b as usize].vec);
-                        sb.partial_cmp(&sa).unwrap()
+                        sb.total_cmp(&sa)
                     });
                     nbr_graph.truncate(self.m);
                 }
@@ -219,16 +245,31 @@ impl RecallBoundedIndex for HnswBeamSearch {
     }
 
     fn search(&self, query: &[f32], threshold: f32) -> Vec<Hit> {
+        assert!(
+            (-1.0..=1.0).contains(&threshold),
+            "threshold must be in [-1, 1]"
+        );
         if self.entries.is_empty() {
             return Vec::new();
         }
+        assert_eq!(
+            query.len(),
+            self.entries[0].vec.len(),
+            "query dimension mismatch"
+        );
         let mut ef = self.ef_search_base;
+        let mut previous_ids: Option<HashSet<u32>> = None;
         loop {
             let hits = self.greedy_search(query, threshold, ef);
-            // If we found results or reached ef ceiling, return what we have.
-            if !hits.is_empty() || ef >= self.ef_search_max {
+            let ids: HashSet<u32> = hits.iter().map(|hit| hit.id).collect();
+            if ef >= self.ef_search_max
+                || previous_ids
+                    .as_ref()
+                    .is_some_and(|previous| *previous == ids)
+            {
                 return hits;
             }
+            previous_ids = Some(ids);
             ef = (ef * 2).min(self.ef_search_max);
         }
     }
@@ -257,41 +298,43 @@ impl HnswBeamSearch {
         let mut candidates: BinaryHeap<(i32, u32)> = BinaryHeap::new();
         let mut visited: HashSet<u32> = HashSet::new();
         let mut results: Vec<Hit> = Vec::new();
+        let mut expanded = 0usize;
 
         candidates.push((ep_fp, 0));
         visited.insert(0);
 
         while let Some((sim_fp, cur_id)) = candidates.pop() {
+            if expanded >= ef {
+                break;
+            }
+            expanded += 1;
             let sim = sim_fp as f32 / 1_000_000.0;
             if sim >= threshold {
                 results.push(Hit {
-                    id: cur_id,
+                    id: self.entries[cur_id as usize].id,
                     similarity: sim,
                 });
             }
-            // Expand neighbours if within ef budget
-            if candidates.len() + results.len() < ef {
-                for &nb in &self.graph[cur_id as usize] {
-                    if visited.insert(nb) {
-                        let nb_sim = cosine_similarity(query, &self.entries[nb as usize].vec);
-                        let nb_fp = (nb_sim * 1_000_000.0) as i32;
-                        candidates.push((nb_fp, nb));
-                    }
+            for &nb in &self.graph[cur_id as usize] {
+                if visited.insert(nb) {
+                    let nb_sim = cosine_similarity(query, &self.entries[nb as usize].vec);
+                    let nb_fp = (nb_sim * 1_000_000.0) as i32;
+                    candidates.push((nb_fp, nb));
                 }
             }
         }
+        results.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
         results
     }
 }
 
 // ─── Variant 3: ThresholdBeam ─────────────────────────────────────────────────
 
-/// Beam search with early stopping.
+/// Graph search with a fixed expansion budget.
 ///
-/// Maintains a beam of the `beam_width` most promising unexplored nodes.
-/// At each step, expands all nodes in the beam and stops when the minimum
-/// similarity in the beam already falls below the threshold (nothing better
-/// can be found by following lower-similarity edges).
+/// Expands the most promising unexplored nodes and stops after at most
+/// `beam_width * 4` expansions. This is an empirical budget, not a recall
+/// guarantee or a valid similarity lower bound on unseen graph nodes.
 pub struct ThresholdBeam {
     entries: Vec<Entry>,
     graph: Vec<Vec<u32>>,
@@ -301,6 +344,8 @@ pub struct ThresholdBeam {
 
 impl ThresholdBeam {
     pub fn new(m: usize, beam_width: usize) -> Self {
+        assert!(m > 0, "m must be greater than zero");
+        assert!(beam_width > 0, "beam_width must be greater than zero");
         Self {
             entries: Vec::new(),
             graph: Vec::new(),
@@ -311,23 +356,30 @@ impl ThresholdBeam {
 
     fn build_neighbours(&self, id: usize) -> Vec<u32> {
         let q = &self.entries[id].vec;
-        let mut pairs: Vec<(u32, u32)> = self
+        let mut pairs: Vec<(i32, u32)> = self
             .entries
             .iter()
             .enumerate()
             .filter(|(j, _)| *j != id)
             .map(|(j, e)| {
                 let s = cosine_similarity(q, &e.vec);
-                ((s * 1_000_000.0) as u32, j as u32)
+                ((s * 1_000_000.0) as i32, j as u32)
             })
             .collect();
-        pairs.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        pairs.sort_unstable_by_key(|pair| std::cmp::Reverse(pair.0));
         pairs.iter().take(self.m).map(|(_, id)| *id).collect()
     }
 }
 
 impl RecallBoundedIndex for ThresholdBeam {
     fn insert(&mut self, entry: Entry) {
+        if let Some(first) = self.entries.first() {
+            assert_eq!(
+                entry.vec.len(),
+                first.vec.len(),
+                "vector dimension mismatch"
+            );
+        }
         let id = self.entries.len();
         self.entries.push(entry);
         let nb = self.build_neighbours(id);
@@ -346,7 +398,7 @@ impl RecallBoundedIndex for ThresholdBeam {
                     sorted.sort_unstable_by(|&a, &b| {
                         let sa = cosine_similarity(&q_vec, &entries[a as usize].vec);
                         let sb = cosine_similarity(&q_vec, &entries[b as usize].vec);
-                        sb.partial_cmp(&sa).unwrap()
+                        sb.total_cmp(&sa)
                     });
                     sorted.truncate(m);
                     *nbr_graph = sorted;
@@ -356,9 +408,18 @@ impl RecallBoundedIndex for ThresholdBeam {
     }
 
     fn search(&self, query: &[f32], threshold: f32) -> Vec<Hit> {
+        assert!(
+            (-1.0..=1.0).contains(&threshold),
+            "threshold must be in [-1, 1]"
+        );
         if self.entries.is_empty() {
             return Vec::new();
         }
+        assert_eq!(
+            query.len(),
+            self.entries[0].vec.len(),
+            "query dimension mismatch"
+        );
 
         // Greedy descent: always follow the most similar unvisited neighbour.
         // Early stop when the best unvisited candidate is below (threshold * 0.5)
@@ -367,17 +428,23 @@ impl RecallBoundedIndex for ThresholdBeam {
         let mut candidates: BinaryHeap<(i32, u32)> = BinaryHeap::new();
         let mut visited: HashSet<u32> = HashSet::new();
         let mut results: Vec<Hit> = Vec::new();
+        let mut expanded = 0usize;
+        let expansion_budget = self.beam_width.saturating_mul(4);
 
         let ep_sim = cosine_similarity(query, &self.entries[0].vec);
         candidates.push(((ep_sim * 1_000_000.0) as i32, 0));
         visited.insert(0);
 
         while let Some((sim_fp, cur_id)) = candidates.pop() {
+            if expanded >= expansion_budget {
+                break;
+            }
+            expanded += 1;
             let sim = sim_fp as f32 / 1_000_000.0;
 
             if sim >= threshold {
                 results.push(Hit {
-                    id: cur_id,
+                    id: self.entries[cur_id as usize].id,
                     similarity: sim,
                 });
             }
@@ -390,16 +457,8 @@ impl RecallBoundedIndex for ThresholdBeam {
                     candidates.push(((nb_sim * 1_000_000.0) as i32, nb));
                 }
             }
-
-            // Peek at the best remaining candidate; if it's very low and we've
-            // visited a generous budget, stop early.
-            if let Some(&(best_fp, _)) = candidates.peek() {
-                let best = best_fp as f32 / 1_000_000.0;
-                if best < threshold * 0.5 && visited.len() > self.beam_width * 4 {
-                    break;
-                }
-            }
         }
+        results.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
         results
     }
 
@@ -540,5 +599,36 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, 0);
         let _ = dim;
+    }
+
+    #[test]
+    fn approximate_indexes_return_opaque_ids() {
+        let entries: Vec<Entry> = gen_dataset(80, 16, 44)
+            .into_iter()
+            .enumerate()
+            .map(|(position, mut entry)| {
+                entry.id = 10_000 + position as u32 * 7;
+                entry
+            })
+            .collect();
+        let query = entries[12].vec.clone();
+        let expected = entries[12].id;
+
+        let hnsw = build_index(HnswBeamSearch::new(12, 32), &entries);
+        assert!(
+            hnsw.search(&query, 0.99)
+                .iter()
+                .any(|hit| hit.id == expected),
+            "HNSW search leaked graph positions instead of opaque ids"
+        );
+
+        let threshold = build_index(ThresholdBeam::new(12, 40), &entries);
+        assert!(
+            threshold
+                .search(&query, 0.99)
+                .iter()
+                .any(|hit| hit.id == expected),
+            "threshold search leaked graph positions instead of opaque ids"
+        );
     }
 }
