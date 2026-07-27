@@ -5,6 +5,22 @@ All notable changes to RuVector will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [ruvector npm 0.2.36] - 2026-07-26
+
+### Fixed
+
+- Start the stdio MCP transport when launched through `ruvector mcp start`
+  ([#715](https://github.com/ruvnet/ruvector/issues/715)).
+- Keep ONNX model-loader diagnostics on stderr so they cannot corrupt MCP
+  JSON-RPC frames ([#710](https://github.com/ruvnet/ruvector/issues/710)).
+
+### Security
+
+- Update `anyhow` to 1.0.104 and `memmap2` to 0.9.11, removing the
+  corresponding RustSec soundness exceptions.
+- Update the MCP SDK to 1.29.x, clearing its shared-transport data-leak and
+  ReDoS advisories, and remove the unused `js-beautify` dependency.
+
 ## [hailo-backend] - 2026-05-03
 
 Branch-only entry; not yet released to a versioned tag. 38 iters /
