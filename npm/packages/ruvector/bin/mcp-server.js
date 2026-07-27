@@ -3183,13 +3183,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'workers_create': {
-        const name = args.name;
-        const preset = args.preset || 'quick-scan';
-        const triggers = args.triggers;
+        const name = String(args.name || '');
+        const preset = String(args.preset || 'quick-scan');
+        const triggers = args.triggers == null ? null : String(args.triggers);
         try {
-          let cmd = `npx agentic-flow@alpha workers create "${name}" --preset ${preset}`;
-          if (triggers) cmd += ` --triggers "${triggers}"`;
-          const result = execSync(cmd, {
+          // Never interpolate MCP-controlled fields into a shell command.
+          // execFileSync passes each value as one argument, so names/triggers
+          // containing quotes or shell metacharacters cannot escape to a shell.
+          const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+          const commandArgs = ['agentic-flow@alpha', 'workers', 'create', name, '--preset', preset];
+          if (triggers) commandArgs.push('--triggers', triggers);
+          const result = execFileSync(command, commandArgs, {
             encoding: 'utf-8',
             timeout: 30000,
             stdio: ['pipe', 'pipe', 'pipe']
@@ -4084,8 +4088,11 @@ async function main() {
   process.stdin.on('end', () => process.exit(0));
 }
 
+module.exports = { main, loadBrainClient, BRAIN_MISSING_DEP_RESULT };
+
 if (require.main === module) {
-  main().catch(console.error);
-} else {
-  module.exports = { loadBrainClient, BRAIN_MISSING_DEP_RESULT };
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
 }
