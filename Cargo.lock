@@ -8923,6 +8923,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruvector-bounded-rag"
+version = "2.3.0"
+dependencies = [
+ "criterion 0.5.1",
+ "rand 0.8.6",
+ "rand_distr 0.4.3",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ruvector-capgated"
 version = "2.3.0"
 
@@ -9427,6 +9438,14 @@ name = "ruvector-dither"
 version = "0.1.0"
 dependencies = [
  "criterion 0.5.1",
+]
+
+[[package]]
+name = "ruvector-diverse-beam"
+version = "2.3.0"
+dependencies = [
+ "rand 0.8.6",
+ "rand_distr 0.4.3",
 ]
 
 [[package]]
@@ -10639,6 +10658,10 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]
+
+[[package]]
+name = "ruvector-speculative-ann"
+version = "2.3.0"
 
 [[package]]
 name = "ruvector-temporal-coherence"
