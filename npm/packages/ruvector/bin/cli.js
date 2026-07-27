@@ -8445,18 +8445,7 @@ mcpCmd.command('test')
       console.log(`  ${chalk.yellow('WARN')} Could not parse tool count: ${e.message}`);
     }
 
-    // Test 5: version check
-    try {
-      const src = fs.readFileSync(mcpServerPath, 'utf8');
-      const verMatch = src.match(/version:\s*'([^']+)'/);
-      if (verMatch) {
-        const pkg = require(path.join(__dirname, '..', 'package.json'));
-        const match = verMatch[1] === pkg.version;
-        console.log(`  ${match ? chalk.green('PASS') : chalk.yellow('WARN')} Server version: ${verMatch[1]}${match ? '' : ` (package: ${pkg.version})`}`);
-      }
-    } catch {}
-
-    // Test 6: live handshake.
+    // Test 5: live handshake.
     //
     // Every check above is static — the file parses, the SDK resolves, the
     // TOOLS array greps to N entries. All of them passed against a server that
@@ -8528,6 +8517,14 @@ mcpCmd.command('test')
       process.exit(1);
     }
     console.log(`  ${chalk.green('PASS')} live handshake (server: ${handshake.info && handshake.info.name})`);
+
+    const pkg = require(path.join(__dirname, '..', 'package.json'));
+    if (!handshake.info || handshake.info.version !== pkg.version) {
+      console.log(`  ${chalk.red('FAIL')} Server version: ${handshake.info && handshake.info.version} (package: ${pkg.version})`);
+      console.log(chalk.bold.red('\n  Checks failed — the live server version does not match the package.\n'));
+      process.exit(1);
+    }
+    console.log(`  ${chalk.green('PASS')} Server version: ${handshake.info.version}`);
 
     if (handshake.noise && handshake.noise.length) {
       // stdio MCP requires stdout to carry only newline-delimited JSON-RPC.
@@ -10360,4 +10357,3 @@ if (require.main === module) {
 } else {
   module.exports = { atomicWriteFileSync, readIntelStoreSafe, Intelligence };
 }
-
