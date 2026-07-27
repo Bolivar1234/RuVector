@@ -28,6 +28,7 @@ impl AnnVariant for LinearFull {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Vec<Hit> {
+        assert_eq!(query.len(), self.dims, "query dimension mismatch");
         let mut dists: Vec<(f32, usize)> = self
             .vectors
             .iter()

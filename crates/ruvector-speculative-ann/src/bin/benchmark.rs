@@ -97,22 +97,6 @@ fn print_header(n: usize, d: usize, q: usize) {
     println!();
 }
 
-fn print_row(
-    name: &str,
-    recall: f32,
-    mean: f64,
-    p50: u128,
-    p95: u128,
-    throughput: f64,
-    mem_mb: f64,
-    extra: &str,
-) {
-    println!(
-        "  {name:<18} recall={recall:.3}  mean={mean:>7.1}µs  p50={p50:>6}µs  \
-         p95={p95:>7}µs  {throughput:>8.0} q/s  mem={mem_mb:>5.1}MB  {extra}"
-    );
-}
-
 // ─── run one variant ─────────────────────────────────────────────────────────
 
 struct RunResult {
@@ -124,6 +108,21 @@ struct RunResult {
     qps: f64,
     mem_mb: f64,
     extra: String,
+}
+
+fn print_row(result: &RunResult) {
+    println!(
+        "  {:<18} recall={:.3}  mean={:>7.1}µs  p50={:>6}µs  \
+         p95={:>7}µs  {:>8.0} q/s  mem={:>5.1}MB  {}",
+        result.name,
+        result.recall,
+        result.mean_us,
+        result.p50_us,
+        result.p95_us,
+        result.qps,
+        result.mem_mb,
+        result.extra,
+    );
 }
 
 fn run_linear_full(ds: &Dataset, ground_truth: &[Vec<ruvector_speculative_ann::Hit>]) -> RunResult {
@@ -344,9 +343,7 @@ fn main() {
     // ── summary table ─────────────────────────────────────────────────────────
     println!("─── Summary ─────────────────────────────────────────────────────────────────");
     for r in [&r_full, &r_draft, &r_spec] {
-        print_row(
-            &r.name, r.recall, r.mean_us, r.p50_us, r.p95_us, r.qps, r.mem_mb, &r.extra,
-        );
+        print_row(r);
     }
     println!();
 

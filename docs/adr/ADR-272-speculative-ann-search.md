@@ -28,7 +28,9 @@ Speculative decoding in LLMs (Leviathan et al., 2023) resolved an analogous trad
 The technical mechanism:
 1. **Draft**: brute-force scan over scalar-quantized u8 vectors to produce k' candidate ids. Cost: O(n × d / 4) using integer arithmetic.
 2. **Verify**: exact f32 distances for the k' candidates only. Cost: O(k' × d).
-3. **Adaptive k'**: an online controller tunes k' to maintain a caller-specified recall target, using rolling recall as feedback signal.
+3. **Adaptive k'**: an online controller tunes k' toward a caller-specified
+   recall target using sampled, externally audited recall as its feedback
+   signal. Calls without ground truth use the current multiplier unchanged.
 
 ---
 

@@ -111,6 +111,11 @@ impl ScalarQuantizer {
     pub fn train(vectors: &[Vec<f32>]) -> Self {
         assert!(!vectors.is_empty(), "need at least one vector to train SQ");
         let dims = vectors[0].len();
+        assert!(dims > 0, "vectors must have at least one dimension");
+        assert!(
+            vectors.iter().all(|v| v.len() == dims),
+            "inconsistent vector dimensions"
+        );
         let mut min_vals = vec![f32::MAX; dims];
         let mut max_vals = vec![f32::MIN; dims];
 
@@ -143,6 +148,7 @@ impl ScalarQuantizer {
 
     /// Quantize one f32 vector to u8.
     pub fn quantize(&self, v: &[f32]) -> Vec<u8> {
+        assert_eq!(v.len(), self.min_vals.len(), "vector dimension mismatch");
         v.iter()
             .enumerate()
             .map(|(d, &x)| {

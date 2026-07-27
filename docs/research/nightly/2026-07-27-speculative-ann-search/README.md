@@ -74,7 +74,10 @@ Key property: for Gaussian data, the rank preservation of SQ8 is high — most t
 
 ### 2026: Adaptive Recall Budgeting
 
-In 2026, the speculative protocol establishes a new primitive: *recall budgeting*. Callers specify a target recall threshold; the system self-tunes the draft candidate multiplier to deliver that threshold at minimum latency.
+In 2026, the speculative protocol establishes a new experimental primitive:
+*feedback-driven recall budgeting*. Callers specify a target recall threshold
+and provide sampled ground-truth audits; the controller tunes the draft
+candidate multiplier from that measured feedback.
 
 ### 2031: LLM-Driven Draft Routing
 
@@ -250,7 +253,10 @@ Compute exact f32 distances for only the k' candidate ids against the stored f32
 Sort the k' verified candidates by exact distance. Return top-k. Results are exact within the candidate set.
 
 ### Step 6: Adaptive control
-If the rolling recall (measured against ground truth during benchmarking, or estimated from draft-verify agreement in production) drops below target (0.95 default), increase k' by 2. If it's comfortably above target, decrease k' by 1. This maintains a recall SLA automatically.
+If audited rolling recall drops below target (0.95 default), increase k' by 2.
+If it is comfortably above target, decrease k' by 1. Calls without audited
+ground truth retain the current multiplier and do not adapt: draft-verify
+agreement cannot reveal true neighbours missing from the draft pool.
 
 ---
 
@@ -291,8 +297,8 @@ In a ruFlo or Claude Flow agent loop:
 
 ```
 [Agent]  →  recall(query="what did I know about X?", top_k=10, recall_target=0.95)
-[ruVec]  →  SpeculativeANN.search_adaptive(query, k=10, gt=None)
-         →  k' = 20 (adaptive, based on rolling recall)
+[ruVec]  →  SpeculativeANN.search_adaptive(query, k=10, gt=sampled_audit)
+         →  k' = 20 (adaptive, based on audited rolling recall)
          →  returns top-10 in ~773µs
 [Agent]  →  uses context, makes decision, writes new memory
          →  proof-gate signs the write
@@ -344,7 +350,9 @@ For Gaussian data, SQ8 preserves top-10 rank ordering with probability ~0.86 (me
 ### What Remains Unsolved
 
 1. **Optimal draft oracle selection**: SQ8 is simple but not optimal. Learned projections (PCA, random projections) may give better rank preservation at lower memory cost.
-2. **Query-adaptive k' without ground truth**: In production, we don't have ground truth recall. The current proxy (draft-verify agreement) is optimistic. Better uncertainty estimation would improve the controller.
+2. **Query-adaptive k' without ground truth**: Production calls without sampled
+   audits now keep the current multiplier fixed. A calibrated uncertainty
+   estimator is required before ground-truth-free adaptation can be enabled.
 3. **Distributed speculation**: When the corpus is sharded across nodes, the draft and verify stages map to different network round-trips. The protocol needs adaptation.
 4. **Non-Gaussian distributions**: The PoC uses Gaussian data. Real embeddings have different geometric properties (hyperbolic structure, cluster gaps). The recall guarantees need empirical validation on real datasets.
 
@@ -360,7 +368,8 @@ The PoC establishes:
 
 1. Integration with HNSW: use HNSW as the draft (not linear scan) — much faster for large n.
 2. Learned draft oracle: replace SQ with a compact learned model that better preserves rank ordering.
-3. Ground-truth-free recall estimation: the current production path uses draft-verify agreement as recall proxy; this needs calibration against held-out ground truth.
+3. Ground-truth-free recall estimation: intentionally disabled until an
+   estimator is calibrated against held-out ground truth.
 4. SIMD acceleration: u8 distances with AVX2/AVX-512 SIMD would give the theoretical ~4× speedup rather than the observed ~1.7× (which is limited by the sequential scalar code path).
 
 ### What Would Falsify This Approach

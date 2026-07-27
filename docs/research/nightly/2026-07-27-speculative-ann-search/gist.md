@@ -1,8 +1,10 @@
 # ruvector 2026: Speculative ANN Search — Draft-Then-Verify for High-Performance Rust Vector Retrieval
 
-**Speculative ANN search applies the speculative decoding protocol to vector retrieval: a fast u8 draft index proposes k' candidates; exact f32 distances verify them; an adaptive controller self-tunes k' to hit a target recall. Implemented in pure Rust, no external deps, 18 tests pass.**
+**Speculative ANN search applies the speculative decoding protocol to vector retrieval: a fast u8 draft index proposes k' candidates; exact f32 distances verify them; an adaptive controller tunes k' from sampled recall audits. Implemented in pure Rust with no runtime dependencies.**
 
-Achieve 0.964 recall@10 at 1293 queries/sec — 1.61× faster than full f32 linear scan — with an adaptive candidate multiplier that self-calibrates at runtime.
+The measured synthetic benchmark achieves 0.964 recall@10 at 1293
+queries/sec—1.61× faster than its full f32 linear baseline—when the adaptive
+candidate multiplier receives exact benchmark feedback.
 
 → Repository: [https://github.com/ruvnet/ruvector](https://github.com/ruvnet/ruvector)  
 → Branch: `research/nightly/2026-07-27-speculative-ann-search`  
@@ -36,7 +38,7 @@ This matters for AI agents, graph RAG pipelines, and edge AI systems where retri
 | LinearFull variant | Brute-force f32 scan (ground truth) | Reference baseline for recall measurement | Measured |
 | QuantizedDraft variant | Brute-force u8 scan, no verify | Establishes speed/recall bounds of draft alone | Measured |
 | SpeculativeANN variant | u8 draft k' candidates + f32 exact re-rank | Near-full recall at near-draft speed | Measured |
-| Adaptive k' controller | Online recall feedback drives k' up/down | Self-calibrating to target recall without manual tuning | Measured |
+| Adaptive k' controller | Sampled recall audits drive k' up/down | Feedback-driven target recall | Measured with oracle feedback |
 | `AnnVariant` trait | Uniform search interface across all variants | Drop-in replacement for existing linear scan | Implemented |
 | `SpecConfig` | Target recall, window size, min/max mult bounds | Caller-specified quality SLA | Implemented |
 | recall_at_k metric | Intersection-based recall vs. ground truth | Standard ANN benchmark metric | Implemented |

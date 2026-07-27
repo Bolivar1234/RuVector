@@ -55,6 +55,7 @@ struct RollingRecall {
 
 impl RollingRecall {
     fn new(window: usize) -> Self {
+        assert!(window > 0, "recall window must be greater than zero");
         Self {
             buf: vec![0.0; window],
             head: 0,
@@ -133,7 +134,11 @@ impl SpeculativeANN {
     /// Non-adaptive search at a fixed `mult` (used in benchmarks to isolate
     /// the benefit of a specific k' without feedback noise).
     pub fn search_fixed(&self, query: &[f32], k: usize, mult: usize) -> Vec<Hit> {
-        let k_prime = (k * mult).max(k);
+        if k == 0 {
+            return Vec::new();
+        }
+        assert_eq!(query.len(), self.dims, "query dimension mismatch");
+        let k_prime = k.saturating_mul(mult).max(k);
         let candidate_ids = self.draft.draft_ids(query, k_prime);
         self.verify_and_rerank(query, &candidate_ids, k)
     }
@@ -147,7 +152,7 @@ impl SpeculativeANN {
                 dist: sq_l2_f32(query, &self.full_vecs[id]),
             })
             .collect();
-        verified.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
+        verified.sort_unstable_by(|a, b| a.dist.total_cmp(&b.dist));
         verified.truncate(k);
         verified
     }
@@ -155,31 +160,29 @@ impl SpeculativeANN {
     /// Adaptive search: adjusts `mult` based on rolling recall feedback.
     ///
     /// Note: this mutates `self.mult` and `self.rolling`.  The recall is
-    /// measured against a freshly computed brute-force result if
-    /// `ground_truth` is supplied, otherwise recall is estimated from
-    /// the draft-vs-verify agreement rate.
+    /// measured against a freshly computed brute-force result when
+    /// `ground_truth` is supplied. Without audited feedback, the search runs
+    /// at the current multiplier but does not adapt: agreement between the
+    /// draft and its own reranked candidate pool cannot detect missing true
+    /// neighbours and is therefore not a recall estimate.
     pub fn search_adaptive(
         &mut self,
         query: &[f32],
         k: usize,
         ground_truth: Option<&[Hit]>,
     ) -> Vec<Hit> {
-        let k_prime = (k * self.mult).max(k);
+        if k == 0 {
+            return Vec::new();
+        }
+        assert_eq!(query.len(), self.dims, "query dimension mismatch");
+        let k_prime = k.saturating_mul(self.mult).max(k);
         let candidate_ids = self.draft.draft_ids(query, k_prime);
         let results = self.verify_and_rerank(query, &candidate_ids, k);
 
-        // Measure recall if ground truth provided.
-        let recall = if let Some(gt) = ground_truth {
-            crate::recall_at_k(&results, gt, k)
-        } else {
-            // Proxy: compare verify results to draft order (optimistic).
-            let draft_ids_set: std::collections::HashSet<usize> =
-                candidate_ids.iter().take(k).copied().collect();
-            let verify_ids_set: std::collections::HashSet<usize> =
-                results.iter().map(|h| h.id).collect();
-            let inter = draft_ids_set.intersection(&verify_ids_set).count();
-            inter as f32 / k as f32
+        let Some(gt) = ground_truth else {
+            return results;
         };
+        let recall = crate::recall_at_k(&results, gt, k);
 
         self.rolling.push(recall);
         self.queries_run += 1;
@@ -286,6 +289,16 @@ mod tests {
             rate >= 0.70,
             "acceptance rate {rate:.3} too low; adaptive controller not working"
         );
+    }
+
+    #[test]
+    fn test_no_feedback_does_not_change_controller() {
+        let ds = small_dataset();
+        let mut spec = SpeculativeANN::build(ds.vectors, SpecConfig::default());
+        let initial = spec.current_mult();
+        let _ = spec.search_adaptive(&ds.queries[0], 10, None);
+        assert_eq!(spec.current_mult(), initial);
+        assert_eq!(spec.queries_run, 0);
     }
 
     #[test]
