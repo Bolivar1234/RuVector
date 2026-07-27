@@ -24,14 +24,14 @@ Current state of the ecosystem:
   parameter. None perform automatic calibration to a recall target.
 - **Agent memory workloads** care deeply about recall: retrieving only 7 of 10
   relevant memories loses 30% of context quality. But agents cannot tune ef.
-- **MCP tool surfaces**: a search tool that hits a latency SLA while guaranteeing
+- **MCP tool surfaces**: a search tool that targets a latency/recall trade-off while measuring
   recall quality is more useful than one the operator must tune.
 - **Edge deployments**: ef tuning requires hardware profiling. Edge devices need
   self-calibrating parameters.
 
 This ADR proposes introducing an adaptive recall-targeted search layer: the caller
 specifies `recall_target` (e.g., 0.90) and the system automatically selects the
-minimum ef that achieves it. Three strategies are provided: fixed-ef (baseline),
+estimated ef for that calibrated workload and `k`. Three strategies are provided: fixed-ef (baseline),
 binary-search calibrated (oracle), and table-calibrated (production).
 
 ---
@@ -58,7 +58,7 @@ comes from a user-provided held-out sample.
 - Operators specify **recall targets**, not ef values — dramatically simpler API.
 - Self-calibrating: re-run calibration after data distribution shifts.
 - TableCalibrated provides O(1) ef selection with amortised calibration overhead.
-- BinarySearchCalibrated provides per-query oracle recall guarantee (with ground
+- BinarySearchCalibrated provides a per-query oracle comparison (with ground
   truth access — useful for offline quality audits).
 - Directly composable with coherence-hnsw, capability-gated, and hybrid search.
 
@@ -66,7 +66,8 @@ comes from a user-provided held-out sample.
 
 - Calibration requires a representative held-out query sample (20–100 queries).
 - Calibration overhead is proportional to |ef_candidates| × n_sample × search cost.
-- Recall guarantees are probabilistic: the table predicts mean recall, not per-query.
+- Calibration values are empirical estimates: the table records mean recall,
+  not a probabilistic bound or a per-query guarantee.
 - Distribution drift invalidates the table: periodic re-calibration is required.
 
 ---

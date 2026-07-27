@@ -54,13 +54,13 @@ pub fn clustered_unit_vectors(
     let mut vectors = vec![0.0f32; n * dims];
     let mut assignments = vec![0usize; n];
 
-    for c in 0..n_clusters {
+    for (c, center) in centers.iter().enumerate() {
         for p in 0..per_cluster {
             let idx = c * per_cluster + p;
             assignments[idx] = c;
             let row = &mut vectors[idx * dims..(idx + 1) * dims];
             for (d, v) in row.iter_mut().enumerate() {
-                *v = centers[c][d] + normal.sample(&mut rng);
+                *v = center[d] + normal.sample(&mut rng);
             }
             // Normalize.
             let norm: f32 = row.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);

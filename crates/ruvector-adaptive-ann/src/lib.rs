@@ -17,11 +17,11 @@
 //!
 //! This crate provides three strategies:
 //!
-//! | Variant | Recall guarantee | Overhead | Best for |
+//! | Variant | Recall evidence | Overhead | Best for |
 //! |---------|-----------------|----------|----------|
 //! | [`FixedEfSearch`] | None | None | Baseline |
-//! | [`BinarySearchCalibrated`] | Per-query | ~7 searches | Safety-critical |
-//! | [`TableCalibratedSearch`] | Pre-calibrated | O(1) table lookup | Production |
+//! | [`BinarySearchCalibrated`] | Per-query oracle comparison | ~7 searches | Evaluation |
+//! | [`TableCalibratedSearch`] | Pre-calibrated mean estimate | Table lookup | Research deployment |
 //!
 //! ## Trait
 //!
@@ -56,6 +56,7 @@ pub trait RecallTargetedSearch {
     fn search_with_target(&self, query: &[f32], k: usize, recall_target: f32) -> Vec<SearchResult>;
 
     /// Effective beam width used for the given recall target.
-    /// Returns `None` for fixed-ef searchers that ignore the target.
+    /// Returns `None` when the value is fixed, ignored, or query-dependent and
+    /// unavailable without executing the actual query.
     fn effective_ef_for_target(&self, recall_target: f32, k: usize) -> Option<usize>;
 }

@@ -14,8 +14,8 @@
 //!   but demonstrates the theoretical minimum ef for each query distribution).
 //!
 //! * **[`TableCalibratedSearch`]** — Pre-calibrates a monotone ef→recall table
-//!   offline, then at query time does an O(1) table lookup to pick the minimum
-//!   ef. This is the production-ready strategy.
+//!   offline, then at query time looks up an empirical ef estimate for the
+//!   calibrated workload and result count.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -59,6 +59,12 @@ pub fn beam_search(
     ef: usize,
     entry: usize,
 ) -> Vec<SearchResult> {
+    if k == 0 {
+        return Vec::new();
+    }
+    assert!(graph.n > 0, "graph must not be empty");
+    assert!(entry < graph.n, "entry point is outside the graph");
+    assert_eq!(query.len(), graph.config.dims, "query dimension mismatch");
     let ef = ef.max(k);
     let mut visited = vec![false; graph.n];
     visited[entry] = true;
@@ -160,7 +166,11 @@ pub struct BinarySearchCalibrated<'g> {
 
 impl<'g> RecallTargetedSearch for BinarySearchCalibrated<'g> {
     fn search_with_target(&self, query: &[f32], k: usize, recall_target: f32) -> Vec<SearchResult> {
-        let gt = &self.ground_truth[self.query_index];
+        let gt = self
+            .ground_truth
+            .get(self.query_index)
+            .expect("query_index must identify a ground-truth row");
+        let recall_target = recall_target.clamp(0.0, 1.0);
         let mut lo = self.ef_min;
         let mut hi = self.ef_max;
         let mut best = beam_search(self.graph, query, k, hi, self.entry);
@@ -181,32 +191,17 @@ impl<'g> RecallTargetedSearch for BinarySearchCalibrated<'g> {
         best
     }
 
-    fn effective_ef_for_target(&self, recall_target: f32, k: usize) -> Option<usize> {
-        // Return the ef the binary search converges to on a dummy zero vector.
-        // In practice, each query has its own effective ef.
-        let dummy = vec![0.0f32; self.graph.config.dims];
-        let gt = &self.ground_truth[self.query_index];
-        let mut lo = self.ef_min;
-        let mut hi = self.ef_max;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            let results = beam_search(self.graph, &dummy, k, mid, self.entry);
-            let ids: Vec<u32> = results.iter().map(|r| r.id).collect();
-            let r = recall_at_k(&ids, gt);
-            if r >= recall_target {
-                hi = mid;
-            } else {
-                lo = mid + 1;
-            }
-        }
-        Some(lo)
+    fn effective_ef_for_target(&self, _recall_target: f32, _k: usize) -> Option<usize> {
+        // Effective ef is query-dependent and cannot be determined without
+        // running the oracle search for the actual query.
+        None
     }
 }
 
 // ─── Variant 3: TableCalibratedSearch ────────────────────────────────────────
 
 /// Pre-calibrated search: uses an offline-built ef→recall table to select ef
-/// in O(1). This is the production-ready strategy.
+/// using an empirical table calibrated for a specific `k` and workload.
 pub struct TableCalibratedSearch<'g> {
     pub graph: &'g FlatGraph,
     pub entry: usize,

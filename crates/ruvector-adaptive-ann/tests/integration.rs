@@ -244,4 +244,51 @@ fn test_effective_ef_for_target() {
     let ef = tcs.effective_ef_for_target(0.90, K);
     assert!(ef.is_some(), "TableCalibrated must return Some(ef)");
     assert!(ef.unwrap() >= K);
+
+    let gt = vec![vec![0; K]];
+    let binary = BinarySearchCalibrated {
+        graph: &graph,
+        entry: ENTRY,
+        ef_min: K,
+        ef_max: 128,
+        ground_truth: &gt,
+        query_index: 0,
+    };
+    assert_eq!(
+        binary.effective_ef_for_target(0.90, K),
+        None,
+        "query-dependent ef must not be estimated from an unrelated dummy query"
+    );
+}
+
+#[test]
+#[should_panic(expected = "calibration table was built for k=10")]
+fn test_calibration_table_rejects_different_k() {
+    let (graph, _) = build_graph();
+    let mut calibrator = Calibrator {
+        graph: &graph,
+        entry: ENTRY,
+        ef_candidates: vec![32, 64],
+        n_sample: 10,
+        seed: 1,
+    };
+    let (queries, gt) = calibrator.build_ground_truth(K, 10);
+    let table = calibrator.calibrate(K, &queries, &gt);
+    let _ = table.min_ef_for_target(0.90, K + 1);
+}
+
+#[test]
+fn test_calibration_clamps_to_available_ground_truth() {
+    let (graph, _) = build_graph();
+    let mut calibrator = Calibrator {
+        graph: &graph,
+        entry: ENTRY,
+        ef_candidates: vec![32, 64],
+        n_sample: 10,
+        seed: 1,
+    };
+    let (queries, mut gt) = calibrator.build_ground_truth(K, 10);
+    gt.truncate(3);
+    let table = calibrator.calibrate(K, &queries, &gt);
+    assert!(!table.entries().is_empty());
 }

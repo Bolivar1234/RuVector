@@ -33,6 +33,8 @@ pub struct CalibrationTable {
     entries: Vec<(usize, f32)>,
     /// Fallback ef if the table is empty or target exceeds all calibrated recalls.
     pub max_ef: usize,
+    /// Result count used when measuring the table.
+    pub k: usize,
 }
 
 impl CalibrationTable {
@@ -40,6 +42,11 @@ impl CalibrationTable {
     ///
     /// Falls back to `max_ef` if no calibrated ef reaches the target.
     pub fn min_ef_for_target(&self, recall_target: f32, k: usize) -> usize {
+        assert_eq!(
+            k, self.k,
+            "calibration table was built for k={} but queried with k={k}",
+            self.k
+        );
         let target = recall_target.clamp(0.0, 1.0);
         // Ensure ef ≥ k.
         for &(ef, recall) in &self.entries {
@@ -80,12 +87,18 @@ impl<'g> Calibrator<'g> {
         sample_queries: &[f32],
         sample_gt: &[Vec<u32>],
     ) -> CalibrationTable {
+        assert!(k > 0, "calibration k must be greater than zero");
+        assert!(
+            sample_queries.len() % self.graph.config.dims == 0,
+            "sample query buffer must contain whole vectors"
+        );
         self.ef_candidates.sort_unstable();
         self.ef_candidates.dedup();
 
         let n_sample = self
             .n_sample
-            .min(sample_queries.len() / self.graph.config.dims);
+            .min(sample_queries.len() / self.graph.config.dims)
+            .min(sample_gt.len());
         let dims = self.graph.config.dims;
 
         let mut entries: Vec<(usize, f32)> = Vec::with_capacity(self.ef_candidates.len());
@@ -114,7 +127,7 @@ impl<'g> Calibrator<'g> {
         }
 
         let max_ef = entries.last().map(|&(ef, _)| ef).unwrap_or(64);
-        CalibrationTable { entries, max_ef }
+        CalibrationTable { entries, max_ef, k }
     }
 
     /// Convenience: generate calibration ground truth from graph vectors.

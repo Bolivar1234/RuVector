@@ -1,6 +1,6 @@
 # Adaptive Recall-Targeted ANN Search
 
-**150-char summary:** Auto-calibrated beam width for HNSW: specify a recall target (e.g., 0.90) and get the minimum ef that achieves it — no manual tuning, O(1) lookup.
+**Summary:** Empirical beam-width calibration for graph ANN, scoped to a specific graph, query distribution, and result count (`k`).
 
 ---
 
@@ -25,7 +25,8 @@ This nightly research implements three strategies for adaptive recall-targeted s
 | TableCalibrated | **0.940** | **227.8** | **267.7** | **4,390** |
 
 All numbers from `cargo run --release`, N=3,000 × D=64, x86_64 Linux, release build.
-Recall target: 0.90. TableCalibrated exceeded the target with O(1) ef lookup.
+Recall target: 0.90. TableCalibrated exceeded the target in this benchmark
+with a small table lookup; this is an empirical result, not a per-query bound.
 
 ---
 
@@ -218,7 +219,8 @@ on the indexed data itself.
 ### Monotonicity Enforcement
 
 The calibration loop enforces `recall[ef_n] ≥ recall[ef_{n-1}]` via a running
-maximum. This is mathematically guaranteed (larger beam can only find more
+maximum. The table enforces monotonicity with a running maximum; raw measured
+recall can fluctuate with search and sampling variance.
 neighbours) but small-sample variance can produce apparent non-monotone steps in
 practice. Enforcement ensures the table lookup is correct.
 

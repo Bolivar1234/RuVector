@@ -1,6 +1,6 @@
 # ruvector 2026: Adaptive Recall-Targeted ANN — Automatic ef Calibration for High-Performance Rust Vector Search
 
-**150-char SEO summary:** Rust crate for adaptive recall-targeted ANN search: specify a recall target (0.90) and get the minimum HNSW ef that achieves it — no manual tuning, O(1) lookup.
+**Summary:** Rust research crate for empirical ANN beam-width calibration, scoped to a calibrated graph, workload, and result count.
 
 **Value proposition:** Stop tuning `ef_search` by hand. Declare the recall you need; `ruvector-adaptive-ann` finds the beam width automatically using an offline calibration table.
 
@@ -32,7 +32,7 @@ Rust implementation exists. No system provides a clean trait-based API where the
 caller specifies a recall target and the library selects ef automatically.
 
 **ruvector-adaptive-ann** fills this gap with three strategies — fixed ef (baseline),
-binary-search calibrated (per-query oracle), and table calibrated (production-ready)
+binary-search calibrated (per-query oracle), and table calibrated (empirical deployment)
 — all implementing a single `RecallTargetedSearch` trait in pure Rust with no
 external service dependencies.
 
@@ -67,8 +67,8 @@ that possible.
 | `Calibrator` | Builds the table from held-out queries vs brute-force GT | One-time cost amortised over all subsequent queries | Implemented in PoC |
 | `FixedEfSearch` | Baseline: constant ef, ignores recall_target | Shows what happens without calibration | Implemented in PoC |
 | `BinarySearchCalibrated` | Per-query oracle: binary-searches ef to hit target | Theoretical minimum ef per query; requires ground truth | Implemented in PoC |
-| `TableCalibratedSearch` | Production: O(1) lookup from pre-built table | 4,390 QPS at 0.940 recall@10 | Implemented in PoC |
-| Monotonicity enforcement | `recall[ef_n] ≥ recall[ef_{n-1}]` guaranteed | Prevents incorrect ef selection from sample variance | Implemented in PoC |
+| `TableCalibratedSearch` | Empirical lookup from a k-specific table | 4,390 QPS at 0.940 recall@10 in benchmark | Implemented in PoC |
+| Monotonicity enforcement | Running maximum over sampled means | Smooths sample variance; does not create a recall guarantee | Implemented in PoC |
 | Distribution mismatch detection | API doc makes it explicit | Prevents silent recall failure | Documentation |
 | WASM-compatible design | No async, no I/O in hot path | Edge deployment without recalibration overhead | Research direction |
 | RVF manifest integration | Pack CalibrationTable in RVF portable cognitive package | Calibrated recall from first query after load | Research direction |

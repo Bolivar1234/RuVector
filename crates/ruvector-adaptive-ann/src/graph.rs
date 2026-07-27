@@ -48,6 +48,7 @@ pub struct FlatGraph {
 /// Squared L2 distance between two equal-length slices.
 #[inline]
 pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len(), "vector dimension mismatch");
     a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
@@ -56,8 +57,13 @@ impl FlatGraph {
     ///
     /// Construction is brute-force O(N² · D) — correct for PoC sizes (≤ 10 K).
     pub fn build(vectors: Vec<f32>, config: GraphConfig) -> Self {
+        assert!(
+            config.dims > 0,
+            "graph dimensions must be greater than zero"
+        );
         let n = vectors.len() / config.dims;
         assert_eq!(vectors.len(), n * config.dims, "vector length mismatch");
+        assert!(n > 0, "graph must contain at least one vector");
 
         let m_local = config.m.min(n.saturating_sub(1));
         let dims = config.dims;
@@ -85,8 +91,8 @@ impl FlatGraph {
         let mut neighbors = neighbors;
         if config.m_longjump > 0 {
             let mut rng = StdRng::seed_from_u64(0xFEED_DEAD);
-            for i in 0..n {
-                let current_len = neighbors[i].len();
+            for (i, node_neighbors) in neighbors.iter_mut().enumerate() {
+                let current_len = node_neighbors.len();
                 let mut added = 0usize;
                 let mut attempts = 0usize;
                 while added < config.m_longjump && attempts < n * 2 {
@@ -96,8 +102,8 @@ impl FlatGraph {
                         continue;
                     }
                     let jid = j as u32;
-                    if !neighbors[i][..current_len + added].contains(&jid) {
-                        neighbors[i].push(jid);
+                    if !node_neighbors[..current_len + added].contains(&jid) {
+                        node_neighbors.push(jid);
                         added += 1;
                     }
                 }

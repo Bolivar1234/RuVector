@@ -312,6 +312,7 @@ fn print_variant_result(_name: &str, lat: &LatencyStats, recall: f32, mean_ef: O
 }
 
 /// Find minimum ef for which recall ≥ target on a specific query, by binary search.
+#[allow(clippy::too_many_arguments)]
 fn find_binary_ef(
     graph: &FlatGraph,
     query: &[f32],
