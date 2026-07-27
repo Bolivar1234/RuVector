@@ -17,9 +17,14 @@ Standard RAG retrieves the top-k chunks by vector cosine similarity and feeds al
 
 Agent memory systems have a third failure: accumulated memories from many sessions may share surface-level similarity to a query while being contextually unrelated. Returning them degrades inference quality and increases hallucination risk.
 
-The insight behind this ADR: the retrieved context should be the **maximally coherent subgraph** that fits within a token budget, not the top-k arbitrary neighbours.
+The hypothesis behind this ADR is that graph coherence can improve a
+budget-capped context set compared with top-k retrieval alone.
 
-Graph min-cut provides a principled mechanism. If chunks are nodes and similarity edges connect them, a min-cut between a query-seeded source partition and a noise sink separates the coherent cluster from noise with minimum edge weight sacrificed — i.e., minimum loss of coherence.
+Graph min-cut provides one measurable mechanism. If chunks are nodes and
+similarity edges connect them, a min-cut between a query-seeded source
+partition and a noise sink separates a candidate cluster from noise. The
+implementation then ranks and truncates that partition to the budget, so the
+final set is not the solution to a budget-constrained min-cut objective.
 
 ---
 
@@ -28,8 +33,8 @@ Graph min-cut provides a principled mechanism. If chunks are nodes and similarit
 Add `ruvector-bounded-rag` to the workspace as a standalone research crate implementing three retrieval strategies with a shared `BoundedRetriever` trait:
 
 1. **TopK**: cosine rank, no graph, O(n log n) — baseline.
-2. **GraphBFS**: priority-queue BFS expansion on a chunk similarity graph, bounded by coherence threshold and budget, O(V+E) — practical at medium scale.
-3. **MinCutBounded**: Edmonds-Karp max-flow/min-cut on a source-sink flow network built from the chunk graph, O(VE²) — optimal coherence partition, requires pre-filtering at large scale.
+2. **GraphBFS**: rebuild a dense similarity graph in O(n²·d), then run priority-queue traversal bounded by coherence threshold and budget.
+3. **MinCutBounded**: Edmonds-Karp max-flow/min-cut on a source-sink flow network built from the chunk graph, followed by relevance ranking and budget truncation; requires pre-filtering at large scale.
 
 All three share `RetrieverConfig { budget, edge_threshold, seed_threshold }`.
 
@@ -46,7 +51,7 @@ The flow network for MinCutBounded:
 ### Positive
 
 - MinCutBounded provides the tightest coherence guarantee of the three strategies.
-- GraphBFS is a practical middle ground: O(V+E), no quadratic cost, good precision.
+- GraphBFS has a simpler traversal than MinCut, but this PoC still pays an O(n²·d) graph-build cost on every query.
 - All three use the same `BoundedRetriever` trait, making them drop-in swappable.
 - The budget parameter directly controls context window consumption.
 - Proof-gated integration is straightforward: add a pre-filter step using `ruvector-proof-gate` to remove chunks the requester lacks access to before running the retriever.

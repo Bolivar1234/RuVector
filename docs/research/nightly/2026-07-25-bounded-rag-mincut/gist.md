@@ -1,6 +1,6 @@
 # ruvector 2026: Bounded Context RAG via MinCut Graph Partitioning for Rust Vector Search
 
-**SEO summary (150 chars):** MinCut on the chunk similarity graph finds the maximally coherent context window that fits a budget — a principled RAG upgrade for AI agent memory.
+**Summary:** A measured MinCut baseline partitions a chunk-similarity graph, then relevance-ranks and truncates the partition to a context budget.
 
 **Value proposition**: Replace fixed-k retrieval with a graph min-cut boundary that enforces semantic coherence while respecting a context budget — implemented in pure Rust, zero external services.
 
@@ -18,7 +18,11 @@ The fundamental problem is that top-k retrieval models chunk-query relationships
 
 Current workarounds are insufficient. MMR (Maximal Marginal Relevance) reduces redundancy but does not maximise coherence — a diverse-but-incoherent set is worse than a redundant-but-coherent one for agent memory applications. RAPTOR builds hierarchical summaries offline and cannot track streaming agent memory. GraphRAG requires LLM-powered entity extraction — expensive to maintain on continuously growing agent memory.
 
-This research implements min-cut bounded retrieval: model chunk relationships as a similarity graph, attach source and sink nodes weighted by query affinity, run max-flow (Edmonds-Karp), and return the source-side partition. This is the maximally coherent chunk set that fits within a budget. It is a graph-theoretic answer to the question: "which chunks should I retrieve together?"
+This research implements min-cut bounded retrieval: model chunk relationships
+as a similarity graph, attach source and sink nodes weighted by query affinity,
+run max-flow (Edmonds-Karp), then relevance-rank and truncate the source-side
+partition. It is an auditable graph heuristic, not an exact
+budget-constrained min-cut.
 
 For RuVector — a Rust-native cognition substrate for AI agents, graph memory, and MCP tooling — this is a natural capability. `ruvector-mincut` already implements subpolynomial dynamic min-cut. `ruvector-agent-memory` provides the chunk store. `ruvector-proof-gate` provides access-controlled pre-filtering. This crate (`ruvector-bounded-rag`) connects them into a coherence-aware retrieval layer.
 
@@ -32,8 +36,8 @@ The practical constraint today is compute: O(n²) pairwise similarity matrix dom
 |---------|-------------|----------------|--------|
 | `BoundedRetriever` trait | Shared API for all retrieval strategies | Swappable backends in production | Implemented in PoC |
 | `TopKRetriever` | Cosine rank, no graph, O(n log n) | Fastest baseline | Implemented & measured |
-| `GraphBfsRetriever` | Priority-queue BFS on similarity graph | Budget-safe, O(V+E) | Implemented & measured |
-| `MinCutRetriever` | Edmonds-Karp max-flow/min-cut | Optimal coherent partition | Implemented & measured |
+| `GraphBfsRetriever` | O(n²·d) graph build + priority traversal | Budget-safe heuristic | Implemented & measured |
+| `MinCutRetriever` | Edmonds-Karp cut + relevance truncation | Coherent-partition heuristic | Implemented & measured |
 | `RetrieverConfig` | Shared budget + threshold config | Single config controls all three | Implemented in PoC |
 | Precision scoring | Recall metric using chunk labels | Honest quality measurement | Implemented & measured |
 | Phase 2 k-NN graph | Pre-built approximate graph | Reduces O(n²) to O(k log n) | Research direction |
@@ -218,7 +222,11 @@ Note: no direct comparison benchmarks are included. All measurements in this doc
 
 ## Deep Research Notes
 
-The core insight is that max-flow/min-cut provides a **globally optimal** coherence boundary for a given query, while BFS-based methods only provide locally greedy boundaries. On well-separated synthetic corpora both achieve precision=1.000. The difference emerges on ambiguous corpora where clusters partially overlap — MinCut will find the lower-weight edge set to cut, while BFS may expand into the wrong cluster.
+Max-flow/min-cut exactly optimises the capacities of the constructed flow
+network. That does not establish that the capacities model contextual
+coherence, and the subsequent budget truncation is outside that optimum. On
+the well-separated synthetic corpus both graph variants achieve
+precision=1.000; ambiguous real-corpus behaviour remains to be validated.
 
 The SOTA in RAG retrieval (as of July 2026) has not published min-cut bounded retrieval. The closest adjacent work is GraphRAG (Microsoft, 2024) which uses community detection on entity graphs. Community detection and min-cut are related (min-cut is equivalent to finding the minimum-weight balanced partition) but GraphRAG operates on structured entity-relation graphs extracted by LLMs, while this work operates on raw vector similarity graphs.
 

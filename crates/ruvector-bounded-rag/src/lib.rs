@@ -11,8 +11,8 @@
 //! | Variant | Strategy | Strength |
 //! |---------|----------|----------|
 //! | `TopK`  | Cosine rank, no graph | Fastest, baseline |
-//! | `GraphBfs` | BFS expansion with coherence gate | Budget-safe, O(V+E) |
-//! | `MinCutBounded` | Max-flow/min-cut flow network | Optimal coherent partition |
+//! | `GraphBfs` | Builds a dense similarity graph, then expands with a coherence gate | Budget-safe heuristic |
+//! | `MinCutBounded` | Max-flow/min-cut flow network, then top-budget truncation | Coherent-partition heuristic |
 //!
 //! ## Quick start
 //!
@@ -66,15 +66,28 @@ pub struct Corpus {
 impl Corpus {
     pub fn from_vecs(vecs: Vec<Vec<f32>>) -> Self {
         let dim = vecs.first().map(|v| v.len()).unwrap_or(0);
+        assert!(
+            vecs.iter().all(|vector| vector.len() == dim),
+            "all corpus vectors must have the same dimension"
+        );
         let chunks = vecs
             .into_iter()
             .enumerate()
-            .map(|(id, vector)| Chunk { id, vector, label: None })
+            .map(|(id, vector)| Chunk {
+                id,
+                vector,
+                label: None,
+            })
             .collect();
         Self { chunks, dim }
     }
 
     pub fn with_labels(mut self, labels: Vec<u32>) -> Self {
+        assert_eq!(
+            labels.len(),
+            self.chunks.len(),
+            "label count must match chunk count"
+        );
         for (chunk, label) in self.chunks.iter_mut().zip(labels) {
             chunk.label = Some(label);
         }
@@ -98,7 +111,10 @@ pub struct Query {
 
 impl Query {
     pub fn new(vector: Vec<f32>) -> Self {
-        Self { vector, relevant_labels: HashSet::new() }
+        Self {
+            vector,
+            relevant_labels: HashSet::new(),
+        }
     }
 
     pub fn with_relevant(mut self, labels: impl IntoIterator<Item = u32>) -> Self {
@@ -179,7 +195,32 @@ fn normalise(v: &[f32]) -> Vec<f32> {
 /// Cosine similarity — assumes inputs are already L2-normalised.
 #[inline]
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>().clamp(-1.0, 1.0)
+    assert_eq!(a.len(), b.len(), "vector dimension mismatch");
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| x * y)
+        .sum::<f32>()
+        .clamp(-1.0, 1.0)
+}
+
+fn validate_config(cfg: &RetrieverConfig) {
+    assert!(cfg.budget > 0, "budget must be greater than zero");
+    assert!(
+        (-1.0..=1.0).contains(&cfg.edge_threshold),
+        "edge_threshold must be in [-1, 1]"
+    );
+    assert!(
+        (-1.0..=1.0).contains(&cfg.seed_threshold),
+        "seed_threshold must be in [-1, 1]"
+    );
+}
+
+fn validate_query(corpus: &Corpus, query: &Query) {
+    assert_eq!(
+        query.vector.len(),
+        corpus.dim,
+        "query dimension must match corpus dimension"
+    );
 }
 
 // ── Variant 1: TopK (baseline) ─────────────────────────────────────────────────
@@ -191,6 +232,7 @@ pub struct TopKRetriever {
 
 impl TopKRetriever {
     pub fn new(cfg: RetrieverConfig) -> Self {
+        validate_config(&cfg);
         Self { cfg }
     }
 }
@@ -202,8 +244,13 @@ impl BoundedRetriever for TopKRetriever {
 
     fn retrieve(&self, corpus: &Corpus, query: &Query) -> RetrievalResult {
         if corpus.is_empty() {
-            return RetrievalResult { chunks: vec![], scores: vec![], budget_utilisation: 0.0 };
+            return RetrievalResult {
+                chunks: vec![],
+                scores: vec![],
+                budget_utilisation: 0.0,
+            };
         }
+        validate_query(corpus, query);
         let qn = normalise(&query.vector);
 
         // Score every chunk
@@ -217,7 +264,7 @@ impl BoundedRetriever for TopKRetriever {
             .collect();
 
         // Sort descending
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
         scored.truncate(self.cfg.budget);
 
         let n = scored.len();
@@ -239,13 +286,18 @@ impl BoundedRetriever for TopKRetriever {
 /// 1. Find seed chunks with cosine(query, chunk) >= seed_threshold.
 /// 2. BFS: expand to neighbours with edge weight >= edge_threshold.
 /// 3. Stop when budget is exhausted.
+///
 /// Priority queue ensures high-affinity chunks enter first.
+///
+/// This research implementation rebuilds a dense similarity graph for every
+/// query, costing O(n²·d) before the O(V+E) traversal.
 pub struct GraphBfsRetriever {
     cfg: RetrieverConfig,
 }
 
 impl GraphBfsRetriever {
     pub fn new(cfg: RetrieverConfig) -> Self {
+        validate_config(&cfg);
         Self { cfg }
     }
 
@@ -273,8 +325,13 @@ impl BoundedRetriever for GraphBfsRetriever {
 
     fn retrieve(&self, corpus: &Corpus, query: &Query) -> RetrievalResult {
         if corpus.is_empty() {
-            return RetrievalResult { chunks: vec![], scores: vec![], budget_utilisation: 0.0 };
+            return RetrievalResult {
+                chunks: vec![],
+                scores: vec![],
+                budget_utilisation: 0.0,
+            };
         }
+        validate_query(corpus, query);
 
         let qn = normalise(&query.vector);
         let normed: Vec<Vec<f32>> = corpus.chunks.iter().map(|c| normalise(&c.vector)).collect();
@@ -292,7 +349,7 @@ impl BoundedRetriever for GraphBfsRetriever {
         }
         impl Ord for Entry {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+                self.0.total_cmp(&other.0)
             }
         }
 
@@ -309,7 +366,7 @@ impl BoundedRetriever for GraphBfsRetriever {
                 .iter()
                 .enumerate()
                 .map(|(i, nv)| (i, cosine(&qn, nv)))
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .max_by(|a, b| a.1.total_cmp(&b.1))
                 .unwrap_or((0, 0.0));
             heap.push(Entry(best_sim, best_id));
         }
@@ -362,7 +419,8 @@ impl BoundedRetriever for GraphBfsRetriever {
 /// retrieved chunks (capped at budget).
 ///
 /// The min-cut separates "query-coherent" chunks from noise with minimum weight,
-/// giving a principled coherence boundary.
+/// giving a principled coherence boundary. The partition is subsequently
+/// ranked and truncated, so this is not an exact budget-constrained min-cut.
 pub struct MinCutRetriever {
     cfg: RetrieverConfig,
     /// Scale factor for inter-chunk edge capacities.
@@ -371,10 +429,18 @@ pub struct MinCutRetriever {
 
 impl MinCutRetriever {
     pub fn new(cfg: RetrieverConfig) -> Self {
-        Self { cfg, edge_scale: 0.5 }
+        validate_config(&cfg);
+        Self {
+            cfg,
+            edge_scale: 0.5,
+        }
     }
 
     pub fn with_edge_scale(mut self, scale: f32) -> Self {
+        assert!(
+            scale.is_finite() && scale >= 0.0,
+            "edge scale must be finite and non-negative"
+        );
         self.edge_scale = scale;
         self
     }
@@ -387,8 +453,13 @@ impl BoundedRetriever for MinCutRetriever {
 
     fn retrieve(&self, corpus: &Corpus, query: &Query) -> RetrievalResult {
         if corpus.is_empty() {
-            return RetrievalResult { chunks: vec![], scores: vec![], budget_utilisation: 0.0 };
+            return RetrievalResult {
+                chunks: vec![],
+                scores: vec![],
+                budget_utilisation: 0.0,
+            };
         }
+        validate_query(corpus, query);
 
         let n = corpus.len();
         let qn = normalise(&query.vector);
@@ -406,6 +477,7 @@ impl BoundedRetriever for MinCutRetriever {
         for i in 0..n {
             let sim = cosine(&qn, &normed[i]).max(0.001);
             cap[source].insert(i, sim);
+            cap[i].entry(source).or_insert(0.0);
         }
 
         // Chunk → sink edges
@@ -413,6 +485,7 @@ impl BoundedRetriever for MinCutRetriever {
             let sim = cosine(&qn, &normed[i]);
             let anti = (1.0 - sim).max(0.001);
             cap[i].insert(sink, anti);
+            cap[sink].entry(i).or_insert(0.0);
         }
 
         // Inter-chunk edges (both directions)
@@ -499,7 +572,7 @@ impl BoundedRetriever for MinCutRetriever {
             .filter(|&i| in_source_set[i])
             .map(|i| (i, cosine(&qn, &normed[i])))
             .collect();
-        retrieved.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        retrieved.sort_by(|a, b| b.1.total_cmp(&a.1));
         retrieved.truncate(self.cfg.budget);
 
         let retrieved_n = retrieved.len();
@@ -517,11 +590,7 @@ impl BoundedRetriever for MinCutRetriever {
 // ── evaluation helpers ─────────────────────────────────────────────────────────
 
 /// Mean average precision across a query set.
-pub fn mean_precision(
-    retriever: &dyn BoundedRetriever,
-    corpus: &Corpus,
-    queries: &[Query],
-) -> f32 {
+pub fn mean_precision(retriever: &dyn BoundedRetriever, corpus: &Corpus, queries: &[Query]) -> f32 {
     if queries.is_empty() {
         return 0.0;
     }
@@ -541,14 +610,14 @@ mod tests {
     fn toy_corpus() -> Corpus {
         // Two clusters: cluster 0 near (1,0,0), cluster 1 near (0,0,1)
         let vecs = vec![
-            vec![1.0_f32, 0.0, 0.0],   // 0 – cluster 0
-            vec![0.95, 0.05, 0.0],     // 1 – cluster 0
-            vec![0.90, 0.10, 0.0],     // 2 – cluster 0
-            vec![0.85, 0.15, 0.05],    // 3 – cluster 0
-            vec![0.0, 0.0, 1.0],       // 4 – cluster 1
-            vec![0.05, 0.05, 0.95],    // 5 – cluster 1
-            vec![0.0, 0.1, 0.9],       // 6 – cluster 1
-            vec![0.5, 0.5, 0.5],       // 7 – noise
+            vec![1.0_f32, 0.0, 0.0], // 0 – cluster 0
+            vec![0.95, 0.05, 0.0],   // 1 – cluster 0
+            vec![0.90, 0.10, 0.0],   // 2 – cluster 0
+            vec![0.85, 0.15, 0.05],  // 3 – cluster 0
+            vec![0.0, 0.0, 1.0],     // 4 – cluster 1
+            vec![0.05, 0.05, 0.95],  // 5 – cluster 1
+            vec![0.0, 0.1, 0.9],     // 6 – cluster 1
+            vec![0.5, 0.5, 0.5],     // 7 – noise
         ];
         let labels = vec![0, 0, 0, 0, 1, 1, 1, 2];
         Corpus::from_vecs(vecs).with_labels(labels)
@@ -561,7 +630,10 @@ mod tests {
     #[test]
     fn topk_returns_budget_chunks() {
         let corpus = toy_corpus();
-        let cfg = RetrieverConfig { budget: 3, ..Default::default() };
+        let cfg = RetrieverConfig {
+            budget: 3,
+            ..Default::default()
+        };
         let r = TopKRetriever::new(cfg).retrieve(&corpus, &cluster0_query());
         assert_eq!(r.chunks.len(), 3);
     }
@@ -569,7 +641,10 @@ mod tests {
     #[test]
     fn topk_highest_similarity_first() {
         let corpus = toy_corpus();
-        let cfg = RetrieverConfig { budget: 4, ..Default::default() };
+        let cfg = RetrieverConfig {
+            budget: 4,
+            ..Default::default()
+        };
         let r = TopKRetriever::new(cfg).retrieve(&corpus, &cluster0_query());
         // Chunk 0 has cosine 1.0 — must be first
         assert_eq!(r.chunks[0], 0);
@@ -582,7 +657,10 @@ mod tests {
     #[test]
     fn topk_precision_cluster0() {
         let corpus = toy_corpus();
-        let cfg = RetrieverConfig { budget: 4, ..Default::default() };
+        let cfg = RetrieverConfig {
+            budget: 4,
+            ..Default::default()
+        };
         let retriever = TopKRetriever::new(cfg);
         let q = cluster0_query();
         let r = retriever.retrieve(&corpus, &q);
@@ -593,7 +671,11 @@ mod tests {
     #[test]
     fn graphbfs_respects_budget() {
         let corpus = toy_corpus();
-        let cfg = RetrieverConfig { budget: 3, edge_threshold: 0.8, seed_threshold: 0.7 };
+        let cfg = RetrieverConfig {
+            budget: 3,
+            edge_threshold: 0.8,
+            seed_threshold: 0.7,
+        };
         let r = GraphBfsRetriever::new(cfg).retrieve(&corpus, &cluster0_query());
         assert!(r.chunks.len() <= 3);
     }
@@ -601,7 +683,11 @@ mod tests {
     #[test]
     fn graphbfs_retrieves_cluster0() {
         let corpus = toy_corpus();
-        let cfg = RetrieverConfig { budget: 5, edge_threshold: 0.75, seed_threshold: 0.60 };
+        let cfg = RetrieverConfig {
+            budget: 5,
+            edge_threshold: 0.75,
+            seed_threshold: 0.60,
+        };
         let q = cluster0_query();
         let r = GraphBfsRetriever::new(cfg.clone()).retrieve(&corpus, &q);
         let p = r.precision(&corpus, &q);
@@ -611,7 +697,11 @@ mod tests {
     #[test]
     fn mincut_respects_budget() {
         let corpus = toy_corpus();
-        let cfg = RetrieverConfig { budget: 3, edge_threshold: 0.75, ..Default::default() };
+        let cfg = RetrieverConfig {
+            budget: 3,
+            edge_threshold: 0.75,
+            ..Default::default()
+        };
         let r = MinCutRetriever::new(cfg).retrieve(&corpus, &cluster0_query());
         assert!(r.chunks.len() <= 3);
     }
@@ -619,7 +709,11 @@ mod tests {
     #[test]
     fn mincut_precision_cluster0() {
         let corpus = toy_corpus();
-        let cfg = RetrieverConfig { budget: 6, edge_threshold: 0.75, seed_threshold: 0.50 };
+        let cfg = RetrieverConfig {
+            budget: 6,
+            edge_threshold: 0.75,
+            seed_threshold: 0.50,
+        };
         let q = cluster0_query();
         let r = MinCutRetriever::new(cfg).retrieve(&corpus, &q);
         let p = r.precision(&corpus, &q);
@@ -631,15 +725,16 @@ mod tests {
     fn mincut_no_cross_cluster_bleed() {
         // Strongly separated clusters — MinCut should not bleed into cluster 1
         let corpus = toy_corpus();
-        let cfg = RetrieverConfig { budget: 4, edge_threshold: 0.85, seed_threshold: 0.70 };
+        let cfg = RetrieverConfig {
+            budget: 4,
+            edge_threshold: 0.85,
+            seed_threshold: 0.70,
+        };
         let q = Query::new(vec![1.0_f32, 0.0, 0.0]);
         let r = MinCutRetriever::new(cfg).retrieve(&corpus, &q);
         // Chunk 4,5,6 are cluster 1 — they should NOT appear with tight threshold
         for &id in &r.chunks {
-            assert!(
-                id < 4 || id == 7,
-                "MinCut bled into cluster 1: chunk={id}"
-            );
+            assert!(id < 4 || id == 7, "MinCut bled into cluster 1: chunk={id}");
         }
     }
 
@@ -706,5 +801,28 @@ mod tests {
         assert!(p_topk >= 0.70, "TopK precision={p_topk:.3} below threshold");
         assert!(p_bfs >= 0.70, "BFS precision={p_bfs:.3} below threshold");
         assert!(p_mc >= 0.70, "MinCut precision={p_mc:.3} below threshold");
+    }
+
+    #[test]
+    #[should_panic(expected = "budget must be greater than zero")]
+    fn zero_budget_is_rejected() {
+        let _ = TopKRetriever::new(RetrieverConfig {
+            budget: 0,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "all corpus vectors must have the same dimension")]
+    fn inconsistent_corpus_dimensions_are_rejected() {
+        let _ = Corpus::from_vecs(vec![vec![1.0, 0.0], vec![1.0]]);
+    }
+
+    #[test]
+    #[should_panic(expected = "query dimension must match corpus dimension")]
+    fn query_dimension_mismatch_is_rejected() {
+        let corpus = toy_corpus();
+        let query = Query::new(vec![1.0, 0.0]);
+        let _ = TopKRetriever::new(Default::default()).retrieve(&corpus, &query);
     }
 }

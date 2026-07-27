@@ -1,6 +1,6 @@
 # Bounded Context RAG via MinCut Graph Partitioning
 
-**150-char summary:** MinCut on the chunk similarity graph finds the maximally coherent context window that fits a budget — a principled replacement for fixed-k RAG retrieval.
+**Summary:** A measured MinCut research baseline partitions a chunk-similarity graph, then relevance-ranks and truncates the candidate partition to a context budget.
 
 ---
 
@@ -11,8 +11,8 @@ Standard RAG retrieval returns the top-k nearest neighbours of a query vector. T
 This research implements and benchmarks three retrieval strategies for bounded-context RAG:
 
 1. **TopK** — cosine rank, no graph reasoning, O(n log n), baseline.
-2. **GraphBFS** — BFS expansion on a chunk similarity graph with coherence gating, O(V+E).
-3. **MinCutBounded** — max-flow / min-cut on a source-sink flow network built from chunk similarities, O(VE²), optimal coherence partition.
+2. **GraphBFS** — O(n²·d) dense graph construction per query followed by coherence-gated priority traversal.
+3. **MinCutBounded** — max-flow/min-cut on a source-sink network followed by relevance ranking and budget truncation; this is not a budget-optimal cut.
 
 All three are measured on synthetic clustered corpora with deterministic Rust code. No external services. No placeholder numbers.
 
@@ -160,7 +160,9 @@ Green nodes (C1, C2) land in the source partition after min-cut — these are re
 
 **Edmonds-Karp**: Standard BFS-augmented Ford-Fulkerson. Capacity matrix stored as `Vec<HashMap<usize, f32>>` for sparsity. Flow matrix uses the same structure. Bottleneck found by path replay.
 
-**Budget cap**: Applied after partition recovery — the source partition may be smaller than budget (correct) or requires a hard cap (applied by sort + truncate).
+**Budget cap**: Applied after partition recovery. If the source partition
+exceeds the budget, relevance-based truncation can change the partition's
+coherence properties.
 
 **Fallback**: If the seed set is empty (no chunks above seed_threshold), the implementation falls back to the globally highest-similarity chunk as seed, preventing empty results.
 
@@ -272,7 +274,7 @@ If budget=2: the min-cut partition still returns {A, B, C} but the final sort+tr
 
 2. **Edge over-sparsity**: If edge_threshold is too high, the chunk graph is disconnected and GraphBFS returns only seeded chunks. MinCutBounded returns only the seed partition. Mitigation: tune edge_threshold on a representative validation corpus.
 
-3. **Large coherent clusters exceeding budget**: If the coherent partition has 200 chunks but budget=20, the hard truncation is applied — the bottom 180 chunks by query similarity are dropped. This is correct behaviour but may surprise users expecting a coherence guarantee for all returned chunks.
+3. **Large candidate partitions exceeding budget**: If the partition has 200 chunks but budget=20, the bottom 180 chunks by query similarity are dropped. This enforces the cap but provides no optimality or coherence guarantee for the truncated set.
 
 4. **Query similarity ties**: When many chunks have identical cosine similarity to the query, the sort order within the partition is non-deterministic. Mitigation: break ties by chunk ID for reproducibility.
 
@@ -290,7 +292,10 @@ If budget=2: the min-cut partition still returns {A, B, C} but the final sort+tr
 
 ## Edge and WASM Implications
 
-**GraphBFS** can run in WASM without modification. Its memory footprint scales as O(V+E) where E is proportional to sparsity-controlled adjacency. At n=200 chunks with edge_threshold=0.80, typical E ≈ 2n–5n → ~1,000–1,000 edges, ≈ 8–40KB. Viable on Cognitum Seed (256MB RAM envelope).
+**GraphBFS** can compile for WASM, but this PoC constructs and stores the
+thresholded graph per query after an O(n²·d) pairwise scan. Edge-device
+viability therefore needs target-specific measurement and a prebuilt sparse
+graph.
 
 **MinCutBounded** requires Edmonds-Karp with a 52-node flow network for the Phase 2 pre-filter path. This is O(52 × 1,225²) ~ 78M f32 operations, well within WASM feasibility.
 

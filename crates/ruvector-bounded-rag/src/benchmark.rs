@@ -1,7 +1,7 @@
-///! Bounded RAG MinCut benchmark
-///!
-///! Measures three retrieval variants across two dataset sizes.
-///! Run: cargo run --release -p ruvector-bounded-rag --bin benchmark
+//! Bounded RAG MinCut benchmark
+//!
+//! Measures three retrieval variants across two dataset sizes.
+//! Run: cargo run --release -p ruvector-bounded-rag --bin benchmark
 use ruvector_bounded_rag::{
     BoundedRetriever, Corpus, GraphBfsRetriever, MinCutRetriever, Query, RetrieverConfig,
     TopKRetriever,
@@ -49,9 +49,7 @@ fn build_corpus(case: &BenchCase, rng: &mut StdRng) -> (Corpus, Vec<Query>) {
         for x in qv.iter_mut() {
             *x += normal.sample(rng) * 0.05;
         }
-        queries.push(
-            Query::new(qv).with_relevant([target_cluster as u32]),
-        );
+        queries.push(Query::new(qv).with_relevant([target_cluster as u32]));
     }
 
     (corpus, queries)
@@ -66,11 +64,7 @@ struct Stats {
     mean_budget_util: f64,
 }
 
-fn run_variant(
-    retriever: &dyn BoundedRetriever,
-    corpus: &Corpus,
-    queries: &[Query],
-) -> Stats {
+fn run_variant(retriever: &dyn BoundedRetriever, corpus: &Corpus, queries: &[Query]) -> Stats {
     let mut latencies_us: Vec<f64> = Vec::with_capacity(queries.len());
     let mut precisions: Vec<f64> = Vec::with_capacity(queries.len());
     let mut budgets: Vec<f64> = Vec::with_capacity(queries.len());
@@ -95,7 +89,14 @@ fn run_variant(
     let mean_precision = precisions.iter().sum::<f64>() / n as f64;
     let mean_budget_util = budgets.iter().sum::<f64>() / n as f64;
 
-    Stats { mean_us, p50_us, p95_us, throughput_qps, mean_precision, mean_budget_util }
+    Stats {
+        mean_us,
+        p50_us,
+        p95_us,
+        throughput_qps,
+        mean_precision,
+        mean_budget_util,
+    }
 }
 
 fn print_header() {
