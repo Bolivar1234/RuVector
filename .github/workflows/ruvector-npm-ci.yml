@@ -62,8 +62,11 @@ jobs:
           set +e
           ./node_modules/.bin/tsc 2>&1 | tail -5
           TSC_EXIT=$?
-          mkdir -p dist/core/onnx/pkg
-          cp -r src/core/onnx/pkg/. dist/core/onnx/pkg/ 2>/dev/null || true
+          # TypeScript does not emit the JavaScript/MJS/WASM assets consumed by
+          # the ONNX contract tests and published package. Mirror the package
+          # build script by copying the complete runtime directory.
+          mkdir -p dist/core/onnx
+          cp -r src/core/onnx/. dist/core/onnx/
           if [ ! -f dist/index.js ]; then
             echo "::error::dist/index.js missing — build truly failed (not just pre-existing TS errors)"
             exit 1
@@ -95,7 +98,10 @@ jobs:
           node-version: '20'
 
       - name: Install
-        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
+        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --include=optional
+
+      - name: Verify native backend is installed
+        run: node -e "require('ruvector-core-linux-x64-gnu')"
 
       - name: Download dist
         uses: actions/download-artifact@v4
