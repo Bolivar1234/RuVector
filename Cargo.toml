@@ -22,6 +22,7 @@ exclude = ["external/ruqu", "external/rvdna", "examples/OSpipe", "examples/rvf",
     # land in iters 92-97.
     "crates/ruos-thermal"]
 members = [
+    "crates/ruvector-bounded-rag",
     "crates/ruvector-temporal-coherence",
     "crates/ruvector-acorn",
     "crates/ruvector-acorn-wasm",
@@ -264,6 +265,10 @@ members = [
     "crates/ruvector-sota-bench",
     # Capability-gated ANN: per-vector read access control with bitset tokens (ADR-268)
     "crates/ruvector-capgated",
+    # Diverse beam ANN: MMR and coherence-pruned beam search variants (ADR-272)
+    "crates/ruvector-diverse-beam",
+    # Threshold-driven ANN with empirical recall measurement (ADR-272)
+    "crates/ruvector-recall-bounded",
     # Adaptive recall-targeted ANN: auto-calibrated ef for user-specified recall targets (ADR-272)
     "crates/ruvector-adaptive-ann",
     # SPANN partition spilling for boundary-safe ANN (ADR-268)
@@ -274,6 +279,8 @@ members = [
     "crates/timesfm",
     # RuVector integration for TimesFM: Forecaster + anomaly bands + sweep early-stopping
     "crates/ruvector-timesfm",
+    # Speculative ANN search: draft-verify with adaptive candidate multiplier (ADR-272)
+    "crates/ruvector-speculative-ann",
 ]
 resolver = "2"
 
