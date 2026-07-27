@@ -140,7 +140,10 @@ jobs:
           node-version: '20'
 
       - name: Install
-        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
+        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --include=optional
+
+      - name: Verify native backend is installed
+        run: node -e "require('ruvector-core-linux-x64-gnu')"
 
       - name: Download dist
         uses: actions/download-artifact@v4
@@ -237,7 +240,10 @@ jobs:
           node-version: '20'
 
       - name: Install
-        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
+        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --include=optional
+
+      - name: Verify native backend is installed
+        run: node -e "require('ruvector-core-linux-x64-gnu')"
 
       - name: Download dist
         uses: actions/download-artifact@v4
@@ -352,7 +358,10 @@ jobs:
           node-version: '20'
 
       - name: Install
-        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
+        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --include=optional
+
+      - name: Verify native backend is installed
+        run: node -e "require('ruvector-core-linux-x64-gnu')"
 
       - name: Download dist
         uses: actions/download-artifact@v4
@@ -460,7 +469,10 @@ jobs:
           node-version: '20'
 
       - name: Install
-        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --no-optional
+        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces --include=optional
+
+      - name: Verify native backend is installed
+        run: node -e "require('ruvector-core-linux-x64-gnu')"
 
       - name: Download dist
         uses: actions/download-artifact@v4
@@ -659,6 +671,8 @@ jobs:
       - tarball-integrity
     if: always()
     steps:
+      - uses: actions/checkout@v4
+
       - name: Check all jobs passed
         run: |
           results='${{ toJSON(needs) }}'

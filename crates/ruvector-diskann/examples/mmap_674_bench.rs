@@ -87,14 +87,20 @@ fn cmd_build(args: &[String]) {
             .insert(id.to_string(), random_unit_vector(&mut rng, dim))
             .expect("insert failed");
         if id % 50_000 == 0 {
-            eprintln!("inserted {id}/{n} ({:.1}s elapsed)", t0.elapsed().as_secs_f64());
+            eprintln!(
+                "inserted {id}/{n} ({:.1}s elapsed)",
+                t0.elapsed().as_secs_f64()
+            );
         }
     }
     eprintln!("insert phase done in {:.1}s", t0.elapsed().as_secs_f64());
 
     let t1 = Instant::now();
     index.build().expect("build failed"); // build() also calls save() since storage_path is set
-    eprintln!("build+save phase done in {:.1}s", t1.elapsed().as_secs_f64());
+    eprintln!(
+        "build+save phase done in {:.1}s",
+        t1.elapsed().as_secs_f64()
+    );
 
     println!("BUILD_OK n={n} dim={dim} dir={}", dir.display());
 }
@@ -103,7 +109,9 @@ fn cmd_measure(args: &[String]) {
     let dir = PathBuf::from(get_flag(args, "--dir", "/tmp/mmap674"));
     let mode = get_flag(args, "--mode", "owned");
     let dim: usize = get_flag(args, "--dim", "128").parse().expect("--dim");
-    let queries: usize = get_flag(args, "--queries", "1000").parse().expect("--queries");
+    let queries: usize = get_flag(args, "--queries", "1000")
+        .parse()
+        .expect("--queries");
     let warmup: usize = get_flag(args, "--warmup", "50").parse().expect("--warmup");
     let k: usize = get_flag(args, "--k", "10").parse().expect("--k");
 

@@ -15,8 +15,8 @@
 | Shor's original paper | 1994 | Theoretical | 0 |
 | First experimental demo | 2001 | 15 = 3 × 5 | 7 (NMR) |
 | Photonic factoring | 2012 | 21 = 3 × 7 | 10 |
-| IBM superconducting | 2019 | 35 = 5 × 7 | 16 |
-| Variational hybrid | 2023 | 261,980,999 (claim disputed) | 10 |
+| IBM superconducting | 2019 | Attempted 35 (experiment did not factor it) | 16 |
+| Schnorr/QAOA hybrid (not Shor) | 2023 | 261,980,999,226,229 | 10 |
 | Current NISQ frontier | 2026 | ~1,000-10,000 range (noisy) | 50-100 |
 | ruQu simulator | 2026 | ~32,767 (15-bit, clean sim) | 25 |
 

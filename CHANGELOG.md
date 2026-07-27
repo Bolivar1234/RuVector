@@ -5,6 +5,20 @@ All notable changes to RuVector will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [ruvector npm 0.2.37] - 2026-07-27
+
+### Fixed
+
+- Restore the release CI's native backend installation so functional,
+  learning, performance, and recall gates exercise HNSW instead of the
+  in-memory fallback.
+- Preserve the Rust core's default HNSW behavior when JavaScript callers omit
+  `hnswConfig`; the wrapper previously selected the exact FlatIndex path.
+- Normalize the package binary metadata and its integration assertion.
+- Remove the npm workspace's critical `tar` advisory with a patched override.
+- Correct the Shor factoring milestone table to distinguish a failed
+  35-factor experiment from the separate Schnorr/QAOA hybrid result.
+
 ## [ruvector npm 0.2.36] - 2026-07-26
 
 ### Fixed
