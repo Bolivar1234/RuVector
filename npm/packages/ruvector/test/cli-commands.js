@@ -451,7 +451,7 @@ test('cli.js uses chalk with ESM compat', () => {
 });
 
 test('package.json bin entry points to cli.js', () => {
-  assert.strictEqual(packageJson.bin.ruvector, './bin/cli.js');
+  assert.strictEqual(packageJson.bin.ruvector, 'bin/cli.js');
 });
 
 test('package.json main entry points to dist/index.js', () => {
