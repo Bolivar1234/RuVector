@@ -91,7 +91,7 @@ try {
   assert(packageJson.version, 'Version should be set');
   assert(packageJson.main === 'dist/index.js', 'Main entry should be dist/index.js');
   assert(packageJson.types === 'dist/index.d.ts', 'Types entry should be dist/index.d.ts');
-  assert(packageJson.bin.ruvector === './bin/cli.js', 'CLI bin should be ./bin/cli.js');
+  assert(packageJson.bin.ruvector === 'bin/cli.js', 'CLI bin should be bin/cli.js');
   console.log('   ✓ package.json structure correct');
 
   const cliExists = fs.existsSync(path.join(__dirname, '../bin/cli.js'));
