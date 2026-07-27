@@ -97,7 +97,7 @@ export class ModelLoader {
             throw new Error(`Unknown model: ${modelName}. Available: ${Object.keys(MODELS).join(', ')}`);
         }
 
-        console.log(`Loading model: ${modelConfig.name} (${modelConfig.size})`);
+        console.error(`Loading model: ${modelConfig.name} (${modelConfig.size})`);
 
         const [modelBytes, tokenizerJson] = await Promise.all([
             this.fetchWithCache(modelConfig.model, `${modelName}-model.onnx`, 'arraybuffer'),
@@ -161,7 +161,7 @@ export class ModelLoader {
                 const cache = await caches.open(this.cacheStorage);
                 const cached = await cache.match(cacheKey);
                 if (cached) {
-                    console.log(`  Cache hit: ${cacheKey}`);
+                    console.error(`  Cache hit: ${cacheKey}`);
                     return responseType === 'arraybuffer'
                         ? await cached.arrayBuffer()
                         : await cached.text();
@@ -172,7 +172,7 @@ export class ModelLoader {
         }
 
         // Fetch from network
-        console.log(`  Downloading: ${url}`);
+        console.error(`  Downloading: ${url}`);
         const response = await this.fetchWithProgress(url);
 
         if (!response.ok) {
@@ -252,7 +252,7 @@ export class ModelLoader {
     async clearCache() {
         if (typeof caches !== 'undefined') {
             await caches.delete(this.cacheStorage);
-            console.log('Model cache cleared');
+            console.error('Model cache cleared');
         }
     }
 

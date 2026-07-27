@@ -154,7 +154,19 @@ class VectorDBWrapper {
     const nativeOptions: any = {
       dimensions: options.dimensions,
       storagePath: options.storagePath,
-      hnswConfig: options.hnswConfig,
+      // The N-API binding maps an omitted hnswConfig to `None`, which selects
+      // FlatIndex and unintentionally overrides ruvector-core's HNSW default.
+      // Pass the documented defaults explicitly so the high-level VectorDB
+      // remains an ANN database unless callers deliberately provide another
+      // HNSW configuration.
+      hnswConfig: options.hnswConfig === undefined
+        ? {
+            m: 32,
+            efConstruction: 200,
+            efSearch: 100,
+            maxElements: 10_000_000,
+          }
+        : options.hnswConfig,
     };
     if (distanceMetric !== undefined) {
       nativeOptions.distanceMetric = distanceMetric;
