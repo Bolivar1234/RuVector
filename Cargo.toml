@@ -272,6 +272,8 @@ members = [
     "crates/timesfm",
     # RuVector integration for TimesFM: Forecaster + anomaly bands + sweep early-stopping
     "crates/ruvector-timesfm",
+    # Speculative ANN search: draft-verify with adaptive candidate multiplier (ADR-272)
+    "crates/ruvector-speculative-ann",
 ]
 resolver = "2"
 
