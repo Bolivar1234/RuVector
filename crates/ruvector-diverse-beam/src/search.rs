@@ -19,7 +19,7 @@ impl PartialOrd for MinDist {
 }
 impl Ord for MinDist {
     fn cmp(&self, o: &Self) -> Ordering {
-        o.dist.partial_cmp(&self.dist).unwrap_or(Ordering::Equal)
+        o.dist.total_cmp(&self.dist)
     }
 }
 
@@ -36,18 +36,33 @@ impl PartialOrd for MaxDist {
 }
 impl Ord for MaxDist {
     fn cmp(&self, o: &Self) -> Ordering {
-        self.dist.partial_cmp(&o.dist).unwrap_or(Ordering::Equal)
+        self.dist.total_cmp(&o.dist)
     }
 }
 
 // ─── shared helper ────────────────────────────────────────────────────────────
 
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
 pub(crate) fn entry_points(graph: &FlatGraph, query: &[f32], n_entry: usize) -> Vec<(VecId, f32)> {
     let n = graph.len();
-    // Use an odd step to avoid period alignment with cluster boundaries in
-    // round-robin-assigned datasets (gcd(odd, even_cluster_count) = 1).
-    let step = ((n / n_entry) | 1).max(1);
-    (0..n_entry)
+    assert!(n > 0, "graph must contain at least one vector");
+    assert!(n_entry > 0, "n_entry must be greater than zero");
+    assert_eq!(query.len(), graph.dim, "query dimension mismatch");
+
+    let count = n_entry.min(n);
+    // Choose a stride near n/count that is coprime with n. This guarantees
+    // distinct deterministic entry points for every count <= n.
+    let mut step = (n / count).max(1);
+    while gcd(step, n) != 1 {
+        step += 1;
+    }
+    (0..count)
         .map(|i| {
             let id = (i * step) % n;
             (id, l2_sq(query, graph.vec(id)))
@@ -64,7 +79,7 @@ fn push_result(results: &mut BinaryHeap<MaxDist>, id: VecId, dist: f32, beam: us
 
 fn to_sorted_results(heap: BinaryHeap<MaxDist>, k: usize) -> Vec<SearchResult> {
     let mut v: Vec<SearchResult> = heap.into_iter().map(|r| (r.id, r.dist)).collect();
-    v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+    v.sort_by(|a, b| a.1.total_cmp(&b.1));
     v.truncate(k);
     v
 }
@@ -85,13 +100,17 @@ impl<'a> BeamSearch for GreedyBeam<'a> {
     }
 
     fn search(&self, query: &[f32], k: usize, beam_width: usize) -> Vec<SearchResult> {
+        if k == 0 {
+            return Vec::new();
+        }
+        let beam = beam_width.max(k);
         let mut candidates: BinaryHeap<MinDist> = BinaryHeap::new();
         let mut results: BinaryHeap<MaxDist> = BinaryHeap::new();
         let mut visited: HashSet<VecId> = HashSet::new();
 
         for (id, dist) in entry_points(self.graph, query, self.n_entry) {
             candidates.push(MinDist { id, dist });
-            push_result(&mut results, id, dist, beam_width);
+            push_result(&mut results, id, dist, beam);
             visited.insert(id);
         }
 
@@ -101,7 +120,7 @@ impl<'a> BeamSearch for GreedyBeam<'a> {
         }) = candidates.pop()
         {
             let worst = results.peek().map(|r| r.dist).unwrap_or(f32::MAX);
-            if cur_dist > worst && results.len() >= k {
+            if cur_dist > worst && results.len() >= beam {
                 break;
             }
             for &nb in &self.graph.neighbors[cur] {
@@ -111,9 +130,9 @@ impl<'a> BeamSearch for GreedyBeam<'a> {
                 visited.insert(nb);
                 let d = l2_sq(query, self.graph.vec(nb));
                 let worst = results.peek().map(|r| r.dist).unwrap_or(f32::MAX);
-                if results.len() < beam_width || d < worst {
+                if results.len() < beam || d < worst {
                     candidates.push(MinDist { id: nb, dist: d });
-                    push_result(&mut results, nb, d, beam_width);
+                    push_result(&mut results, nb, d, beam);
                 }
             }
         }
@@ -189,15 +208,17 @@ impl<'a> MMRRerank<'a> {
             // Relevance: 1.0 = closest to query, 0.0 = farthest in pool.
             let relevance = 1.0 - dist_q / max_dist;
 
-            // Diversity: 1.0 = far from all selected, 0.0 = duplicate of a selected item.
+            // Angular diversity is independently bounded in [0, 1].
             let diversity = if selected.is_empty() {
                 1.0_f32
             } else {
                 let min_d = selected
                     .iter()
-                    .map(|&(sid, _)| l2_sq(v, self.graph.vec(sid)))
+                    .map(|&(sid, _)| {
+                        ((1.0 - cosine_sim(v, self.graph.vec(sid))) * 0.5).clamp(0.0, 1.0)
+                    })
                     .fold(f32::INFINITY, f32::min);
-                (min_d / max_dist).min(1.0)
+                min_d
             };
 
             let score = lambda * relevance + (1.0 - lambda) * diversity;
@@ -236,6 +257,10 @@ impl<'a> BeamSearch for CoherenceBeam<'a> {
     }
 
     fn search(&self, query: &[f32], k: usize, beam_width: usize) -> Vec<SearchResult> {
+        if k == 0 {
+            return Vec::new();
+        }
+        let beam = beam_width.max(k);
         let mut candidates: BinaryHeap<MinDist> = BinaryHeap::new();
         let mut results: BinaryHeap<MaxDist> = BinaryHeap::new();
         let mut visited: HashSet<VecId> = HashSet::new();
@@ -243,7 +268,7 @@ impl<'a> BeamSearch for CoherenceBeam<'a> {
 
         for (id, dist) in entry_points(self.graph, query, self.n_entry) {
             candidates.push(MinDist { id, dist });
-            push_result(&mut results, id, dist, beam_width);
+            push_result(&mut results, id, dist, beam);
             visited.insert(id);
         }
 
@@ -253,7 +278,7 @@ impl<'a> BeamSearch for CoherenceBeam<'a> {
         }) = candidates.pop()
         {
             let worst = results.peek().map(|r| r.dist).unwrap_or(f32::MAX);
-            if cur_dist > worst && results.len() >= k {
+            if cur_dist > worst && results.len() >= beam {
                 break;
             }
 
@@ -279,9 +304,9 @@ impl<'a> BeamSearch for CoherenceBeam<'a> {
 
                 let d = l2_sq(query, v_nb);
                 let worst = results.peek().map(|r| r.dist).unwrap_or(f32::MAX);
-                if results.len() < beam_width || d < worst {
+                if results.len() < beam || d < worst {
                     candidates.push(MinDist { id: nb, dist: d });
-                    push_result(&mut results, nb, d, beam_width);
+                    push_result(&mut results, nb, d, beam);
                 }
             }
         }

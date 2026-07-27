@@ -2,7 +2,7 @@
 
 **Nightly research · 2026-07-26 · crate: `ruvector-diverse-beam`**
 
-> **150-character summary.** Three beam-search variants on flat kNN graphs trade recall for diversity — MMR post-reranking delivers +1.7% diversity at −13% recall; coherence pruning is an anti-pattern for tight clusters.
+> **Summary.** Three beam-search variants on flat kNN graphs expose a dataset-dependent recall/diversity trade-off; coherence pruning is an anti-pattern for tight clusters.
 
 ---
 
@@ -19,10 +19,10 @@ Key measured results on a uniform random dataset (n=2500, dim=64, K=10, beam=50)
 | Variant | Recall@10 | Diversity | Mean µs | QPS |
 |---------|-----------|-----------|---------|-----|
 | GreedyBeam | 0.816 | 5.7410 | 87.1 | 10,975 |
-| MMRRerank (λ=0.75) | 0.707 | 5.8364 | 193.6 | 5,069 |
+| MMRRerank (λ=0.75) | 0.779 | 5.7593 | 122.9 | 8,038 |
 | CoherenceBeam (θ=0.90) | 0.816 | 5.7410 | 687.0 | 1,448 |
 
-MMRRerank delivers +1.67% diversity improvement with −13.4% recall and −53.8% QPS. CoherenceBeam matches GreedyBeam's recall on uniform data but catastrophically fails (recall 0.002) on tight clustered data — a key negative result.
+MMRRerank delivers +0.3% diversity with −4.5% relative recall and −67.8% QPS on this run. CoherenceBeam matches GreedyBeam's recall on uniform data but catastrophically fails (recall 0.002) on tight clustered data — a key negative result.
 
 All numbers are from a real `cargo run --release` on Linux/x86_64.
 
@@ -73,7 +73,7 @@ This work also characterises the **coherence-pruning anti-pattern**: applying co
 
 ```mermaid
 graph TD
-    Q[Query vector] --> EP[entry_points\n odd-stride sampling]
+    Q[Query vector] --> EP[entry_points\n coprime-stride sampling]
     EP --> GB[GreedyBeam\nBFS min-heap]
     EP --> CB[CoherenceBeam\nBFS + cosine gate]
     EP --> MMR_GRD[MMRRerank\nGreedyBeam pool]
@@ -106,30 +106,31 @@ crates/ruvector-diverse-beam/
 
 ## Key Algorithms
 
-### Entry point alignment (the odd-stride fix)
+### Entry point alignment (coprime-stride sampling)
 
 Evenly-spaced entry points with stride `n / n_entry` can be period-aligned with round-robin cluster assignments. For n=300, n_entry=6: stride=50; points land at indices 0, 50, 100, 150, 200, 250. With 8 clusters assigned round-robin, index mod 8 gives {0, 2, 4, 6, 0, 2} — clusters 1, 3, 5, 7 receive no entry point.
 
-Fix: use the smallest odd number ≥ n/n_entry:
+Fix: choose a stride near `n/n_entry` that is coprime with graph size:
 
 ```rust
-let step = ((n / n_entry) | 1).max(1);
+let mut step = (n / n_entry).max(1);
+while gcd(step, n) != 1 { step += 1; }
 ```
 
-`gcd(odd, any_even_cluster_count)` is always odd ≤ cluster_count, so the points cycle through more clusters before repeating.
+This guarantees distinct deterministic entry points. It cannot guarantee coverage of unknown clusters or disconnected graph components, so `n_entry` still needs to reflect the dataset and graph topology.
 
 ### MMR post-reranking
 
-Normalise both relevance and diversity to [0, 1] using the pool's max distance so they compete on equal footing:
+Bound both relevance and angular diversity to [0, 1]:
 
 ```
 max_dist = max(d_q(c) for c in pool)
 relevance(c) = 1 - d_q(c) / max_dist
-diversity(c) = min(d(c, s) for s in selected) / max_dist, clamped to [0,1]
+diversity(c) = min((1 - cosine_similarity(c, s)) / 2 for s in selected)
 score(c) = λ · relevance(c) + (1−λ) · diversity(c)
 ```
 
-λ=1.0 degenerates to nearest-neighbour; λ=0.0 is pure diversity. λ=0.75 delivers the measured +1.67% diversity with −13.4% recall.
+λ=1.0 degenerates to nearest-neighbour; λ=0.0 is pure diversity. The measured effect at λ=0.75 is reported below and is dataset-dependent.
 
 ### CoherenceBeam pruning
 
@@ -157,7 +158,7 @@ Memory estimate: 0.92 MB. Graph build time: ~0.51 s.
 | Variant | Recall@10 | Diversity | Mean(µs) | p50(µs) | p95(µs) | QPS |
 |---------|-----------|-----------|----------|---------|---------|-----|
 | GreedyBeam | 0.816 | 5.7410 | 87.1 | 84 | 110 | 10,975 |
-| MMRRerank | 0.707 | 5.8364 | 193.6 | 188 | 230 | 5,069 |
+| MMRRerank | 0.779 | 5.7593 | 122.9 | 119 | 148 | 8,038 |
 | CoherenceBeam | 0.816 | 5.7410 | 687.0 | 685 | 757 | 1,448 |
 
 ### Dataset 2: 10-cluster Gaussian (σ=0.14)
@@ -165,7 +166,7 @@ Memory estimate: 0.92 MB. Graph build time: ~0.51 s.
 | Variant | Recall@10 | Diversity | Mean(µs) | p50(µs) | p95(µs) | QPS |
 |---------|-----------|-----------|----------|---------|---------|-----|
 | GreedyBeam | 0.516 | 1.5417 | 46.0 | 41 | 69 | 20,098 |
-| MMRRerank | 0.502 | 1.5958 | 151.6 | 146 | 175 | 6,439 |
+| MMRRerank | 0.509 | 1.5860 | 102.5 | 100 | 113 | 9,611 |
 | CoherenceBeam | 0.002 | 5.3257 | 169.4 | 166 | 200 | 5,773 |
 
 **Note on clustered recall**: GreedyBeam's recall of 0.516 (vs. 0.816 uniform) is a graph connectivity issue, not an algorithm issue. With σ=0.14, cluster members have near-identical kNN lists with no cross-cluster edges. The key lever is ensuring `n_entry ≥ n_clusters` — all three variants benefit from more entry points on clustered data.
@@ -174,12 +175,12 @@ Memory estimate: 0.92 MB. Graph build time: ~0.51 s.
 
 ```
 ✓ GreedyBeam recall:    0.816 (threshold 0.70) — PASS
-✓ MMRRerank recall:     0.707 (threshold 0.55) — PASS
+✓ MMRRerank recall:     0.779 (threshold 0.55) — PASS
 ✓ CoherenceBeam recall: 0.816 (threshold 0.60) — PASS
 ✓ GreedyBeam QPS:       10975 (threshold 200)  — PASS
-✓ MMRRerank QPS:        5069  (threshold 200)  — PASS
+✓ MMRRerank QPS:        8172  (threshold 200)  — PASS
 ✓ CoherenceBeam QPS:    1448  (threshold 200)  — PASS
-✓ MMRRerank diversity ≥ 95% of Greedy: 5.8364 vs 5.7410 — PASS
+✓ MMRRerank diversity ≥ 95% of Greedy: 5.7593 vs 5.7410 — PASS
 
 ACCEPTANCE RESULT: PASS ✓
 ```
@@ -198,13 +199,13 @@ CoherenceBeam was designed to prevent redundant exploration of dense local regio
 
 **Production guidance**: CoherenceBeam should only be used on datasets with explicit multi-cluster structure AND large inter-cluster distances. A simple diagnostic: if `max intra-cluster cosine_sim > coherence_threshold`, do not use CoherenceBeam.
 
-### Finding 3: MMR normalisation requires a shared scale
+### Finding 3: MMR terms require explicit bounds
 
-An early version used `scale = dist_q.max(1.0)`, giving `diversity = min_dist_to_selected / dist_q`. When min_dist >> dist_q, diversity grows unbounded — diversity dominates and relevance is ignored. Correct normalisation: both terms divided by the pool's maximum distance, both clipped to [0, 1].
+An early version divided candidate-to-candidate L2 distance by the pool's maximum query distance. Those are different scales, so the ratio can exceed one and let diversity dominate. The implementation now uses pool-normalised query relevance and bounded cosine distance for diversity.
 
 ### Finding 4: Entry point alignment matters for clustered graphs
 
-With round-robin cluster assignment, even stride lands entry points on the same cluster-modulo subset. Odd stride is the minimal fix; a complete fix is dedicated per-cluster entry points (one guaranteed per cluster).
+With round-robin cluster assignment, a stride can land entry points on the same cluster-modulo subset. A stride coprime with graph size guarantees unique nodes, but cluster coverage still requires topology-aware entry selection.
 
 ---
 

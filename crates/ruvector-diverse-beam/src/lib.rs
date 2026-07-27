@@ -51,12 +51,14 @@ pub fn mean_pairwise_dist(results: &[SearchResult], vecs: &[Vec<f32>]) -> f32 {
 /// L2 squared distance — same ordering as L2, avoids sqrt.
 #[inline]
 pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len(), "vector dimension mismatch");
     a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
 /// Cosine similarity in [−1, 1], clamped.
 #[inline]
 pub fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len(), "vector dimension mismatch");
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -228,5 +230,49 @@ mod tests {
         let gt = vec![0usize, 1, 2];
         let res: Vec<SearchResult> = vec![(10, 0.1), (11, 0.2), (12, 0.3)];
         assert_eq!(recall_at_k(&gt, &res, 3), 0.0);
+    }
+
+    #[test]
+    fn zero_k_returns_empty_even_with_zero_beam() {
+        let g = make_uniform_graph();
+        let result = GreedyBeam {
+            graph: &g,
+            n_entry: 4,
+        }
+        .search(&g.vectors[0], 0, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn beam_smaller_than_k_still_returns_k() {
+        let g = make_uniform_graph();
+        let result = GreedyBeam {
+            graph: &g,
+            n_entry: 4,
+        }
+        .search(&g.vectors[0], K, 1);
+        assert_eq!(result.len(), K);
+    }
+
+    #[test]
+    #[should_panic(expected = "n_entry must be greater than zero")]
+    fn zero_entry_points_are_rejected() {
+        let g = make_uniform_graph();
+        let _ = GreedyBeam {
+            graph: &g,
+            n_entry: 0,
+        }
+        .search(&g.vectors[0], K, BEAM);
+    }
+
+    #[test]
+    #[should_panic(expected = "query dimension mismatch")]
+    fn query_dimension_mismatch_is_rejected() {
+        let g = make_uniform_graph();
+        let _ = GreedyBeam {
+            graph: &g,
+            n_entry: 4,
+        }
+        .search(&[0.0; DIM - 1], K, BEAM);
     }
 }

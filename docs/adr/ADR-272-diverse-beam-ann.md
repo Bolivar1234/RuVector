@@ -24,7 +24,7 @@ This ADR documents the decision to implement both approaches, measure them on tw
 Implement `ruvector-diverse-beam` as a standalone Rust crate in the workspace containing three beam-search variants and a benchmark binary:
 
 1. **GreedyBeam** — standard greedy BFS (baseline).
-2. **MMRRerank** — greedy BFS to collect `max(beam_width, k×4)` candidates, then iterative MMR selection to pick k final results. Uses normalised relevance and diversity scores in [0, 1].
+2. **MMRRerank** — greedy BFS to collect `max(beam_width, k×4)` candidates, then iterative MMR selection to pick k final results. Query relevance is pool-normalised to [0, 1], while angular diversity uses `(1 − cosine_similarity) / 2`, also bounded to [0, 1].
 3. **CoherenceBeam** — greedy BFS with a cosine-similarity gate: a candidate is skipped if its cosine similarity to any of the 8 most-recently-expanded nodes exceeds `coherence_threshold`.
 
 The crate exposes a `BeamSearch` trait for pluggable backends, `recall_at_k` and `mean_pairwise_dist` as evaluation utilities, and a `FlatGraph` for exact kNN graph construction and brute-force ground truth.
@@ -40,7 +40,7 @@ All from `cargo run --release -p ruvector-diverse-beam --bin benchmark`, Linux/x
 | Variant | Recall@10 | Diversity | Mean µs | QPS |
 |---------|-----------|-----------|---------|-----|
 | GreedyBeam | 0.816 | 5.7410 | 87.1 | 10,975 |
-| MMRRerank (λ=0.75) | 0.707 | 5.8364 | 193.6 | 5,069 |
+| MMRRerank (λ=0.75) | 0.779 | 5.7593 | 122.9 | 8,038 |
 | CoherenceBeam (θ=0.90) | 0.816 | 5.7410 | 687.0 | 1,448 |
 
 ### 10-cluster Gaussian (σ=0.14)
@@ -48,7 +48,7 @@ All from `cargo run --release -p ruvector-diverse-beam --bin benchmark`, Linux/x
 | Variant | Recall@10 | Diversity | Mean µs | QPS |
 |---------|-----------|-----------|----------|-----|
 | GreedyBeam | 0.516 | 1.5417 | 46.0 | 20,098 |
-| MMRRerank | 0.502 | 1.5958 | 151.6 | 6,439 |
+| MMRRerank | 0.509 | 1.5860 | 102.5 | 9,611 |
 | CoherenceBeam | **0.002** | 5.3257 | 169.4 | 5,773 |
 
 ---
@@ -57,16 +57,16 @@ All from `cargo run --release -p ruvector-diverse-beam --bin benchmark`, Linux/x
 
 ### Positive
 
-- **MMRRerank** provides a composable, backend-agnostic diversity layer (+1.67% diversity, −13.4% recall, −53.8% QPS on uniform data). It can be applied on top of any ANN pool without modifying the graph or index.
+- **MMRRerank** provides a composable, backend-agnostic diversity layer (+0.3% diversity, −4.5% relative recall, −67.8% QPS on this uniform-data run). It can be applied on top of any ANN pool without modifying the graph or index.
 - The `BeamSearch` trait establishes a reusable interface for beam-search backends across the RuVector ecosystem.
 - `mean_pairwise_dist` is a useful diversity metric that can be added to RuVector's query evaluation toolkit.
-- The normalised MMR formulation (both terms in [0, 1] using pool's max distance) is reusable for any distance-based diversity scoring.
+- The bounded MMR formulation is reusable as an experimental post-reranker.
 
 ### Negative
 
 - **CoherenceBeam is an anti-pattern for clustered data** (recall=0.002, σ=0.14, 10 clusters). Tight cluster cohesion (high intra-cluster cosine similarity) is indistinguishable from the "redundant direction" signal the coherence gate is designed to suppress. Any deployment of CoherenceBeam must verify that `max_intra_cluster_cosine_sim < coherence_threshold` — practically limiting it to near-uniform datasets. **This variant is shipped as a documented negative result, not a production recommendation.**
 - CoherenceBeam's QPS (1,448 on uniform) is 7.5× lower than GreedyBeam (10,975) despite producing identical results on uniform data — the cosine computation overhead is not justified.
-- MMRRerank at λ=0.75 reduces recall by 13.4%. Applications where recall is the primary metric should use GreedyBeam.
+- MMRRerank at λ=0.75 reduces recall in this benchmark. Applications where recall is the primary metric should use GreedyBeam.
 
 ---
 
@@ -90,11 +90,11 @@ Modify graph construction to ensure diverse neighbourhood lists — each node's 
 
 ### Entry point alignment fix
 
-Entry points use stride `((n / n_entry) | 1).max(1)` — the smallest odd integer ≥ n/n_entry. `gcd(odd, any_even_cluster_count) ≤ smallest_prime_factor_of_odd`, so an odd stride cycles through more clusters before any modular repeat. This prevents even-stride period alignment with round-robin cluster assignments.
+Entry-point count is capped at the graph size and the deterministic stride is chosen near `n / n_entry` such that `gcd(stride, n) = 1`. This guarantees that all requested entry points are distinct. It does not guarantee cluster coverage; callers should use enough entry points for the expected graph components.
 
 ### MMR normalisation invariant
 
-Both relevance and diversity must be in [0, 1] and on the same absolute scale. Using pool-max distance `max_dist = max(d_q(c))` as the denominator for both terms satisfies this. The `max(·, 1e-6)` floor prevents division by zero when all candidates are at the query vector.
+Both relevance and diversity are bounded to [0, 1]. Relevance uses the candidate pool's maximum query distance. Diversity uses angular distance, `(1 − cosine_similarity) / 2`, avoiding the incorrect assumption that candidate-to-candidate L2 distance is bounded by the query-distance scale.
 
 ### CoherenceBeam history management
 

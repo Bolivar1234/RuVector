@@ -36,7 +36,7 @@ This is your baseline. Every other variant will trade something against this.
 
 Maximum Marginal Relevance, applied as post-reranking over a wider candidate pool.
 
-The key insight is **where** to apply MMR. An early version tried applying MMR during traversal — picking which node to expand next based on a relevance-diversity score. Result: recall dropped to 0.034 on clustered data. MMR during traversal redirects the beam away from the query, which is the opposite of what you want from an ANN algorithm.
+The key insight is **where** to apply MMR. An early version tried applying MMR during traversal — picking which node to expand next based on a relevance-diversity score. Result: recall dropped to 0.034 on clustered data in this benchmark. MMR during traversal redirected this beam away from the query.
 
 The correct approach: run standard greedy beam search to collect a pool of `max(beam_width, k×4)` candidates, then iteratively select k final results using:
 
@@ -44,13 +44,13 @@ The correct approach: run standard greedy beam search to collect a pool of `max(
 score(c) = λ · relevance(c) + (1−λ) · diversity(c)
 ```
 
-where both terms are normalised to [0, 1] using the pool's maximum distance. This normalisation is critical — if relevance and diversity aren't on the same scale, one term dominates.
+where query relevance is pool-normalised to [0, 1] and angular diversity is `(1 − cosine_similarity) / 2`, also bounded to [0, 1].
 
 ```
-Recall@10: 0.707    Diversity: 5.84    QPS: 5,069
+Recall@10: 0.779    Diversity: 5.76    QPS: 8,038
 ```
 
-At λ=0.75: +1.67% diversity, −13.4% recall, −53.8% QPS. Measurable but modest trade-off.
+At λ=0.75 on this run: +0.3% diversity, −4.5% relative recall, and −67.8% QPS. The trade-off is dataset-dependent.
 
 ### Variant 3: CoherenceBeam (Negative Result)
 
@@ -70,13 +70,14 @@ There's a subtler bug that cost me two hours: **entry point alignment**.
 
 If you initialise beam search from evenly-spaced entry points with stride `n / n_entry`, and your dataset has clusters assigned round-robin, the entry points can land entirely within certain clusters and completely miss others. With n=300, n_entry=6: stride=50, and with 8 clusters, all 6 entry points land in only 4 clusters (modular arithmetic).
 
-Fix: use the smallest odd stride ≥ `n / n_entry`:
+Fix: choose a stride near `n / n_entry` that is coprime with `n`:
 
 ```rust
-let step = ((n / n_entry) | 1).max(1);
+let mut step = (n / n_entry).max(1);
+while gcd(step, n) != 1 { step += 1; }
 ```
 
-An odd stride's GCD with any even cluster count is bounded by the stride's smallest odd prime factor, so it cycles through more of the modular ring before repeating.
+This guarantees distinct deterministic entry nodes. It does not by itself guarantee coverage of unknown clusters or disconnected components.
 
 ## Real Numbers
 
@@ -87,7 +88,7 @@ Full benchmark on n=2500, dim=64, K_NN=16, K=10, beam=50, 200 queries, Linux/x86
 | Variant | Recall@10 | Diversity | Mean µs | QPS |
 |---------|-----------|-----------|---------|-----|
 | GreedyBeam | 0.816 | 5.74 | 87 | 10,975 |
-| MMRRerank (λ=0.75) | 0.707 | 5.84 | 194 | 5,069 |
+| MMRRerank (λ=0.75) | 0.779 | 5.76 | 123 | 8,038 |
 | CoherenceBeam (θ=0.90) | 0.816 | 5.74 | 687 | 1,448 |
 
 **10-cluster Gaussian (σ=0.14):**
@@ -95,7 +96,7 @@ Full benchmark on n=2500, dim=64, K_NN=16, K=10, beam=50, 200 queries, Linux/x86
 | Variant | Recall@10 | Diversity | Mean µs | QPS |
 |---------|-----------|-----------|---------|-----|
 | GreedyBeam | 0.516 | 1.54 | 46 | 20,098 |
-| MMRRerank | 0.502 | 1.60 | 152 | 6,439 |
+| MMRRerank | 0.509 | 1.59 | 103 | 9,611 |
 | CoherenceBeam | **0.002** | 5.33 | 169 | 5,773 |
 
 The clustered data also exposes that GreedyBeam's recall of 0.516 is a graph connectivity problem, not an algorithm problem: with tight clusters and K_NN=16, there are no cross-cluster edges. Every algorithm is limited by the graph structure. The solution is ensuring `n_entry ≥ n_clusters` — not changing the search algorithm.
@@ -104,7 +105,7 @@ The clustered data also exposes that GreedyBeam's recall of 0.516 is a graph con
 
 **Use MMRRerank if:**
 - Your use case is RAG or agent memory retrieval
-- You can tolerate 13% recall reduction for 1.7% diversity improvement
+- You have measured an acceptable recall/diversity trade-off on your own data
 - You can tolerate 2× higher latency (pool construction + MMR selection)
 
 **Use GreedyBeam if:**
@@ -123,7 +124,7 @@ The clustered data also exposes that GreedyBeam's recall of 0.516 is a graph con
 
 ## Where MMR Doesn't Help Enough
 
-MMR with λ=0.75 delivers +1.67% diversity. For many production RAG systems, that's not enough — you want the diversity to be large enough to be noticeable in answer quality. Options:
+MMR with λ=0.75 delivered only +0.3% diversity in this run. For many production RAG systems, that is not enough to assume a downstream answer-quality benefit. Options:
 
 1. Lower λ (more diversity weight) — but recall drops further
 2. Use a larger pool (wider beam, more candidates to select from)
