@@ -1,6 +1,6 @@
 {
   "name": "@ruvector/rvf-node",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "RuVector Format Node.js native bindings",
   "main": "index.js",
   "types": "index.d.ts",
@@ -21,8 +21,7 @@
     ]
   },
   "scripts": {
-    "build": "napi build --platform --release",
-    "prepublishOnly": "napi prepublish -t npm"
+    "build": "napi build --platform --release"
   },
   "license": "MIT",
   "devDependencies": {
