@@ -13,6 +13,10 @@ on:
       - '.github/workflows/postgres-extension-ci.yml'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -163,6 +167,7 @@ jobs:
   benchmark:
     name: Benchmark
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event_name == 'pull_request'
 
     steps:
