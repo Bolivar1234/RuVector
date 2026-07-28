@@ -4,6 +4,12 @@
   "description": "RuVector Format Node.js native bindings",
   "main": "index.js",
   "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "package.json"
+  ],
   "napi": {
     "binaryName": "rvf-node",
     "targets": [
@@ -21,5 +27,12 @@
   "license": "MIT",
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0"
+  },
+  "optionalDependencies": {
+    "@ruvector/rvf-node-win32-x64-msvc": "0.2.1",
+    "@ruvector/rvf-node-darwin-x64": "0.2.1",
+    "@ruvector/rvf-node-darwin-arm64": "0.2.1",
+    "@ruvector/rvf-node-linux-x64-gnu": "0.2.1",
+    "@ruvector/rvf-node-linux-arm64-gnu": "0.2.1"
   }
 }
