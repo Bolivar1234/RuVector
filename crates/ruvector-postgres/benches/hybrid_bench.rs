@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
 //! Hybrid search benchmarks
 //!
 //! Benchmarks for combining vector search with keyword/BM25 scoring:

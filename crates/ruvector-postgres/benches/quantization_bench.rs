@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
 //! Comprehensive quantization benchmarks
 //!
 //! Compares exact vs quantized search with different quantization methods

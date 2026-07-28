@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
 //! Comprehensive distance function benchmarks
 //!
 //! Compare SIMD vs scalar implementations across different vector sizes

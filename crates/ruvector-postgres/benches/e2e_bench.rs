@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
 //! End-to-End benchmarks for RuVector PostgreSQL extension
 //!
 //! Comprehensive benchmarks for:

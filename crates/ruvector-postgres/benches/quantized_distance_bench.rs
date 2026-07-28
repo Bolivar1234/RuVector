@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
 //! Benchmarks for quantized vector distance calculations
 //!
 //! Compares scalar vs SIMD implementations for all quantized types

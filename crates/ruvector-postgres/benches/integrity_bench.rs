@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
 //! Index integrity and graph maintenance benchmarks
 //!
 //! Benchmarks for v2 structural integrity features:
