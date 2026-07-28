@@ -189,7 +189,19 @@ jobs:
         working-directory: crates/ruvector-postgres
 
       - name: Run benchmarks
-        run: cargo bench --no-default-features --features pg17 -- --output-format bencher | tee benchmark-output.txt
+        # The quantization benches link extension entry points that PostgreSQL
+        # supplies at load time, so they cannot be executed as standalone
+        # Linux binaries. Run the self-contained Criterion targets here; the
+        # quantization paths are covered by the pgrx test jobs above.
+        run: |
+          set -o pipefail
+          cargo bench --no-default-features --features pg17 \
+            --bench distance_bench \
+            --bench e2e_bench \
+            --bench hybrid_bench \
+            --bench index_bench \
+            --bench integrity_bench \
+            -- --output-format bencher | tee benchmark-output.txt
         working-directory: crates/ruvector-postgres
 
       - name: Store benchmark result
