@@ -15,6 +15,8 @@ exclude = ["docker/", "tests/", "benches/", "examples/"]
 
 [lib]
 crate-type = ["cdylib", "lib"]
+test = false
+bench = false
 
 [features]
 default = ["pg17"]
