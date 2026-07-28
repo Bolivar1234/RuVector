@@ -198,6 +198,10 @@ pub mod wasm_transport {
         pub async fn receive(&self) -> Result<Vec<u8>> {
             self.handle.recv().await
         }
+
+        pub(super) fn into_handle(self) -> TransportHandle {
+            self.handle
+        }
     }
 }
 
@@ -224,7 +228,7 @@ impl TransportFactory {
             #[cfg(feature = "wasm")]
             Transport::Wasm => {
                 let wasm = wasm_transport::WasmTransport::new("ruvector-channel")?;
-                Ok(wasm.handle)
+                Ok(wasm.into_handle())
             }
         }
     }

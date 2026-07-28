@@ -2,8 +2,8 @@
  * Structured data generator
  */
 
-import { BaseGenerator } from './base.js';
-import { GeneratorOptions, ValidationError, DataSchema, SchemaField } from '../types.js';
+import { BaseGenerator } from './base';
+import { GeneratorOptions, ValidationError, DataSchema, SchemaField } from '../types';
 
 export class StructuredGenerator extends BaseGenerator<GeneratorOptions> {
   protected generatePrompt(options: GeneratorOptions): string {

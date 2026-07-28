@@ -17,8 +17,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Tract - ONNX inference that compiles to WASM
-tract-onnx = "0.21"
-tract-core = "0.21"
+tract-onnx = "0.23"
+tract-core = "0.23"
 
 # Tokenization - HuggingFace tokenizers (WASM compatible)
 tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }

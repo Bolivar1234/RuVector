@@ -2,7 +2,7 @@
  * Model routing logic for Gemini and OpenRouter
  */
 
-import { ModelProvider, ModelRoute, SynthError } from '../types.js';
+import { ModelProvider, ModelRoute, SynthError } from '../types';
 
 export interface RouterConfig {
   defaultProvider: ModelProvider;

@@ -2,7 +2,7 @@
  * Context caching system for performance optimization
  */
 
-import { CacheStrategy, CacheError } from '../types.js';
+import { CacheStrategy, CacheError } from '../types';
 
 export interface CacheEntry<T = unknown> {
   key: string;

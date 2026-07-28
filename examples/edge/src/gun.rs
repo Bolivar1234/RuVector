@@ -9,9 +9,6 @@
 //! - Graph database: Perfect for relationship data
 //! - Conflict resolution: HAM (Hypothetical Amnesia Machine)
 
-#[cfg(feature = "gun")]
-use gundb::Node;
-
 use crate::intelligence::{LearningState, Pattern};
 use crate::Result;
 use serde::{Deserialize, Serialize};
@@ -83,8 +80,6 @@ pub struct GunSync {
     swarm_id: String,
     agent_id: String,
     state: Arc<RwLock<GunSwarmState>>,
-    #[cfg(feature = "gun")]
-    node: Option<Node>,
     config: GunSwarmConfig,
 }
 
@@ -103,51 +98,16 @@ impl GunSync {
             swarm_id: swarm_id.to_string(),
             agent_id: agent_id.to_string(),
             state: Arc::new(RwLock::new(state)),
-            #[cfg(feature = "gun")]
-            node: None,
             config,
         }
     }
 
     /// Connect to GUN network
-    #[cfg(feature = "gun")]
     pub async fn connect(&mut self) -> Result<()> {
-        use gundb::Node;
-
-        tracing::info!("Connecting to GUN network for swarm: {}", self.swarm_id);
-
-        // Create GUN node
-        let node = Node::new_with_config(gundb::Config {
-            peers: self.config.relays.clone(),
-            ..Default::default()
-        });
-
-        self.node = Some(node);
-
-        // Subscribe to swarm updates
-        self.subscribe_to_swarm().await?;
-
-        tracing::info!("Connected to GUN network");
-        Ok(())
-    }
-
-    #[cfg(not(feature = "gun"))]
-    pub async fn connect(&mut self) -> Result<()> {
-        tracing::warn!("GUN feature not enabled, using local-only mode");
-        Ok(())
-    }
-
-    /// Subscribe to swarm data changes
-    #[cfg(feature = "gun")]
-    async fn subscribe_to_swarm(&self) -> Result<()> {
-        if let Some(ref node) = self.node {
-            let path = format!("swarms/{}", self.swarm_id);
-
-            // In real implementation, set up GUN subscriptions
-            // node.get(&path).on(|data| { ... });
-
-            tracing::info!("Subscribed to GUN path: {}", path);
-        }
+        tracing::warn!(
+            "The vulnerable Rust GUN backend has been retired; using local-only mode for swarm {}",
+            self.swarm_id
+        );
         Ok(())
     }
 
@@ -161,17 +121,6 @@ impl GunSync {
             state.patterns.insert(key.clone(), pattern.clone());
         }
 
-        // Publish to GUN (if connected)
-        #[cfg(feature = "gun")]
-        if let Some(ref node) = self.node {
-            let path = format!("swarms/{}/patterns/{}", self.swarm_id, key);
-            let data = serde_json::to_string(pattern)
-                .map_err(|e| SwarmError::Serialization(e.to_string()))?;
-
-            // node.get(&path).put(&data);
-            tracing::debug!("Published pattern to GUN: {}", path);
-        }
-
         Ok(())
     }
 
@@ -181,17 +130,6 @@ impl GunSync {
         {
             let mut state = self.state.write().await;
             state.memories.push(memory.clone());
-        }
-
-        // Publish to GUN
-        #[cfg(feature = "gun")]
-        if let Some(ref node) = self.node {
-            let path = format!("swarms/{}/memories/{}", self.swarm_id, memory.id);
-            let data = serde_json::to_string(&memory)
-                .map_err(|e| SwarmError::Serialization(e.to_string()))?;
-
-            // node.get(&path).put(&data);
-            tracing::debug!("Published memory to GUN: {}", path);
         }
 
         Ok(())
@@ -211,17 +149,6 @@ impl GunSync {
         {
             let mut state = self.state.write().await;
             state.peers.insert(self.agent_id.clone(), peer_info.clone());
-        }
-
-        // Publish to GUN
-        #[cfg(feature = "gun")]
-        if let Some(ref node) = self.node {
-            let path = format!("swarms/{}/peers/{}", self.swarm_id, self.agent_id);
-            let data = serde_json::to_string(&peer_info)
-                .map_err(|e| SwarmError::Serialization(e.to_string()))?;
-
-            // node.get(&path).put(&data);
-            tracing::debug!("Announced peer to GUN: {}", path);
         }
 
         Ok(())

@@ -11,9 +11,9 @@ import {
   APIError,
   ValidationError,
   StreamCallback
-} from '../types.js';
-import { CacheManager } from '../cache/index.js';
-import { ModelRouter } from '../routing/index.js';
+} from '../types';
+import { CacheManager } from '../cache/index';
+import { ModelRouter } from '../routing/index';
 
 export abstract class BaseGenerator<TOptions extends GeneratorOptions = GeneratorOptions> {
   protected config: SynthConfig;

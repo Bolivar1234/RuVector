@@ -21,7 +21,7 @@ exo-federation = "0.1"
 exo-exotic = "0.1"
 
 # Ruvector dependencies
-ruvector-core = { version = "0.1", features = ["simd"] }
+ruvector-core = { version = "0.1", default-features = false, features = ["simd"] }
 ruvector-graph = "0.1"
 ruvector-domain-expansion = "2.0"
 thermorust = "0.1"

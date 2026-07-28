@@ -1,6 +1,6 @@
 //! Main WASM embedder implementation
 
-use crate::error::{Result, WasmEmbeddingError};
+use crate::error::Result;
 use crate::model::TractModel;
 use crate::pooling::{cosine_similarity, normalize_l2, PoolingStrategy};
 use crate::tokenizer::WasmTokenizer;

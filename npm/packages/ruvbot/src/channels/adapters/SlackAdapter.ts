@@ -166,7 +166,6 @@ export class SlackAdapter extends BaseAdapter {
 
   private async loadSlackBolt(): Promise<{ App: new (opts: unknown) => unknown } | null> {
     try {
-      // @ts-expect-error optional peer dependency — may not be installed
       return await import('@slack/bolt') as { App: new (opts: unknown) => unknown };
     } catch {
       return null;

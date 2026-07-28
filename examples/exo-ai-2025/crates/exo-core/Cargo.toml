@@ -15,7 +15,7 @@ readme = "README.md"
 
 [dependencies]
 # Ruvector SDK dependencies
-ruvector-core = "0.1"
+ruvector-core = { version = "0.1", default-features = false }
 ruvector-graph = "0.1"
 
 # Serialization

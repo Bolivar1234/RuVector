@@ -1,8 +1,8 @@
 /**
  * Time-series data generator
  */
-import { BaseGenerator } from './base.js';
-import { TimeSeriesOptions } from '../types.js';
+import { BaseGenerator } from './base';
+import { TimeSeriesOptions } from '../types';
 export declare class TimeSeriesGenerator extends BaseGenerator<TimeSeriesOptions> {
     protected generatePrompt(options: TimeSeriesOptions): string;
     protected parseResult(response: string, options: TimeSeriesOptions): unknown[];

@@ -1,8 +1,8 @@
 /**
  * Structured data generator
  */
-import { BaseGenerator } from './base.js';
-import { GeneratorOptions } from '../types.js';
+import { BaseGenerator } from './base';
+import { GeneratorOptions } from '../types';
 export declare class StructuredGenerator extends BaseGenerator<GeneratorOptions> {
     protected generatePrompt(options: GeneratorOptions): string;
     protected parseResult(response: string, options: GeneratorOptions): unknown[];

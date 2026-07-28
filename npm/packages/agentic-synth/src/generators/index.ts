@@ -2,13 +2,13 @@
  * Generator exports
  */
 
-export { BaseGenerator } from './base.js';
-export { TimeSeriesGenerator } from './timeseries.js';
-export { EventGenerator } from './events.js';
-export { StructuredGenerator } from './structured.js';
+export { BaseGenerator } from './base';
+export { TimeSeriesGenerator } from './timeseries';
+export { EventGenerator } from './events';
+export { StructuredGenerator } from './structured';
 
 export type {
   GeneratorOptions,
   TimeSeriesOptions,
   EventOptions
-} from '../types.js';
+} from '../types';

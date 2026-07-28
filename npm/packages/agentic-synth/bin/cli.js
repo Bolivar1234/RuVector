@@ -13,6 +13,9 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const packageVersion = JSON.parse(
+  readFileSync(resolve(__dirname, '../package.json'), 'utf8')
+).version;
 
 const program = new Command();
 
@@ -51,7 +54,7 @@ function loadSchema(schemaPath) {
 program
   .name('agentic-synth')
   .description('AI-powered synthetic data generation for agentic systems')
-  .version('0.1.6')
+  .version(packageVersion)
   .addHelpText('after', `
 Examples:
   $ agentic-synth generate --count 100 --schema schema.json

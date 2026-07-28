@@ -101,8 +101,10 @@ export class WasmEmbedder implements Embedder {
     try {
       // Try to load @ruvector/ruvllm (WASM module)
       try {
-        // Dynamic import - may not be available
-        const ruvllm = await import('@ruvector/ruvllm');
+        // Keep the optional module name non-literal so TypeScript does not require
+        // its declarations when consumers install without optional dependencies.
+        const moduleName = '@ruvector/ruvllm';
+        const ruvllm = await import(moduleName);
         this.wasmModule = ruvllm;
       } catch {
         // Use fallback embedder if no WASM available

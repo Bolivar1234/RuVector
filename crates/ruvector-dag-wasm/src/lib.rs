@@ -5,15 +5,10 @@
 //! - Inline hot paths
 //! - Minimal error handling
 //! - No string operations in critical paths
-//! - Optional wee_alloc for smaller binary
+//! - The maintained Rust allocator supplied by the wasm toolchain
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
-
-// Use wee_alloc for smaller WASM binary (~10KB reduction)
-#[cfg(feature = "wee_alloc")]
-#[global_allocator]
-static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 /// Minimal DAG node - 9 bytes (u32 + u8 + f32)
 #[derive(Serialize, Deserialize, Clone, Copy)]

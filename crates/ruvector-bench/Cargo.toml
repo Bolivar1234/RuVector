@@ -81,7 +81,7 @@ sysinfo = "0.31"
 jemalloc-ctl = { version = "0.5", optional = true }
 
 # Profiling
-pprof = { version = "0.13", features = ["flamegraph", "criterion"], optional = true }
+pprof = { version = "0.14", features = ["flamegraph", "criterion"], optional = true }
 
 # Async
 tokio = { workspace = true }

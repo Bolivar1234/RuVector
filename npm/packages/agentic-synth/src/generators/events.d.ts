@@ -1,8 +1,8 @@
 /**
  * Event data generator
  */
-import { BaseGenerator } from './base.js';
-import { EventOptions } from '../types.js';
+import { BaseGenerator } from './base';
+import { EventOptions } from '../types';
 export declare class EventGenerator extends BaseGenerator<EventOptions> {
     protected generatePrompt(options: EventOptions): string;
     protected parseResult(response: string, options: EventOptions): unknown[];

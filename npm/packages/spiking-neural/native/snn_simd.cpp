@@ -58,11 +58,8 @@ void lif_update_simd(
     float resistance
 ) {
     const size_t n_simd = n_neurons / 4;
-    const size_t n_remainder = n_neurons % 4;
 
     // SIMD constants
-    const __m128 dt_vec = _mm_set1_ps(dt);
-    const __m128 tau_vec = _mm_set1_ps(tau);
     const __m128 v_rest_vec = _mm_set1_ps(v_rest);
     const __m128 r_vec = _mm_set1_ps(resistance);
     const __m128 decay_vec = _mm_set1_ps(dt / tau);
@@ -73,12 +70,12 @@ void lif_update_simd(
 
         // Load 4 voltages and currents
         __m128 v = _mm_loadu_ps(&voltages[idx]);
-        __m128 i = _mm_loadu_ps(&currents[idx]);
+        __m128 current = _mm_loadu_ps(&currents[idx]);
 
         // dV = (-(V - V_rest) + R * I) * dt / tau
         __m128 v_diff = _mm_sub_ps(v, v_rest_vec);          // V - V_rest
         __m128 leak = _mm_mul_ps(v_diff, decay_vec);        // leak term
-        __m128 input = _mm_mul_ps(i, r_vec);                // R * I
+        __m128 input = _mm_mul_ps(current, r_vec);          // R * I
         __m128 input_scaled = _mm_mul_ps(input, decay_vec); // scale by dt/tau
 
         // V_new = V - leak + input
@@ -115,12 +112,10 @@ size_t detect_spikes_simd(
 ) {
     size_t spike_count = 0;
     const size_t n_simd = n_neurons / 4;
-    const size_t n_remainder = n_neurons % 4;
 
     const __m128 thresh_vec = _mm_set1_ps(threshold);
     const __m128 reset_vec = _mm_set1_ps(v_reset);
     const __m128 one_vec = _mm_set1_ps(1.0f);
-    const __m128 zero_vec = _mm_set1_ps(0.0f);
 
     // Process 4 neurons at a time
     for (size_t i = 0; i < n_simd; i++) {

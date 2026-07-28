@@ -2,9 +2,9 @@
  * Base generator class with API integration
  */
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { SynthConfig, GeneratorOptions, GenerationResult, StreamCallback } from '../types.js';
-import { CacheManager } from '../cache/index.js';
-import { ModelRouter } from '../routing/index.js';
+import { SynthConfig, GeneratorOptions, GenerationResult, StreamCallback } from '../types';
+import { CacheManager } from '../cache/index';
+import { ModelRouter } from '../routing/index';
 export declare abstract class BaseGenerator<TOptions extends GeneratorOptions = GeneratorOptions> {
     protected config: SynthConfig;
     protected cache: CacheManager;

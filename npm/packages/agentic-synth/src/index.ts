@@ -14,11 +14,11 @@ import {
   GenerationResult,
   ModelProvider,
   DataType
-} from './types.js';
-import { TimeSeriesGenerator } from './generators/timeseries.js';
-import { EventGenerator } from './generators/events.js';
-import { StructuredGenerator } from './generators/structured.js';
-import { CacheManager } from './cache/index.js';
+} from './types';
+import { TimeSeriesGenerator } from './generators/timeseries';
+import { EventGenerator } from './generators/events';
+import { StructuredGenerator } from './generators/structured';
+import { CacheManager } from './cache/index';
 
 /**
  * Main AgenticSynth class for data generation
@@ -167,10 +167,10 @@ export function createSynth(config?: Partial<SynthConfig>): AgenticSynth {
 }
 
 // Export types and utilities
-export * from './types.js';
-export * from './generators/index.js';
-export * from './cache/index.js';
-export * from './routing/index.js';
+export * from './types';
+export * from './generators/index';
+export * from './cache/index';
+export * from './routing/index';
 
 // Default export
 export default AgenticSynth;

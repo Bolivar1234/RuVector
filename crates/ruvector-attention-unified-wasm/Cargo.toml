@@ -37,7 +37,6 @@ console_error_panic_hook = { version = "0.1", optional = true }
 getrandom = { version = "0.2", features = ["js"] }
 
 # Allocator for smaller binary (optional)
-wee_alloc = { version = "0.4", optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
@@ -45,8 +44,8 @@ wasm-bindgen-test = "0.3"
 [features]
 default = ["console_error_panic_hook"]
 console_error_panic_hook = ["dep:console_error_panic_hook"]
-# Enable wee_alloc for ~10KB smaller WASM binary
-wee_alloc = ["dep:wee_alloc"]
+# Compatibility feature retained without the unmaintained allocator.
+wee_alloc = []
 
 [profile.release]
 opt-level = "z"

@@ -2,11 +2,13 @@
 
 use crate::error::{Result, WasmEmbeddingError};
 use crate::tokenizer::EncodedInput;
+use std::sync::Arc;
+use tract_core::plan::SimplePlan;
 use tract_onnx::prelude::*;
 
 /// Tract ONNX model wrapper for WASM
 pub struct TractModel {
-    model: SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
+    model: Arc<SimplePlan<TypedFact, Box<dyn TypedOp>>>,
     hidden_size: usize,
 }
 
@@ -90,7 +92,7 @@ impl TractModel {
             .first()
             .ok_or_else(|| WasmEmbeddingError::inference("No output tensor"))?;
 
-        let output_array = output.to_array_view::<f32>().map_err(|e| {
+        let output_array = output.to_plain_array_view::<f32>().map_err(|e| {
             WasmEmbeddingError::inference(format!("Failed to extract output: {}", e))
         })?;
 
