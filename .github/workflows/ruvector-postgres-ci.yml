@@ -173,6 +173,10 @@ jobs:
         run: cargo pgrx init --pg${{ matrix.pg_version }}=/opt/homebrew/opt/postgresql@${{ matrix.pg_version }}/bin/pg_config
         working-directory: crates/ruvector-postgres
 
+      - name: Configure macOS extension linking
+        if: runner.os == 'macOS'
+        run: echo 'RUSTFLAGS=-D warnings -C link-arg=-undefined -C link-arg=dynamic_lookup' >> "$GITHUB_ENV"
+
       - name: Build extension
         run: cargo build --no-default-features --features pg${{ matrix.pg_version }} --release
         working-directory: crates/ruvector-postgres

@@ -7,6 +7,7 @@
 //! - IVFFlat query latency
 //! - Recall vs latency tradeoffs
 //! - Memory usage analysis
+#![allow(dead_code)] // Standalone benchmark models intentionally expose unused variants/helpers.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::*;
