@@ -15,7 +15,6 @@
 	import { addChildren } from "$lib/utils/tree/addChildren";
 	import { addSibling } from "$lib/utils/tree/addSibling";
 	import { fetchMessageUpdates, resolveStreamingMode } from "$lib/utils/messageUpdates";
-	import type { v4 } from "uuid";
 	import { useSettingsStore } from "$lib/stores/settings.js";
 	import { enabledServers, WASM_SERVER_ID } from "$lib/stores/mcpServers";
 	import { browser } from "$app/environment";
@@ -106,7 +105,7 @@
 		isRetry = false,
 	}: {
 		prompt?: string;
-		messageId?: ReturnType<typeof v4>;
+		messageId?: string;
 		isRetry?: boolean;
 	}): Promise<void> {
 		try {
