@@ -5,7 +5,7 @@
 //!
 //! ## Features
 //! - Full Index AM callback implementation
-//! - Dynamic ef_search adjustment based on recall target
+//! - Session-configurable ef_search with a compatibility GUC alias
 //! - Parallel construction using rayon
 //! - Incremental updates without full rebuild
 //! - Memory-mapped storage for large indexes
@@ -652,8 +652,23 @@ fn random_level(m: usize, max_layer: usize) -> usize {
 
 /// Get ef_search from GUC
 fn get_ef_search_guc() -> usize {
-    // In production, read from ruvector.hnsw_ef_search GUC
-    DEFAULT_EF_SEARCH as usize
+    let canonical = crate::HNSW_EF_SEARCH.get();
+    let legacy = crate::EF_SEARCH.get();
+
+    // The canonical spelling wins when explicitly changed. Otherwise honor
+    // the historical alias so existing deployments keep working.
+    let configured = if canonical != crate::DEFAULT_HNSW_EF_SEARCH as i32 {
+        canonical
+    } else {
+        legacy
+    };
+    configured.max(1) as usize
+}
+
+/// HNSW needs at least `k` candidates to return `k` results. Apart from that
+/// safety floor, the configured GUC is the effective search width.
+fn effective_ef_search(configured: usize, k: usize) -> usize {
+    configured.max(k).min(1000)
 }
 
 // ============================================================================
@@ -807,6 +822,17 @@ unsafe extern "C" fn hnsw_build(
     index: Relation,
     index_info: *mut IndexInfo,
 ) -> *mut IndexBuildResult {
+    // PostgreSQL's concurrent validation pass can call `aminsert` for tuples
+    // already materialized by this AM's custom heap scan. Until the HNSW AM
+    // has a TID-aware validation implementation, accepting CONCURRENTLY can
+    // duplicate every index entry and silently halve effective k.
+    if (*index_info).ii_Concurrent {
+        pgrx::error!(
+            "HNSW: CREATE INDEX CONCURRENTLY is not supported safely yet; \
+             build this index without CONCURRENTLY"
+        );
+    }
+
     // Determine distance metric from operator class
     let metric = metric_from_index(index);
     pgrx::log!("HNSW v2: Starting index build (metric={:?})", metric);
@@ -1842,8 +1868,10 @@ unsafe extern "C" fn hnsw_gettuple(scan: IndexScanDesc, direction: ScanDirection
         let meta = read_metadata(meta_page);
         pg_sys::UnlockReleaseBuffer(meta_buffer);
 
-        // Calculate dynamic ef_search based on recall target
-        let ef_search = state.calculate_ef_search(meta.node_count);
+        // Read the session GUC at execution time so SET/SET LOCAL affects the
+        // scan. The previous dynamic heuristic ignored both documented GUC
+        // spellings and commonly forced every query to ef=1000.
+        let ef_search = effective_ef_search(get_ef_search_guc(), state.k);
         state.ef_search = ef_search;
 
         // Perform search
@@ -2100,6 +2128,9 @@ fn ruhnsw_stats(index_name: &str) -> pgrx::JsonB {
         "total_searches": TOTAL_SEARCHES.load(AtomicOrdering::Relaxed),
         "total_inserts": TOTAL_INSERTS.load(AtomicOrdering::Relaxed),
         "distance_calculations": DISTANCE_CALCULATIONS.load(AtomicOrdering::Relaxed),
+        "configured_ef_search": get_ef_search_guc(),
+        "canonical_guc": crate::HNSW_EF_SEARCH.get(),
+        "legacy_guc": crate::EF_SEARCH.get(),
     });
     pgrx::JsonB(stats)
 }
@@ -2267,21 +2298,12 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_state_ef_search_calculation() {
-        let state = HnswScanState::new(128, DistanceMetric::Euclidean, 0.95);
-
-        // Small index
-        let ef_small = state.calculate_ef_search(100);
-
-        // Large index
-        let ef_large = state.calculate_ef_search(1_000_000);
-
-        // Larger index should have larger ef_search
-        assert!(ef_large > ef_small);
-
-        // Both should be at least k
-        assert!(ef_small >= state.k);
-        assert!(ef_large >= state.k);
+    fn test_effective_ef_search_honors_the_configured_width() {
+        assert_eq!(effective_ef_search(40, 10), 40);
+        assert_eq!(effective_ef_search(100, 10), 100);
+        assert_eq!(effective_ef_search(400, 10), 400);
+        assert_eq!(effective_ef_search(4, 10), 10);
+        assert_eq!(effective_ef_search(5_000, 10), 1_000);
     }
 
     #[test]

@@ -111,7 +111,7 @@ impl GraphReplication {
                 &format!("{}:9001", primary_node),
                 ReplicaRole::Primary,
             )
-            .map_err(|e| GraphError::ReplicationError(e))?;
+            .map_err(|e| GraphError::ReplicationError(e.to_string()))?;
 
         // Add secondary replicas
         for (idx, node) in replica_nodes.iter().enumerate() {
@@ -121,7 +121,7 @@ impl GraphReplication {
                     &format!("{}:9001", node),
                     ReplicaRole::Secondary,
                 )
-                .map_err(|e| GraphError::ReplicationError(e))?;
+                .map_err(|e| GraphError::ReplicationError(e.to_string()))?;
         }
 
         let replica_set = Arc::new(replica_set);
@@ -215,8 +215,11 @@ impl GraphReplication {
             .ok_or_else(|| GraphError::ShardError(format!("Shard {} not initialized", shard_id)))?;
 
         // Serialize operation
-        let data = bincode::encode_to_vec(&op, bincode::config::standard())
-            .map_err(|e| GraphError::SerializationError(e.to_string()))?;
+        // Graph properties contain `serde_json::Value`, whose `deserialize_any`
+        // representation is not supported by bincode 2's serde adapter. JSON
+        // preserves those dynamically typed values and remains wire-stable.
+        let _data =
+            serde_json::to_vec(&op).map_err(|e| GraphError::SerializationError(e.to_string()))?;
 
         // Append to replication log
         // Note: In production, the sync_manager would handle actual replication
@@ -403,5 +406,27 @@ mod tests {
         let stats = replication.get_stats();
         assert_eq!(stats.total_shards, 0);
         assert_eq!(stats.strategy, ReplicationStrategy::FullShard);
+    }
+
+    #[test]
+    fn replication_operations_preserve_dynamic_json_properties() {
+        let op = ReplicationOp::AddNode(NodeData {
+            id: "node-1".to_string(),
+            properties: HashMap::from([(
+                "kind".to_string(),
+                serde_json::Value::String("test".to_string()),
+            )]),
+            labels: vec!["Example".to_string()],
+        });
+
+        let encoded = serde_json::to_vec(&op).unwrap();
+        let decoded: ReplicationOp = serde_json::from_slice(&encoded).unwrap();
+        match decoded {
+            ReplicationOp::AddNode(node) => {
+                assert_eq!(node.id, "node-1");
+                assert_eq!(node.labels, vec!["Example"]);
+            }
+            _ => panic!("unexpected replication operation"),
+        }
     }
 }

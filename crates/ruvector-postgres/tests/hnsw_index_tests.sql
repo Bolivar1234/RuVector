@@ -245,11 +245,12 @@ LIMIT 10;
 
 \echo '=== Test 10: Session Parameter Testing ==='
 
--- Show current ef_search setting
+-- Show the canonical setting and its backwards-compatible alias.
+SHOW ruvector.hnsw_ef_search;
 SHOW ruvector.ef_search;
 
 -- Increase ef_search for better recall
-SET ruvector.ef_search = 100;
+SET ruvector.hnsw_ef_search = 100;
 
 -- Run query with increased ef_search
 SELECT id, embedding <-> ARRAY[0.5, 0.5, 0.5]::real[] AS distance
@@ -258,7 +259,7 @@ ORDER BY embedding <-> ARRAY[0.5, 0.5, 0.5]::real[]
 LIMIT 10;
 
 -- Reset to default
-RESET ruvector.ef_search;
+RESET ruvector.hnsw_ef_search;
 
 -- ============================================================================
 -- Test 11: Operator Functionality

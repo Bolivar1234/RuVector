@@ -83,6 +83,9 @@ pub const DEFAULT_IVFFLAT_LISTS: usize = 100;
 pub const DEFAULT_IVFFLAT_PROBES: usize = 1;
 
 // GUC variables
+// `ruvector.hnsw_ef_search` is the canonical setting advertised by the HNSW
+// API. Keep the older `ruvector.ef_search` spelling as a compatibility alias.
+static HNSW_EF_SEARCH: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_HNSW_EF_SEARCH as i32);
 static EF_SEARCH: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_HNSW_EF_SEARCH as i32);
 static PROBES: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_IVFFLAT_PROBES as i32);
 
@@ -103,9 +106,20 @@ pub extern "C" fn _PG_init() {
 
     // Register GUCs
     GucRegistry::define_int_guc(
-        "ruvector.ef_search",
+        "ruvector.hnsw_ef_search",
         "HNSW ef_search parameter for query time",
         "Higher values improve recall at the cost of speed",
+        &HNSW_EF_SEARCH,
+        1,
+        1000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        "ruvector.ef_search",
+        "Deprecated alias for ruvector.hnsw_ef_search",
+        "Use ruvector.hnsw_ef_search instead",
         &EF_SEARCH,
         1,
         1000,
