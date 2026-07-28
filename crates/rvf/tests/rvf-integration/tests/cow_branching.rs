@@ -500,6 +500,58 @@ fn branch_query_reads_through_to_parent() {
     );
 }
 
+/// Membership bitmaps are keyed by vector ID, so count-based capacity drops
+/// normal one-based and sparse IDs even though the vectors exist.
+#[test]
+fn branch_query_reads_one_based_and_sparse_parent_ids() {
+    let dir = TempDir::new().unwrap();
+    let base_path = dir.path().join("base_sparse.rvf");
+    let child_path = dir.path().join("child_sparse.rvf");
+    let dim: u16 = 4;
+    let one_based = vec![1.0, 0.0, 0.0, 0.0];
+    let sparse = vec![0.0, 1.0, 0.0, 0.0];
+
+    let mut base = RvfStore::create(&base_path, make_options(dim)).unwrap();
+    base.ingest_batch(
+        &[one_based.as_slice(), sparse.as_slice()],
+        &[1, 10_000],
+        None,
+    )
+    .unwrap();
+    base.freeze().unwrap();
+
+    let child = base.branch(&child_path).unwrap();
+    let opts = QueryOptions::default();
+    assert_eq!(child.query(&one_based, 1, &opts).unwrap()[0].id, 1);
+    assert_eq!(child.query(&sparse, 1, &opts).unwrap()[0].id, 10_000);
+
+    child.close().unwrap();
+    base.close().unwrap();
+}
+
+/// A hostile sparse ID must fail branch creation instead of overflowing or
+/// attempting an unbounded dense-bitmap allocation.
+#[test]
+fn branch_rejects_unbounded_membership_capacity() {
+    let dir = TempDir::new().unwrap();
+    let base_path = dir.path().join("base_hostile_id.rvf");
+    let child_path = dir.path().join("child_hostile_id.rvf");
+    let vector = vec![1.0, 0.0, 0.0, 0.0];
+
+    let mut base = RvfStore::create(&base_path, make_options(4)).unwrap();
+    base.ingest_batch(&[vector.as_slice()], &[u64::MAX], None)
+        .unwrap();
+    base.freeze().unwrap();
+
+    assert!(matches!(
+        base.branch(&child_path),
+        Err(rvf_types::RvfError::Code(
+            rvf_types::ErrorCode::MembershipInvalid
+        ))
+    ));
+    base.close().unwrap();
+}
+
 // ===========================================================================
 // TEST 10: branch_state_survives_reopen_and_relocation
 // ===========================================================================

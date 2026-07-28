@@ -44,6 +44,9 @@ fn err(code: ErrorCode) -> RvfError {
 
 const COW_STATE_FIXED_SIZE: usize = 64 + 4 + 1 + 4 + 4 + 4;
 const MAX_COW_LINEAGE_DEPTH: u32 = 1024;
+/// Bound dense membership bitmaps so a sparse, attacker-controlled vector ID
+/// cannot turn branch creation into an unbounded allocation.
+const MAX_MEMBERSHIP_FILTER_BYTES: u64 = 64 * 1024 * 1024;
 
 fn relative_parent_reference(child_path: &Path, parent_path: &Path) -> Result<PathBuf, RvfError> {
     let child_dir = child_path
@@ -2265,6 +2268,30 @@ impl RvfStore {
             .checked_next_power_of_two()
             .ok_or_else(|| err(ErrorCode::CowMapCorrupt))?;
         let total_vecs = self.vectors.len() as u64;
+        // MembershipFilter is keyed by vector ID, not by slab ordinal. Sizing
+        // it from `len()` silently drops ID == len (the normal Node string-ID
+        // case, which starts at 1) and every sparse ID. Size from the highest
+        // live ID instead, while bounding the dense bitmap to fail closed
+        // rather than risk an allocation DoS.
+        let membership_capacity = self
+            .vectors
+            .ids()
+            .copied()
+            .max()
+            .map(|max_id| {
+                max_id
+                    .checked_add(1)
+                    .ok_or_else(|| err(ErrorCode::MembershipInvalid))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let membership_bytes = membership_capacity
+            .div_ceil(64)
+            .checked_mul(8)
+            .ok_or_else(|| err(ErrorCode::MembershipInvalid))?;
+        if membership_bytes > MAX_MEMBERSHIP_FILTER_BYTES {
+            return Err(err(ErrorCode::MembershipInvalid));
+        }
         let cluster_count = if vectors_per_cluster > 0 {
             total_vecs.div_ceil(vectors_per_cluster as u64) as u32
         } else {
@@ -2287,7 +2314,7 @@ impl RvfStore {
         ));
 
         // Initialize membership filter with all parent vectors visible
-        let mut filter = MembershipFilter::new_include(total_vecs);
+        let mut filter = MembershipFilter::new_include(membership_capacity);
         for &vid in self.vectors.ids() {
             if !self.deletion_bitmap.is_deleted(vid) {
                 filter.add(vid);
