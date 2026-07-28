@@ -51,6 +51,8 @@ export interface RvfBackend {
   parentId(): Promise<string>;
   lineageDepth(): Promise<number>;
   derive(childPath: string, options?: RvfOptions): Promise<RvfBackend>;
+  branch(childPath: string): Promise<RvfBackend>;
+  freeze(): Promise<number>;
   // Kernel / eBPF
   embedKernel(arch: number, kernelType: number, flags: number,
               image: Uint8Array, apiPort: number, cmdline?: string): Promise<number>;
@@ -384,9 +386,10 @@ export class NodeBackend implements RvfBackend {
 
   async derive(childPath: string, options?: RvfOptions): Promise<RvfBackend> {
     this.ensureHandle();
+    let childHandle: any = null;
     try {
       const nativeOpts = options ? mapOptionsToNative(options) : undefined;
-      const childHandle = this.handle.derive(childPath, nativeOpts);
+      childHandle = this.handle.derive(childPath, nativeOpts);
       const child = new NodeBackend();
       child.native = this.native;
       child.handle = childHandle;
@@ -397,6 +400,36 @@ export class NodeBackend implements RvfBackend {
       child.nextLabel = this.nextLabel;
       await child.saveMappings();
       return child;
+    } catch (err) {
+      await this.cleanupFailedChild(childHandle, childPath);
+      throw RvfError.fromNative(err);
+    }
+  }
+
+  async branch(childPath: string): Promise<RvfBackend> {
+    this.ensureHandle();
+    let childHandle: any = null;
+    try {
+      childHandle = this.handle.branch(childPath);
+      const child = new NodeBackend();
+      child.native = this.native;
+      child.handle = childHandle;
+      child.storePath = childPath;
+      child.idToLabel = new Map(this.idToLabel);
+      child.labelToId = new Map(this.labelToId);
+      child.nextLabel = this.nextLabel;
+      await child.saveMappings();
+      return child;
+    } catch (err) {
+      await this.cleanupFailedChild(childHandle, childPath);
+      throw RvfError.fromNative(err);
+    }
+  }
+
+  async freeze(): Promise<number> {
+    this.ensureHandle();
+    try {
+      return this.handle.freeze();
     } catch (err) {
       throw RvfError.fromNative(err);
     }
@@ -552,6 +585,24 @@ export class NodeBackend implements RvfBackend {
         RvfErrorCode.SidecarWriteFailed,
         `at ${mp}: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  }
+
+  private async cleanupFailedChild(childHandle: any, childPath: string): Promise<void> {
+    // If native creation failed before returning a handle (for example because
+    // childPath already exists), the path is not ours to remove.
+    if (!childHandle) return;
+    try {
+      childHandle?.close();
+    } catch {
+      // Preserve the original branch/sidecar error.
+    }
+    try {
+      const fs = await import('fs');
+      fs.rmSync(childPath, { force: true });
+      fs.rmSync(`${childPath}.idmap.json`, { force: true });
+    } catch {
+      // Best-effort rollback; the original operation error remains primary.
     }
   }
 
@@ -859,6 +910,12 @@ export class WasmBackend implements RvfBackend {
   }
   async derive(_childPath: string, _options?: RvfOptions): Promise<RvfBackend> {
     throw new RvfError(RvfErrorCode.BackendNotFound, 'derive not supported in WASM backend');
+  }
+  async branch(_childPath: string): Promise<RvfBackend> {
+    throw new RvfError(RvfErrorCode.BackendNotFound, 'branch not supported in WASM backend');
+  }
+  async freeze(): Promise<number> {
+    throw new RvfError(RvfErrorCode.BackendNotFound, 'freeze not supported in WASM backend');
   }
   async embedKernel(): Promise<number> {
     throw new RvfError(RvfErrorCode.BackendNotFound, 'embedKernel not supported in WASM backend');

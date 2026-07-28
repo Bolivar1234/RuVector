@@ -346,9 +346,10 @@ class NodeBackend {
     }
     async derive(childPath, options) {
         this.ensureHandle();
+        let childHandle = null;
         try {
             const nativeOpts = options ? mapOptionsToNative(options) : undefined;
-            const childHandle = this.handle.derive(childPath, nativeOpts);
+            childHandle = this.handle.derive(childPath, nativeOpts);
             const child = new NodeBackend();
             child.native = this.native;
             child.handle = childHandle;
@@ -359,6 +360,36 @@ class NodeBackend {
             child.nextLabel = this.nextLabel;
             await child.saveMappings();
             return child;
+        }
+        catch (err) {
+            await this.cleanupFailedChild(childHandle, childPath);
+            throw errors_1.RvfError.fromNative(err);
+        }
+    }
+    async branch(childPath) {
+        this.ensureHandle();
+        let childHandle = null;
+        try {
+            childHandle = this.handle.branch(childPath);
+            const child = new NodeBackend();
+            child.native = this.native;
+            child.handle = childHandle;
+            child.storePath = childPath;
+            child.idToLabel = new Map(this.idToLabel);
+            child.labelToId = new Map(this.labelToId);
+            child.nextLabel = this.nextLabel;
+            await child.saveMappings();
+            return child;
+        }
+        catch (err) {
+            await this.cleanupFailedChild(childHandle, childPath);
+            throw errors_1.RvfError.fromNative(err);
+        }
+    }
+    async freeze() {
+        this.ensureHandle();
+        try {
+            return this.handle.freeze();
         }
         catch (err) {
             throw errors_1.RvfError.fromNative(err);
@@ -496,6 +527,26 @@ class NodeBackend {
                 // best-effort cleanup of the temp file
             }
             throw new errors_1.RvfError(errors_1.RvfErrorCode.SidecarWriteFailed, `at ${mp}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+    async cleanupFailedChild(childHandle, childPath) {
+        // If native creation failed before returning a handle (for example because
+        // childPath already exists), the path is not ours to remove.
+        if (!childHandle)
+            return;
+        try {
+            childHandle?.close();
+        }
+        catch {
+            // Preserve the original branch/sidecar error.
+        }
+        try {
+            const fs = await Promise.resolve().then(() => __importStar(require('fs')));
+            fs.rmSync(childPath, { force: true });
+            fs.rmSync(`${childPath}.idmap.json`, { force: true });
+        }
+        catch {
+            // Best-effort rollback; the original operation error remains primary.
         }
     }
     /**
@@ -777,6 +828,12 @@ class WasmBackend {
     }
     async derive(_childPath, _options) {
         throw new errors_1.RvfError(errors_1.RvfErrorCode.BackendNotFound, 'derive not supported in WASM backend');
+    }
+    async branch(_childPath) {
+        throw new errors_1.RvfError(errors_1.RvfErrorCode.BackendNotFound, 'branch not supported in WASM backend');
+    }
+    async freeze() {
+        throw new errors_1.RvfError(errors_1.RvfErrorCode.BackendNotFound, 'freeze not supported in WASM backend');
     }
     async embedKernel() {
         throw new errors_1.RvfError(errors_1.RvfErrorCode.BackendNotFound, 'embedKernel not supported in WASM backend');

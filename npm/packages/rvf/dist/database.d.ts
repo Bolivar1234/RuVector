@@ -111,6 +111,16 @@ export declare class RvfDatabase {
      * the child store.
      */
     derive(childPath: string, options?: RvfOptions): Promise<RvfDatabase>;
+    /**
+     * Create a durable copy-on-write branch that reads inherited vectors from
+     * this store and persists only child edits.
+     */
+    branch(childPath: string): Promise<RvfDatabase>;
+    /**
+     * Freeze this generation before branching. Returns the frozen manifest
+     * epoch; subsequent writes through this handle are rejected.
+     */
+    freeze(): Promise<number>;
     /** Embed a kernel image. Returns the segment ID. */
     embedKernel(arch: number, kernelType: number, flags: number, image: Uint8Array, apiPort: number, cmdline?: string): Promise<number>;
     /** Extract the kernel image. Returns null if not present. */

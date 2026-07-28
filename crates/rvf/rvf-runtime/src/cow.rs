@@ -99,9 +99,45 @@ impl CowEngine {
         }
     }
 
+    /// Restore a COW engine from persisted cluster-map state.
+    pub(crate) fn from_persisted(
+        cow_map: CowMap,
+        cluster_size: u32,
+        vectors_per_cluster: u32,
+        bytes_per_vector: u32,
+        frozen: bool,
+        snapshot_epoch: u32,
+    ) -> Result<Self, RvfError> {
+        let minimum_cluster_size = vectors_per_cluster
+            .checked_mul(bytes_per_vector)
+            .ok_or(RvfError::Code(ErrorCode::CowMapCorrupt))?;
+        if cluster_size == 0
+            || vectors_per_cluster == 0
+            || bytes_per_vector == 0
+            || cluster_size < minimum_cluster_size
+        {
+            return Err(RvfError::Code(ErrorCode::CowMapCorrupt));
+        }
+        Ok(Self {
+            cow_map,
+            cluster_size,
+            vectors_per_cluster,
+            bytes_per_vector,
+            l0_cache: HashMap::new(),
+            write_buffer: HashMap::new(),
+            frozen,
+            snapshot_epoch,
+        })
+    }
+
     /// Get a reference to the underlying COW map.
     pub fn cow_map(&self) -> &CowMap {
         &self.cow_map
+    }
+
+    /// Bytes occupied by one vector in a COW cluster.
+    pub(crate) fn bytes_per_vector(&self) -> u32 {
+        self.bytes_per_vector
     }
 
     /// Read a vector by ID. Returns byte slice of vector data.
@@ -498,5 +534,14 @@ mod tests {
         engine.write_vector(0, &vec![0u8; 64]).unwrap();
         let stats = engine.stats();
         assert_eq!(stats.pending_writes, 1);
+    }
+
+    #[test]
+    fn persisted_geometry_rejects_undersized_clusters() {
+        let result = CowEngine::from_persisted(CowMap::new_flat(1), 4096, 256, 512, false, 0);
+        assert!(matches!(
+            result,
+            Err(RvfError::Code(ErrorCode::CowMapCorrupt))
+        ));
     }
 }

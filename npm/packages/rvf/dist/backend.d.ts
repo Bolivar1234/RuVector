@@ -29,6 +29,8 @@ export interface RvfBackend {
     parentId(): Promise<string>;
     lineageDepth(): Promise<number>;
     derive(childPath: string, options?: RvfOptions): Promise<RvfBackend>;
+    branch(childPath: string): Promise<RvfBackend>;
+    freeze(): Promise<number>;
     embedKernel(arch: number, kernelType: number, flags: number, image: Uint8Array, apiPort: number, cmdline?: string): Promise<number>;
     extractKernel(): Promise<RvfKernelData | null>;
     embedEbpf(programType: number, attachType: number, maxDimension: number, bytecode: Uint8Array, btf?: Uint8Array): Promise<number>;
@@ -72,6 +74,8 @@ export declare class NodeBackend implements RvfBackend {
     parentId(): Promise<string>;
     lineageDepth(): Promise<number>;
     derive(childPath: string, options?: RvfOptions): Promise<RvfBackend>;
+    branch(childPath: string): Promise<RvfBackend>;
+    freeze(): Promise<number>;
     embedKernel(arch: number, kernelType: number, flags: number, image: Uint8Array, apiPort: number, cmdline?: string): Promise<number>;
     extractKernel(): Promise<RvfKernelData | null>;
     embedEbpf(programType: number, attachType: number, maxDimension: number, bytecode: Uint8Array, btf?: Uint8Array): Promise<number>;
@@ -98,6 +102,7 @@ export declare class NodeBackend implements RvfBackend {
      * failure is surfaced rather than swallowed.
      */
     private saveMappings;
+    private cleanupFailedChild;
     /**
      * Load the string↔label mapping from the sidecar JSON file if it exists.
      *
@@ -141,6 +146,8 @@ export declare class WasmBackend implements RvfBackend {
     parentId(): Promise<string>;
     lineageDepth(): Promise<number>;
     derive(_childPath: string, _options?: RvfOptions): Promise<RvfBackend>;
+    branch(_childPath: string): Promise<RvfBackend>;
+    freeze(): Promise<number>;
     embedKernel(): Promise<number>;
     extractKernel(): Promise<RvfKernelData | null>;
     embedEbpf(): Promise<number>;

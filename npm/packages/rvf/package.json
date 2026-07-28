@@ -1,6 +1,6 @@
 {
   "name": "@ruvector/rvf",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "RuVector Format — unified TypeScript SDK for vector intelligence",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -21,6 +21,7 @@
     "test": "jest",
     "smoke": "node scripts/smoke-query-create.mjs",
     "smoke:idmap": "node scripts/smoke-idmap-durability.mjs",
+    "smoke:cow": "node scripts/smoke-cow-durability.mjs",
     "bench": "tsx bench/index.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -35,7 +36,7 @@
   "license": "MIT",
   "repository": "https://github.com/ruvnet/ruvector",
   "dependencies": {
-    "@ruvector/rvf-node": "^0.1.7"
+    "@ruvector/rvf-node": "^0.2.1"
   },
   "optionalDependencies": {
     "@ruvector/rvf-wasm": "^0.1.7",

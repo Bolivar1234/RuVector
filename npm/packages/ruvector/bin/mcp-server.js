@@ -1423,7 +1423,7 @@ const TOOLS = [
   },
   {
     name: 'rvf_derive',
-    description: 'Derive a child RVF store from a parent using copy-on-write branching',
+    description: 'Derive a lineage child RVF store (does not inherit parent query results)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1431,6 +1431,29 @@ const TOOLS = [
         child_path: { type: 'string', description: 'Path for the new child .rvf store' }
       },
       required: ['parent_path', 'child_path']
+    }
+  },
+  {
+    name: 'rvf_branch',
+    description: 'Create a durable copy-on-write branch that inherits parent query results',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        parent_path: { type: 'string', description: 'Path to a frozen parent .rvf store' },
+        child_path: { type: 'string', description: 'Path for the new child .rvf store' }
+      },
+      required: ['parent_path', 'child_path']
+    }
+  },
+  {
+    name: 'rvf_freeze',
+    description: 'Freeze an RVF generation before creating copy-on-write branches',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the .rvf store to freeze' }
+      },
+      required: ['path']
     }
   },
   {
@@ -3426,16 +3449,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'rvf_derive': {
+        let store;
+        let child;
         try {
           const safeParent = validateRvfPath(args.parent_path);
           const safeChild = validateRvfPath(args.child_path);
           const { openRvfStore, rvfDerive, rvfClose } = require('../dist/core/rvf-wrapper.js');
-          const store = await openRvfStore(safeParent);
-          await rvfDerive(store, safeChild);
-          await rvfClose(store);
+          store = await openRvfStore(safeParent);
+          child = await rvfDerive(store, safeChild);
           return { content: [{ type: 'text', text: JSON.stringify({ success: true, parent: safeParent, child: safeChild }, null, 2) }] };
         } catch (e) {
           return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: e.message }, null, 2) }], isError: true };
+        } finally {
+          const { rvfClose } = require('../dist/core/rvf-wrapper.js');
+          await Promise.allSettled([child && rvfClose(child), store && rvfClose(store)]);
+        }
+      }
+
+      case 'rvf_branch': {
+        let parent;
+        let child;
+        try {
+          const safeParent = validateRvfPath(args.parent_path);
+          const safeChild = validateRvfPath(args.child_path);
+          const { openRvfStore, rvfBranch } = require('../dist/core/rvf-wrapper.js');
+          parent = await openRvfStore(safeParent);
+          child = await rvfBranch(parent, safeChild);
+          return { content: [{ type: 'text', text: JSON.stringify({
+            success: true,
+            parent: safeParent,
+            child: safeChild,
+            durable: true
+          }, null, 2) }] };
+        } catch (e) {
+          return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: e.message }, null, 2) }], isError: true };
+        } finally {
+          const { rvfClose } = require('../dist/core/rvf-wrapper.js');
+          await Promise.allSettled([child && rvfClose(child), parent && rvfClose(parent)]);
+        }
+      }
+
+      case 'rvf_freeze': {
+        let store;
+        try {
+          const safePath = validateRvfPath(args.path);
+          const { openRvfStore, rvfFreeze } = require('../dist/core/rvf-wrapper.js');
+          store = await openRvfStore(safePath);
+          const epoch = await rvfFreeze(store);
+          return { content: [{ type: 'text', text: JSON.stringify({
+            success: true,
+            path: safePath,
+            epoch
+          }, null, 2) }] };
+        } catch (e) {
+          return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: e.message }, null, 2) }], isError: true };
+        } finally {
+          if (store) {
+            const { rvfClose } = require('../dist/core/rvf-wrapper.js');
+            await Promise.allSettled([rvfClose(store)]);
+          }
         }
       }
 

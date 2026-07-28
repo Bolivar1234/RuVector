@@ -6,14 +6,16 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use rvf_types::cow_map::{CowMapHeader, MapFormat, COWMAP_MAGIC};
 use rvf_types::dashboard::{DashboardHeader, DASHBOARD_MAGIC, DASHBOARD_MAX_SIZE};
 use rvf_types::ebpf::{EbpfHeader, EBPF_MAGIC};
 use rvf_types::kernel::{KernelHeader, KERNEL_MAGIC};
 use rvf_types::kernel_binding::KernelBinding;
+use rvf_types::membership::MembershipHeader;
 use rvf_types::wasm_bootstrap::{WasmHeader, WasmRole, WASM_MAGIC};
 use rvf_types::{
     DomainProfile, ErrorCode, FileIdentity, RvfError, SegmentType, SEGMENT_HEADER_SIZE,
@@ -21,6 +23,7 @@ use rvf_types::{
 };
 
 use crate::cow::{CowEngine, CowStats};
+use crate::cow_map::CowMap;
 use crate::deletion::DeletionBitmap;
 use crate::filter::{self, metadata_value_to_filter, FilterExpr, FilterValue, MetadataStore};
 use crate::index_path::{
@@ -37,6 +40,44 @@ use crate::write_path::SegmentWriter;
 /// Helper to convert any error into an RvfError with the given code.
 fn err(code: ErrorCode) -> RvfError {
     RvfError::Code(code)
+}
+
+const COW_STATE_FIXED_SIZE: usize = 64 + 4 + 1 + 4 + 4 + 4;
+const MAX_COW_LINEAGE_DEPTH: u32 = 1024;
+
+fn relative_parent_reference(child_path: &Path, parent_path: &Path) -> Result<PathBuf, RvfError> {
+    let child_dir = child_path
+        .parent()
+        .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+    let child_dir = if child_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        child_dir
+    };
+    let child_dir = fs::canonicalize(child_dir).map_err(|_| err(ErrorCode::ParentNotFound))?;
+    let parent = fs::canonicalize(parent_path).map_err(|_| err(ErrorCode::ParentNotFound))?;
+    let base_parts: Vec<Component<'_>> = child_dir.components().collect();
+    let target_parts: Vec<Component<'_>> = parent.components().collect();
+    let common = base_parts
+        .iter()
+        .zip(&target_parts)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common == 0 {
+        return Err(err(ErrorCode::ParentChainBroken));
+    }
+
+    let mut relative = PathBuf::new();
+    for _ in common..base_parts.len() {
+        relative.push("..");
+    }
+    for component in &target_parts[common..] {
+        relative.push(component.as_os_str());
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(err(ErrorCode::LineageCyclic));
+    }
+    Ok(relative)
 }
 
 /// Witness type discriminators matching rvf-crypto's WitnessType.
@@ -222,13 +263,25 @@ impl RvfStore {
 
     /// Open an existing RVF store for read-only access (no lock required).
     pub fn open_readonly(path: &Path) -> Result<Self, RvfError> {
+        let mut ancestry = HashSet::new();
+        Self::open_readonly_with_ancestry(path, &mut ancestry)
+    }
+
+    fn open_readonly_with_ancestry(
+        path: &Path,
+        ancestry: &mut HashSet<PathBuf>,
+    ) -> Result<Self, RvfError> {
         if !path.exists() {
             return Err(err(ErrorCode::ManifestNotFound));
+        }
+        let canonical_path = fs::canonicalize(path).map_err(|_| err(ErrorCode::InvalidManifest))?;
+        if !ancestry.insert(canonical_path.clone()) {
+            return Err(err(ErrorCode::LineageCyclic));
         }
 
         let file = OpenOptions::new()
             .read(true)
-            .open(path)
+            .open(&canonical_path)
             .map_err(|_| err(ErrorCode::InvalidManifest))?;
 
         let domain_profile = path
@@ -243,7 +296,7 @@ impl RvfStore {
         };
 
         let mut store = Self {
-            path: path.to_path_buf(),
+            path: canonical_path.clone(),
             options: opts,
             file,
             seg_writer: None,
@@ -267,7 +320,9 @@ impl RvfStore {
             parent_store: Mutex::new(None),
         };
 
-        store.boot()?;
+        let boot_result = store.boot_with_ancestry(ancestry);
+        ancestry.remove(&canonical_path);
+        boot_result?;
         Ok(store)
     }
 
@@ -1171,6 +1226,9 @@ impl RvfStore {
         // them without an extra deletion_bitmap entry.
         if let Some(ref mut mf) = self.membership_filter {
             for &id in ids {
+                if self.vectors.get(id).is_none() && mf.contains(id) {
+                    deleted += 1;
+                }
                 mf.remove(id);
             }
         }
@@ -2200,7 +2258,12 @@ impl RvfStore {
         } else {
             64
         };
-        let cluster_size = vectors_per_cluster * bytes_per_vec;
+        let cluster_size = vectors_per_cluster
+            .checked_mul(bytes_per_vec)
+            .ok_or_else(|| err(ErrorCode::CowMapCorrupt))?
+            .max(4096)
+            .checked_next_power_of_two()
+            .ok_or_else(|| err(ErrorCode::CowMapCorrupt))?;
         let total_vecs = self.vectors.len() as u64;
         let cluster_count = if vectors_per_cluster > 0 {
             total_vecs.div_ceil(vectors_per_cluster as u64) as u32
@@ -2231,6 +2294,10 @@ impl RvfStore {
             }
         }
         child.membership_filter = Some(filter);
+        // `derive` writes an initial lineage-only manifest. Commit a second
+        // manifest after the COW state is initialized so a returned branch is
+        // durable even if the caller immediately closes it.
+        child.write_manifest()?;
 
         Ok(child)
     }
@@ -2245,6 +2312,7 @@ impl RvfStore {
             engine.freeze(self.epoch)?;
         }
 
+        self.write_manifest()?;
         // Set read_only to prevent further mutations
         self.read_only = true;
         Ok(())
@@ -2454,6 +2522,12 @@ impl RvfStore {
     }
 
     fn boot(&mut self) -> Result<(), RvfError> {
+        let own_path = fs::canonicalize(&self.path).map_err(|_| err(ErrorCode::InvalidManifest))?;
+        let mut ancestry = HashSet::from([own_path]);
+        self.boot_with_ancestry(&mut ancestry)
+    }
+
+    fn boot_with_ancestry(&mut self, ancestry: &mut HashSet<PathBuf>) -> Result<(), RvfError> {
         let manifest = {
             let mut reader = BufReader::new(&self.file);
             read_path::find_latest_manifest(&mut reader)
@@ -2521,6 +2595,8 @@ impl RvfStore {
             self.file_identity = fi;
         }
 
+        self.restore_cow_state(ancestry)?;
+
         // Load the most recently persisted HNSW index, if any. A stale or
         // corrupt INDEX_SEG is ignored; the index is then rebuilt from
         // vectors on the first eligible query.
@@ -2557,7 +2633,262 @@ impl RvfStore {
         Ok(())
     }
 
+    fn restore_cow_state(&mut self, ancestry: &mut HashSet<PathBuf>) -> Result<(), RvfError> {
+        let cow_entry = self
+            .segment_dir
+            .iter()
+            .rev()
+            .find(|&&(_, _, _, segment_type)| segment_type == SegmentType::CowMap as u8)
+            .copied();
+        let membership_entry = self
+            .segment_dir
+            .iter()
+            .rev()
+            .find(|&&(_, _, _, segment_type)| segment_type == SegmentType::Membership as u8)
+            .copied();
+
+        let (cow_entry, membership_entry) = match (cow_entry, membership_entry) {
+            (None, None) => return Ok(()),
+            (Some(cow), Some(membership)) => (cow, membership),
+            _ => return Err(err(ErrorCode::CowMapCorrupt)),
+        };
+
+        let cow_payload = {
+            let mut reader = BufReader::new(&self.file);
+            read_path::read_segment_payload(&mut reader, cow_entry.1)
+                .map_err(|_| err(ErrorCode::CowMapCorrupt))?
+                .1
+        };
+        if cow_payload.len() < COW_STATE_FIXED_SIZE {
+            return Err(err(ErrorCode::CowMapCorrupt));
+        }
+
+        let mut header_bytes = [0u8; 64];
+        header_bytes.copy_from_slice(&cow_payload[..64]);
+        let header =
+            CowMapHeader::from_bytes(&header_bytes).map_err(|_| err(ErrorCode::CowMapCorrupt))?;
+        if header.version != 1 {
+            return Err(err(ErrorCode::CowMapCorrupt));
+        }
+
+        let bytes_per_vector =
+            u32::from_le_bytes(cow_payload[64..68].try_into().expect("fixed slice"));
+        let frozen = match cow_payload[68] {
+            0 => false,
+            1 => true,
+            _ => return Err(err(ErrorCode::CowMapCorrupt)),
+        };
+        let snapshot_epoch =
+            u32::from_le_bytes(cow_payload[69..73].try_into().expect("fixed slice"));
+        let parent_len =
+            u32::from_le_bytes(cow_payload[73..77].try_into().expect("fixed slice")) as usize;
+        let map_len =
+            u32::from_le_bytes(cow_payload[77..81].try_into().expect("fixed slice")) as usize;
+        let expected_len = COW_STATE_FIXED_SIZE
+            .checked_add(parent_len)
+            .and_then(|length| length.checked_add(map_len))
+            .ok_or_else(|| err(ErrorCode::CowMapCorrupt))?;
+        if expected_len != cow_payload.len() || parent_len == 0 {
+            return Err(err(ErrorCode::CowMapCorrupt));
+        }
+
+        let parent_ref = std::str::from_utf8(
+            &cow_payload[COW_STATE_FIXED_SIZE..COW_STATE_FIXED_SIZE + parent_len],
+        )
+        .map_err(|_| err(ErrorCode::CowMapCorrupt))?;
+        let map_bytes = &cow_payload[COW_STATE_FIXED_SIZE + parent_len..expected_len];
+        let map_format =
+            MapFormat::try_from(header.map_format).map_err(|_| err(ErrorCode::CowMapCorrupt))?;
+        let cow_map = CowMap::deserialize(map_bytes, map_format)
+            .map_err(|_| err(ErrorCode::CowMapCorrupt))?;
+
+        let unresolved_parent = PathBuf::from(parent_ref);
+        let parent_path = if unresolved_parent.is_absolute() {
+            unresolved_parent
+        } else {
+            self.path
+                .parent()
+                .ok_or_else(|| err(ErrorCode::ParentChainBroken))?
+                .join(unresolved_parent)
+        };
+        let parent_path =
+            fs::canonicalize(parent_path).map_err(|_| err(ErrorCode::ParentNotFound))?;
+        let own_path = fs::canonicalize(&self.path).map_err(|_| err(ErrorCode::InvalidManifest))?;
+        if parent_path == own_path {
+            return Err(err(ErrorCode::LineageCyclic));
+        }
+
+        if self.file_identity.lineage_depth == 0
+            || self.file_identity.lineage_depth > MAX_COW_LINEAGE_DEPTH
+            || ancestry.len() >= MAX_COW_LINEAGE_DEPTH as usize
+        {
+            return Err(err(ErrorCode::LineageBroken));
+        }
+        let parent = RvfStore::open_readonly_with_ancestry(&parent_path, ancestry).map_err(
+            |open_error| match open_error {
+                RvfError::Code(ErrorCode::LineageCyclic) => open_error,
+                _ => err(ErrorCode::ParentChainBroken),
+            },
+        )?;
+        if parent.file_identity.lineage_depth.checked_add(1)
+            != Some(self.file_identity.lineage_depth)
+        {
+            return Err(err(ErrorCode::LineageBroken));
+        }
+        if header.magic != COWMAP_MAGIC
+            || header.base_file_id != parent.file_identity.file_id
+            || header.base_file_id != self.file_identity.parent_id
+        {
+            return Err(err(ErrorCode::LineageBroken));
+        }
+        let actual_parent_hash = parent.compute_own_manifest_hash()?;
+        if header.base_file_hash != actual_parent_hash
+            || header.base_file_hash != self.file_identity.parent_hash
+        {
+            return Err(err(ErrorCode::ParentHashMismatch));
+        }
+        let expected_bytes_per_vector = u32::from(self.options.dimension) * 4;
+        let minimum_cluster_size = header
+            .vectors_per_cluster
+            .checked_mul(bytes_per_vector)
+            .ok_or_else(|| err(ErrorCode::CowMapCorrupt))?;
+        if bytes_per_vector != expected_bytes_per_vector
+            || header.vectors_per_cluster == 0
+            || header.cluster_size_bytes < minimum_cluster_size
+        {
+            return Err(err(ErrorCode::CowMapCorrupt));
+        }
+
+        let membership_payload = {
+            let mut reader = BufReader::new(&self.file);
+            read_path::read_segment_payload(&mut reader, membership_entry.1)
+                .map_err(|_| err(ErrorCode::MembershipInvalid))?
+                .1
+        };
+        if membership_payload.len() < 96 {
+            return Err(err(ErrorCode::MembershipInvalid));
+        }
+        let mut membership_header_bytes = [0u8; 96];
+        membership_header_bytes.copy_from_slice(&membership_payload[..96]);
+        let membership_header = MembershipHeader::from_bytes(&membership_header_bytes)
+            .map_err(|_| err(ErrorCode::MembershipInvalid))?;
+        let bitmap_start = usize::try_from(membership_header.filter_offset)
+            .map_err(|_| err(ErrorCode::MembershipInvalid))?;
+        let bitmap_end = bitmap_start
+            .checked_add(membership_header.filter_size as usize)
+            .ok_or_else(|| err(ErrorCode::MembershipInvalid))?;
+        if bitmap_start != 96 || bitmap_end != membership_payload.len() {
+            return Err(err(ErrorCode::MembershipInvalid));
+        }
+        let bitmap = &membership_payload[bitmap_start..bitmap_end];
+        if simple_shake256_256(bitmap) != membership_header.filter_hash {
+            return Err(err(ErrorCode::MembershipInvalid));
+        }
+        let membership_filter = MembershipFilter::deserialize(bitmap, &membership_header)
+            .map_err(|_| err(ErrorCode::MembershipInvalid))?;
+        if membership_filter.member_count() != membership_header.member_count {
+            return Err(err(ErrorCode::MembershipInvalid));
+        }
+
+        self.cow_engine = Some(CowEngine::from_persisted(
+            cow_map,
+            header.cluster_size_bytes,
+            header.vectors_per_cluster,
+            bytes_per_vector,
+            frozen,
+            snapshot_epoch,
+        )?);
+        self.membership_filter = Some(membership_filter);
+        self.parent_path = Some(parent_path);
+        Ok(())
+    }
+
+    fn write_cow_state_segments(&mut self) -> Result<(), RvfError> {
+        let engine = self
+            .cow_engine
+            .as_ref()
+            .ok_or_else(|| err(ErrorCode::CowMapCorrupt))?;
+        let membership = self
+            .membership_filter
+            .as_ref()
+            .ok_or_else(|| err(ErrorCode::MembershipInvalid))?;
+        let parent_path = self
+            .parent_path
+            .as_ref()
+            .ok_or_else(|| err(ErrorCode::ParentChainBroken))?;
+        let relative_parent = relative_parent_reference(&self.path, parent_path)?;
+        let parent_bytes = relative_parent
+            .to_str()
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?
+            .as_bytes();
+        let parent_len =
+            u32::try_from(parent_bytes.len()).map_err(|_| err(ErrorCode::InvalidManifest))?;
+        let map_bytes = engine.cow_map().serialize();
+        let map_len = u32::try_from(map_bytes.len()).map_err(|_| err(ErrorCode::CowMapCorrupt))?;
+        let stats = engine.stats();
+        let header = CowMapHeader {
+            magic: COWMAP_MAGIC,
+            version: 1,
+            map_format: engine.cow_map().format() as u8,
+            compression_policy: 0,
+            cluster_size_bytes: stats.cluster_size,
+            vectors_per_cluster: stats.vectors_per_cluster,
+            base_file_id: self.file_identity.parent_id,
+            base_file_hash: self.file_identity.parent_hash,
+        };
+        let mut cow_payload =
+            Vec::with_capacity(COW_STATE_FIXED_SIZE + parent_bytes.len() + map_bytes.len());
+        cow_payload.extend_from_slice(&header.to_bytes());
+        cow_payload.extend_from_slice(&engine.bytes_per_vector().to_le_bytes());
+        cow_payload.push(u8::from(stats.frozen));
+        cow_payload.extend_from_slice(&stats.snapshot_epoch.to_le_bytes());
+        cow_payload.extend_from_slice(&parent_len.to_le_bytes());
+        cow_payload.extend_from_slice(&map_len.to_le_bytes());
+        cow_payload.extend_from_slice(parent_bytes);
+        cow_payload.extend_from_slice(&map_bytes);
+
+        let membership_header = membership.to_header();
+        let membership_bitmap = membership.serialize();
+        let mut membership_payload = Vec::with_capacity(96 + membership_bitmap.len());
+        membership_payload.extend_from_slice(&membership_header.to_bytes());
+        membership_payload.extend_from_slice(&membership_bitmap);
+
+        let writer = self
+            .seg_writer
+            .as_mut()
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+        let mut buf_writer = BufWriter::new(&self.file);
+        buf_writer
+            .seek(SeekFrom::End(0))
+            .map_err(|_| err(ErrorCode::FsyncFailed))?;
+        let (cow_id, cow_offset) = writer
+            .write_cow_map_seg(&mut buf_writer, &cow_payload)
+            .map_err(|_| err(ErrorCode::FsyncFailed))?;
+        let (membership_id, membership_offset) = writer
+            .write_membership_seg(&mut buf_writer, &membership_payload)
+            .map_err(|_| err(ErrorCode::FsyncFailed))?;
+        buf_writer
+            .flush()
+            .map_err(|_| err(ErrorCode::FsyncFailed))?;
+        self.segment_dir.push((
+            cow_id,
+            cow_offset,
+            cow_payload.len() as u64,
+            SegmentType::CowMap as u8,
+        ));
+        self.segment_dir.push((
+            membership_id,
+            membership_offset,
+            membership_payload.len() as u64,
+            SegmentType::Membership as u8,
+        ));
+        Ok(())
+    }
+
     fn write_manifest(&mut self) -> Result<(), RvfError> {
+        if self.cow_engine.is_some() {
+            self.write_cow_state_segments()?;
+        }
         let writer = self
             .seg_writer
             .as_mut()

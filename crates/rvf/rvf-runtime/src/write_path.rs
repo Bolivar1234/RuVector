@@ -134,6 +134,28 @@ impl SegmentWriter {
         Ok((seg_id, offset))
     }
 
+    /// Write persisted copy-on-write cluster-map state.
+    pub(crate) fn write_cow_map_seg<W: Write + Seek>(
+        &mut self,
+        writer: &mut W,
+        payload: &[u8],
+    ) -> io::Result<(u64, u64)> {
+        let seg_id = self.alloc_seg_id();
+        let offset = self.write_segment(writer, SegmentType::CowMap as u8, seg_id, payload)?;
+        Ok((seg_id, offset))
+    }
+
+    /// Write persisted branch membership state.
+    pub(crate) fn write_membership_seg<W: Write + Seek>(
+        &mut self,
+        writer: &mut W,
+        payload: &[u8],
+    ) -> io::Result<(u64, u64)> {
+        let seg_id = self.alloc_seg_id();
+        let offset = self.write_segment(writer, SegmentType::Membership as u8, seg_id, payload)?;
+        Ok((seg_id, offset))
+    }
+
     /// Write a minimal MANIFEST_SEG recording current state.
     ///
     /// This is a simplified manifest that stores:

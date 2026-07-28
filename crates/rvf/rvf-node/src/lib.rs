@@ -1083,6 +1083,8 @@ fn segment_type_name(seg_type: u8) -> String {
         0x0D => "meta_idx".to_string(),
         0x0E => "kernel".to_string(),
         0x0F => "ebpf".to_string(),
+        0x20 => "cow_map".to_string(),
+        0x22 => "membership".to_string(),
         other => format!("unknown(0x{:02X})", other),
     }
 }

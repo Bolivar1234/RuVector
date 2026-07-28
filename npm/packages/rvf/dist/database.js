@@ -181,6 +181,23 @@ class RvfDatabase {
         const childBackend = await this.backend.derive(childPath, options);
         return RvfDatabase.fromBackend(childBackend);
     }
+    /**
+     * Create a durable copy-on-write branch that reads inherited vectors from
+     * this store and persists only child edits.
+     */
+    async branch(childPath) {
+        this.ensureOpen();
+        const childBackend = await this.backend.branch(childPath);
+        return RvfDatabase.fromBackend(childBackend);
+    }
+    /**
+     * Freeze this generation before branching. Returns the frozen manifest
+     * epoch; subsequent writes through this handle are rejected.
+     */
+    async freeze() {
+        this.ensureOpen();
+        return this.backend.freeze();
+    }
     // -----------------------------------------------------------------------
     // Kernel / eBPF
     // -----------------------------------------------------------------------

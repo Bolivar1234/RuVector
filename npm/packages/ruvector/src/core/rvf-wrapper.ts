@@ -158,6 +158,19 @@ export async function rvfDerive(
   return store.derive(childPath);
 }
 
+/** Create a durable, queryable copy-on-write branch. */
+export async function rvfBranch(
+  store: RvfStore,
+  childPath: string,
+): Promise<RvfStore> {
+  return store.branch(childPath);
+}
+
+/** Freeze the current generation before branching. */
+export async function rvfFreeze(store: RvfStore): Promise<number> {
+  return store.freeze();
+}
+
 /**
  * Close the store, releasing the writer lock and flushing data.
  */

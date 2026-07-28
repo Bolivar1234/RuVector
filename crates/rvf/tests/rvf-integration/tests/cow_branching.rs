@@ -499,3 +499,140 @@ fn branch_query_reads_through_to_parent() {
         "PASS: branch_query_reads_through_to_parent -- base={base_size} B, child={child_size} B"
     );
 }
+
+// ===========================================================================
+// TEST 10: branch_state_survives_reopen_and_relocation
+// ===========================================================================
+
+/// Persist the complete COW state, move the parent/child pair together, and
+/// verify inherited vectors, child edits, and tombstones after cold reopen.
+#[test]
+fn branch_state_survives_reopen_and_relocation() {
+    let dir = TempDir::new().unwrap();
+    let bundle = dir.path().join("bundle");
+    std::fs::create_dir(&bundle).unwrap();
+    let base_path = bundle.join("parent.rvf");
+    let child_path = bundle.join("child.rvf");
+    let dim: u16 = 4;
+    let parent_vectors = [
+        vec![1.0, 0.0, 0.0, 0.0],
+        vec![0.0, 1.0, 0.0, 0.0],
+        vec![0.0, 0.0, 1.0, 0.0],
+    ];
+
+    let mut parent = RvfStore::create(&base_path, make_options(dim)).unwrap();
+    parent
+        .ingest_batch(
+            &parent_vectors.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            &[0, 1, 2],
+            None,
+        )
+        .unwrap();
+    parent.freeze().unwrap();
+
+    let mut child = parent.branch(&child_path).unwrap();
+    let child_edit = vec![0.0, 0.0, 0.0, 1.0];
+    child
+        .ingest_batch(&[child_edit.as_slice()], &[3], None)
+        .unwrap();
+    let delete = child.delete(&[1]).unwrap();
+    assert_eq!(
+        delete.deleted, 1,
+        "deleting an inherited vector must report it as deleted"
+    );
+    child.close().unwrap();
+    parent.close().unwrap();
+
+    let relocated = dir.path().join("relocated");
+    std::fs::rename(&bundle, &relocated).unwrap();
+    let relocated_child = relocated.join("child.rvf");
+    let reopened = RvfStore::open_readonly(&relocated_child).unwrap();
+    assert!(reopened.is_cow_child());
+    assert_eq!(
+        reopened.parent_path(),
+        Some(relocated.join("parent.rvf").as_path())
+    );
+
+    let hits = reopened
+        .query(&parent_vectors[0], 4, &QueryOptions::default())
+        .unwrap();
+    assert_eq!(hits[0].id, 0, "inherited parent vector must survive reopen");
+    let hits = reopened
+        .query(&child_edit, 4, &QueryOptions::default())
+        .unwrap();
+    assert_eq!(hits[0].id, 3, "child edit must survive reopen");
+    let hits = reopened
+        .query(&parent_vectors[1], 4, &QueryOptions::default())
+        .unwrap();
+    assert!(
+        hits.iter().all(|hit| hit.id != 1),
+        "child tombstone must hide inherited vector after reopen"
+    );
+    reopened.close().unwrap();
+}
+
+// ===========================================================================
+// TEST 11: missing_parent_fails_closed
+// ===========================================================================
+
+#[test]
+fn missing_parent_fails_closed() {
+    let dir = TempDir::new().unwrap();
+    let parent_path = dir.path().join("parent.rvf");
+    let child_path = dir.path().join("child.rvf");
+    let missing_path = dir.path().join("parent.missing");
+
+    let mut parent = RvfStore::create(&parent_path, make_options(4)).unwrap();
+    let vector = vec![1.0, 0.0, 0.0, 0.0];
+    parent
+        .ingest_batch(&[vector.as_slice()], &[0], None)
+        .unwrap();
+    parent.freeze().unwrap();
+    let child = parent.branch(&child_path).unwrap();
+    child.close().unwrap();
+    parent.close().unwrap();
+    std::fs::rename(&parent_path, &missing_path).unwrap();
+
+    assert!(
+        RvfStore::open_readonly(&child_path).is_err(),
+        "a COW child must not silently open without its validated parent"
+    );
+}
+
+// ===========================================================================
+// TEST 12: cyclic_parent_chain_fails_closed
+// ===========================================================================
+
+#[test]
+fn cyclic_parent_chain_fails_closed() {
+    let dir = TempDir::new().unwrap();
+    let root_path = dir.path().join("root.rvf");
+    let child_path = dir.path().join("child.rvf");
+    let grandchild_path = dir.path().join("grandchild.rvf");
+    let saved_root_path = dir.path().join("root.saved");
+
+    let mut root = RvfStore::create(&root_path, make_options(4)).unwrap();
+    let vector = vec![1.0, 0.0, 0.0, 0.0];
+    root.ingest_batch(&[vector.as_slice()], &[0], None).unwrap();
+    root.freeze().unwrap();
+
+    let mut child = root.branch(&child_path).unwrap();
+    child.freeze().unwrap();
+    let grandchild = child.branch(&grandchild_path).unwrap();
+    grandchild.close().unwrap();
+    child.close().unwrap();
+    root.close().unwrap();
+
+    // child -> root, while grandchild -> child. Put the grandchild bytes at
+    // root's path to form child -> grandchild -> child without modifying or
+    // re-checksumming either file.
+    std::fs::rename(&root_path, &saved_root_path).unwrap();
+    std::fs::rename(&grandchild_path, &root_path).unwrap();
+
+    assert!(matches!(
+        RvfStore::open_readonly(&child_path),
+        Err(rvf_types::RvfError::Code(
+            rvf_types::ErrorCode::LineageCyclic
+        ))
+    ));
+}
