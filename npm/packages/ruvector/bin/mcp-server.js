@@ -30,6 +30,12 @@ const { execFileSync } = require('child_process');
 const { buildToolPolicy, isToolAllowed, filterAllowedTools } = require('./mcp-policy.js');
 const MCP_TOOL_POLICY = buildToolPolicy(process.env);
 
+// MetaHarness packages are ESM-only; the compiled SDK adapter preserves native
+// import() and loads them only when one of these tools is called.
+function loadMetaHarnessSdk() {
+  return require('../dist/metaharness/index.js');
+}
+
 // ── Security Helpers ────────────────────────────────────────────────────────
 
 /**
@@ -598,6 +604,78 @@ const intel = new Intelligence();
 
 // Define tools
 const TOOLS = [
+  {
+    name: 'metaharness_status',
+    description: 'Load and report the pinned MetaHarness, Darwin, Flywheel, router, safety, and workspace capabilities',
+    inputSchema: { type: 'object', properties: {}, required: [] }
+  },
+  {
+    name: 'metaharness_route',
+    description: 'Choose the cheapest model predicted to meet a quality bar from labelled embedding examples',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        rows: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              embedding: { type: 'array', items: { type: 'number' } },
+              scores: { type: 'object', additionalProperties: { type: 'number' } }
+            },
+            required: ['embedding', 'scores']
+          }
+        },
+        prices: { type: 'object', additionalProperties: { type: 'number' } },
+        query_embedding: { type: 'array', items: { type: 'number' } },
+        quality_bar: { type: 'number', default: 0.9 },
+        k: { type: 'number' }
+      },
+      required: ['rows', 'prices', 'query_embedding']
+    }
+  },
+  {
+    name: 'metaharness_replay_verify',
+    description: 'Verify a Flywheel replay bundle, signed lineage, parent continuity, and optional pinned gate fingerprint',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bundle: { type: 'object' },
+        gate_fingerprint: { type: 'string' }
+      },
+      required: ['bundle']
+    }
+  },
+  {
+    name: 'metaharness_flywheel_gate',
+    description: 'Evaluate promotion evidence with the frozen conjunctive Flywheel gate',
+    inputSchema: {
+      type: 'object',
+      properties: { evidence: { type: 'object' } },
+      required: ['evidence']
+    }
+  },
+  {
+    name: 'metaharness_workspace_probe',
+    description: 'Score workspace receipts for drift, safety flags, critical triggers, and clean fraction',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        receipts: { type: 'array', items: { type: 'object' } },
+        options: { type: 'object' }
+      },
+      required: ['receipts']
+    }
+  },
+  {
+    name: 'metaharness_reward_hack_scan',
+    description: 'Scan an archived Darwin trajectory for gold reads, verification tampering, and sandbox escape',
+    inputSchema: {
+      type: 'object',
+      properties: { trajectory: { type: 'object' } },
+      required: ['trajectory']
+    }
+  },
   {
     name: 'hooks_stats',
     description: 'Get RuVector intelligence statistics including learned patterns, memories, and trajectories',
@@ -1816,6 +1894,82 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
+      case 'metaharness_status': {
+        const capabilities = await loadMetaHarnessSdk().getMetaHarnessCapabilities();
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: capabilities.every((capability) => capability.available),
+              capabilities
+            }, null, 2)
+          }]
+        };
+      }
+
+      case 'metaharness_route': {
+        const result = await loadMetaHarnessSdk().routeWithMetaHarness({
+          rows: args.rows,
+          prices: args.prices,
+          queryEmbedding: args.query_embedding,
+          qualityBar: args.quality_bar ?? 0.9,
+          ...(args.k === undefined ? {} : { k: args.k })
+        });
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ success: true, route: result }, null, 2)
+          }]
+        };
+      }
+
+      case 'metaharness_replay_verify': {
+        const result = await loadMetaHarnessSdk().verifyMetaHarnessReplay(
+          args.bundle,
+          args.gate_fingerprint ? { pinnedGateFingerprint: args.gate_fingerprint } : {}
+        );
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ success: result.pass, verification: result }, null, 2)
+          }],
+          isError: !result.pass
+        };
+      }
+
+      case 'metaharness_flywheel_gate': {
+        const result = await loadMetaHarnessSdk().evaluateMetaHarnessPromotion(args.evidence);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ success: true, decision: result }, null, 2)
+          }]
+        };
+      }
+
+      case 'metaharness_workspace_probe': {
+        const result = await loadMetaHarnessSdk().scoreMetaHarnessWorkspace(
+          args.receipts,
+          args.options || {}
+        );
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ success: true, score: result }, null, 2)
+          }]
+        };
+      }
+
+      case 'metaharness_reward_hack_scan': {
+        const result = await loadMetaHarnessSdk().scanMetaHarnessRewardHacks(args.trajectory);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ success: true, ...result }, null, 2)
+          }]
+        };
+      }
+
       case 'hooks_stats': {
         const stats = intel.stats();
         return {

@@ -13,9 +13,10 @@
 
 import { FastAgentDB, Episode, Trajectory, EpisodeSearchResult } from './agentdb-fast';
 import { SonaEngine, SonaConfig, LearnedPattern, SonaStats, isSonaAvailable } from './sona-wrapper';
-import { OnnxEmbedder, OnnxEmbedderConfig, isOnnxAvailable, initOnnxEmbedder, getEmbedderProvenance, embedBulk, shutdownParallelEmbedder } from './onnx-embedder';
+import { OnnxEmbedder, OnnxEmbedderConfig, isOnnxAvailable, initOnnxEmbedder, getEmbedderProvenance, getEmbeddingSpaceIdentity, getEmbeddingSpaceId, embedBulk, shutdownParallelEmbedder } from './onnx-embedder';
 import {
   EmbeddingProvenance,
+  EmbeddingSpaceIdentity,
   resolveEmbedderSelection,
   warnHashFallbackOnce,
 } from './embedding-provenance';
@@ -1212,6 +1213,11 @@ export class IntelligenceEngine {
     };
   }
 
+  /** Full ADR-274 identity for the active real embedder. */
+  getActiveEmbeddingSpaceIdentity(): EmbeddingSpaceIdentity | null {
+    return this.onnxReady ? getEmbeddingSpaceIdentity() : null;
+  }
+
   // =========================================================================
   // Persistence
   // =========================================================================
@@ -1225,6 +1231,8 @@ export class IntelligenceEngine {
       exported: new Date().toISOString(),
       config: this.config,
       embeddingProvenance: this.getActiveProvenance(),
+      embeddingSpaceIdentity: this.getActiveEmbeddingSpaceIdentity(),
+      embeddingSpaceId: this.onnxReady ? getEmbeddingSpaceId() : null,
 
       memories: Array.from(this.memories.values()),
 

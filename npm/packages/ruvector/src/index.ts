@@ -15,6 +15,7 @@ export * from './types';
 // Export core wrappers (safe interfaces with automatic type conversion)
 export * from './core';
 export * from './services';
+export * from './metaharness';
 
 let implementation: any;
 let implementationType: 'native' | 'rvf' | 'wasm' = 'wasm';

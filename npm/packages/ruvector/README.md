@@ -110,19 +110,25 @@ Precedence is **DENY > ALLOW/PROFILE > allow-all**. With no policy set, all tool
 are available (backward compatible). Inspect the active posture with
 `npx ruvector harness status --json` (see `mcp.accessControl`).
 
-### Harness Router (ADR-256)
+### MetaHarness, Darwin, and Flywheel
 
-`ruvector harness` surfaces the unified routing/agentic primitives ruvector ships —
-cost-optimal model routing (Tiny Dancer), semantic routing, hooks routing, the MCP
-server, witness-signed provenance, and SONA memory — in one place:
+`ruvector` ships the pinned MetaHarness capability set as direct dependencies.
+They load lazily, so ordinary vector operations do not pay their startup cost.
+Darwin candidate execution is not exposed through MCP and requires an explicit
+`--execute` flag in the CLI.
 
 ```bash
-npx ruvector harness status          # human-readable surface + availability
-npx ruvector harness status --json   # structured, for tooling/CI
+npx ruvector harness doctor --json
+npx ruvector harness route --examples examples.json --prices prices.json --query query.json
+npx ruvector harness flywheel verify replay-bundle.json
+npx ruvector harness flywheel gate promotion-evidence.json
+npx ruvector harness darwin evolution-config.json --execute
 ```
 
-Memory + learning loops use a stable namespace (default `ruvector`), overridable per
-deployment with `RUVECTOR_MEMORY_NAMESPACE` and reported under `memory.namespace`.
+The SDK exports capability discovery, routing, promotion and replay verification,
+Flywheel and Darwin runners, the algorithmic harness kernel, workspace scoring,
+reward-hack scanning, and credential guards. The read-only MCP profile exposes only
+non-executing inspection and evaluation tools.
 
 ### Brain AGI Commands
 
@@ -1976,7 +1982,7 @@ Performance: **<0.5ms latency**, **50K+ ops/sec**
 
 Performance: **10-50ms latency**, **~1K ops/sec**
 
-**Node.js 18+ required** for all platforms.
+**Node.js 20+ required** for all platforms.
 
 ## 🔧 Building from Source
 
@@ -2218,7 +2224,7 @@ npm install --include=optional ruvector
 # Verify platform
 npx ruvector info
 
-# Check Node.js version (18+ required)
+# Check Node.js version (20+ required)
 node --version
 ```
 
@@ -2234,7 +2240,7 @@ If you're using WASM fallback and need better performance:
 
 - **Alpine Linux**: Uses WASM fallback (musl not supported)
 - **Windows ARM**: Not yet supported, uses WASM fallback
-- **Node.js < 18**: Not supported, upgrade to Node.js 18+
+- **Node.js < 20**: Not supported, upgrade to Node.js 20+
 
 ## 📚 Documentation
 

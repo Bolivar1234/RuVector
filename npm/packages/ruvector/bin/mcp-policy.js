@@ -23,6 +23,12 @@
 const MCP_PROFILES = {
   readonly: [
     'ruvector',
+    'metaharness_status',
+    'metaharness_route',
+    'metaharness_replay_verify',
+    'metaharness_flywheel_gate',
+    'metaharness_workspace_probe',
+    'metaharness_reward_hack_scan',
     'hooks_stats',
     'hooks_recall',
     'hooks_route',

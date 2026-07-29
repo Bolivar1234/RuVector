@@ -10220,13 +10220,25 @@ const optimizeCmd = program.command('optimize')
   });
 
 // =============================================================================
-// Harness Commands - unified "harness router" surface (ADR-256)
-// Borrows metaharness concepts using primitives ruvector already ships:
-//   cost router (tiny-dancer) + semantic router + hooks routing + MCP + witness
-// Read-only status surface; degrades gracefully when optional deps are absent.
+// Harness Commands - pinned MetaHarness dependencies plus RuVector primitives.
+// Dependencies are loaded lazily so unrelated CLI commands keep their startup
+// profile. Darwin remains behind an explicit execution flag.
 // =============================================================================
 
-function buildHarnessSurface() {
+function loadMetaHarnessSdk() {
+  return require('../dist/metaharness/index.js');
+}
+
+function readHarnessJson(file, label) {
+  const resolved = path.resolve(file);
+  try {
+    return JSON.parse(fs.readFileSync(resolved, 'utf8'));
+  } catch (error) {
+    throw new Error(`Unable to read ${label} JSON at ${resolved}: ${error.message}`);
+  }
+}
+
+async function buildHarnessSurface() {
   const primitives = {};
 
   // Cost-optimal model router — Tiny Dancer FastGRNN (ADR-252)
@@ -10303,10 +10315,22 @@ function buildHarnessSurface() {
     namespace: (process.env.RUVECTOR_MEMORY_NAMESPACE || 'ruvector').trim() || 'ruvector',
   };
 
+  const capabilities = await loadMetaHarnessSdk().getMetaHarnessCapabilities();
+  for (const capability of capabilities) {
+    primitives[`metaharness.${capability.name}`] = {
+      name: capability.package,
+      role: capability.detail,
+      available: capability.available,
+      version: capability.version,
+      directDependency: true,
+    };
+  }
+
   const values = Object.values(primitives);
   return {
     adr: 'ADR-256',
-    decision: 'borrow metaharness concepts using primitives ruvector already ships',
+    adrs: ['ADR-256', 'ADR-275'],
+    decision: 'ship pinned MetaHarness, Darwin, Flywheel, routing, safety, and workspace capabilities as direct npm dependencies',
     primitives,
     summary: {
       available: values.filter((p) => p.available).length,
@@ -10317,10 +10341,10 @@ function buildHarnessSurface() {
 
 const harnessCmd = program
   .command('harness')
-  .description('Unified "harness router" surface — cost router + semantic router + hooks routing + MCP + witness (ADR-256)');
+  .description('MetaHarness, Darwin, Flywheel, routing, safety, and workspace capabilities');
 
-function printHarnessStatus(opts) {
-  const surface = buildHarnessSurface();
+async function printHarnessStatus(opts) {
+  const surface = await buildHarnessSurface();
   if (opts && opts.json) {
     console.log(JSON.stringify(surface, null, 2));
     return;
@@ -10343,12 +10367,80 @@ function printHarnessStatus(opts) {
 harnessCmd
   .command('status')
   .alias('info')
-  .description('Show the unified harness routing surface and primitive availability')
+  .description('Load and verify every pinned harness capability')
   .option('--json', 'Output as JSON')
-  .action((opts) => printHarnessStatus(opts));
+  .action(async (opts) => printHarnessStatus(opts));
+
+harnessCmd
+  .command('doctor')
+  .description('Alias for harness status with dependency load checks')
+  .option('--json', 'Output as JSON')
+  .action(async (opts) => printHarnessStatus(opts));
+
+harnessCmd
+  .command('route')
+  .description('Choose the cheapest model predicted to clear a quality bar')
+  .requiredOption('--examples <file>', 'JSON array of {embedding,scores} examples')
+  .requiredOption('--prices <file>', 'JSON object mapping model IDs to cost per million tokens')
+  .requiredOption('--query <file>', 'JSON query embedding')
+  .option('--quality-bar <number>', 'Minimum predicted quality', Number, 0.9)
+  .option('-k <number>', 'Nearest neighbours used for prediction', Number)
+  .action(async (opts) => {
+    const result = await loadMetaHarnessSdk().routeWithMetaHarness({
+      rows: readHarnessJson(opts.examples, 'routing examples'),
+      prices: readHarnessJson(opts.prices, 'routing prices'),
+      queryEmbedding: readHarnessJson(opts.query, 'query embedding'),
+      qualityBar: opts.qualityBar,
+      ...(opts.k === undefined ? {} : { k: opts.k }),
+    });
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+const flywheelCmd = harnessCmd
+  .command('flywheel')
+  .description('Inspect signed Flywheel evidence without executing candidate code');
+
+flywheelCmd
+  .command('verify <bundle>')
+  .description('Verify a replay bundle and its signed lineage')
+  .option('--gate-fingerprint <sha256>', 'Require a pinned promotion-gate fingerprint')
+  .action(async (bundle, opts) => {
+    const result = await loadMetaHarnessSdk().verifyMetaHarnessReplay(
+      readHarnessJson(bundle, 'replay bundle'),
+      opts.gateFingerprint ? { pinnedGateFingerprint: opts.gateFingerprint } : {},
+    );
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.pass) process.exitCode = 1;
+  });
+
+flywheelCmd
+  .command('gate <evidence>')
+  .description('Evaluate the frozen conjunctive promotion rule')
+  .action(async (evidence) => {
+    const result = await loadMetaHarnessSdk().evaluateMetaHarnessPromotion(
+      readHarnessJson(evidence, 'promotion evidence'),
+    );
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.promote) process.exitCode = 1;
+  });
+
+harnessCmd
+  .command('darwin <config>')
+  .description('Run Darwin evolution from a JSON config (requires explicit --execute)')
+  .option('--execute', 'Authorize candidate execution for this invocation')
+  .action(async (config, opts) => {
+    if (!opts.execute) {
+      throw new Error('Refusing to run Darwin without --execute');
+    }
+    const result = await loadMetaHarnessSdk().runMetaHarnessDarwin(
+      readHarnessJson(config, 'Darwin config'),
+      { execute: true },
+    );
+    console.log(JSON.stringify(result, null, 2));
+  });
 
 // Bare `ruvector harness` defaults to status
-harnessCmd.action(() => printHarnessStatus({}));
+harnessCmd.action(async () => printHarnessStatus({}));
 
 // Only drive the CLI when executed directly; when required (e.g. by tests)
 // expose the store-durability internals instead of parsing argv.
