@@ -10475,6 +10475,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruvector-sim-join"
+version = "2.3.0"
+
+[[package]]
 name = "ruvector-snapshot"
 version = "2.3.0"
 dependencies = [
