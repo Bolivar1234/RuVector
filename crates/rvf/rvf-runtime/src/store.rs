@@ -1346,9 +1346,7 @@ impl RvfStore {
     pub fn compact_if_needed(&mut self) -> Result<Option<CompactionResult>, RvfError> {
         match self.should_compact() {
             CompactionDecision::None => Ok(None),
-            CompactionDecision::Normal | CompactionDecision::Emergency => {
-                self.compact().map(Some)
-            }
+            CompactionDecision::Normal | CompactionDecision::Emergency => self.compact().map(Some),
         }
     }
 
