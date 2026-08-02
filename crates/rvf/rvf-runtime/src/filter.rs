@@ -115,6 +115,25 @@ impl MetadataStore {
         })
     }
 
+    /// Fields of one record in ascending `field_id` order, borrowed so callers
+    /// that only compare values do not clone the record.
+    pub(crate) fn fields(
+        &self,
+        vector_id: u64,
+    ) -> Option<&std::collections::BTreeMap<u16, MetadataValue>> {
+        self.entries.get(&vector_id)
+    }
+
+    /// Vector identifiers carrying a record, in ascending order.
+    pub(crate) fn ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.entries.keys().copied()
+    }
+
+    /// True when no vector carries a record.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub(crate) fn decoded_size(&self, vector_id: u64) -> usize {
         self.entries.get(&vector_id).map_or(0, |fields| {
             fields.iter().fold(0usize, |size, (_, value)| {

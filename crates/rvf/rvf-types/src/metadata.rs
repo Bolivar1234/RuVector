@@ -18,6 +18,14 @@ pub const MAX_META_RECORDS: usize = 16_777_216;
 pub const MAX_META_NAME_BYTES: usize = 4_096;
 pub const MAX_META_VALUE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Smallest number of encoded bytes each sequence element can occupy. Counts
+/// read from the payload are attacker-controlled, so these bound how many
+/// elements the remaining input could actually hold (see `Cursor::capacity_for`).
+const MIN_SCHEMA_ENTRY_BYTES: usize = 6;
+const MIN_FILE_METADATA_BYTES: usize = 3;
+const MIN_RECORD_BYTES: usize = 13;
+const MIN_FIELD_BYTES: usize = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MetadataType {
@@ -174,7 +182,8 @@ impl MetadataSegment {
         let schema_count = cursor.count(MAX_META_FIELDS)?;
         let file_count = cursor.count(MAX_META_FIELDS)?;
         let record_count = cursor.count(MAX_META_RECORDS)?;
-        let mut schema = Vec::with_capacity(schema_count);
+        let mut schema =
+            Vec::with_capacity(cursor.capacity_for(schema_count, MIN_SCHEMA_ENTRY_BYTES));
         for _ in 0..schema_count {
             let field_id = cursor.u16()?;
             let value_type = decode_type(cursor.u8()?)?;
@@ -191,20 +200,22 @@ impl MetadataSegment {
                 name,
             });
         }
-        let mut file_metadata = Vec::with_capacity(file_count);
+        let mut file_metadata =
+            Vec::with_capacity(cursor.capacity_for(file_count, MIN_FILE_METADATA_BYTES));
         for _ in 0..file_count {
             let key = cursor.string_u16(MAX_META_NAME_BYTES)?;
             let value = decode_value(&mut cursor)?;
             file_metadata.push(FileMetadataRecord { key, value });
         }
-        let mut records = Vec::with_capacity(record_count);
+        let mut records = Vec::with_capacity(cursor.capacity_for(record_count, MIN_RECORD_BYTES));
         for _ in 0..record_count {
             let vector_id = cursor.u64()?;
             let op = cursor.u8()?;
             let field_count = cursor.count(MAX_META_FIELDS)?;
             let operation = match op {
                 0 => {
-                    let mut fields = Vec::with_capacity(field_count);
+                    let mut fields =
+                        Vec::with_capacity(cursor.capacity_for(field_count, MIN_FIELD_BYTES));
                     for _ in 0..field_count {
                         fields.push((cursor.u16()?, decode_value(&mut cursor)?));
                     }
@@ -458,6 +469,16 @@ impl<'a> Cursor<'a> {
         }
         Ok(count)
     }
+    /// Preallocation size for a sequence whose length came from the payload.
+    ///
+    /// A declared count is attacker-controlled and capped only by a format
+    /// ceiling, so reserving it directly lets a tiny blob drive a huge
+    /// allocation. Each element consumes at least `min_element_bytes`, so the
+    /// unread remainder is a hard upper bound on how many can be present
+    /// (ADR-280 §9). An under-reservation only costs the decoder a regrowth.
+    fn capacity_for(&self, count: usize, min_element_bytes: usize) -> usize {
+        count.min(self.remaining() / min_element_bytes)
+    }
     fn bytes_u32(&mut self, max: usize) -> Result<&'a [u8], MetadataDecodeError> {
         let len = self.u32()? as usize;
         if len > max {
@@ -525,6 +546,51 @@ mod tests {
             segment
         );
     }
+    /// A header may claim counts near the format ceilings over a payload far
+    /// too small to hold them. Decoding must fail cleanly on the truncated
+    /// body without reserving capacity for the claimed counts.
+    #[test]
+    fn rejects_oversized_counts_without_preallocating() {
+        fn crafted(schema_count: u32, file_count: u32, record_count: u32) -> Vec<u8> {
+            let mut body = Vec::new();
+            body.extend_from_slice(META_MAGIC);
+            body.extend_from_slice(&META_VERSION.to_le_bytes());
+            body.extend_from_slice(&META_FLAG_FULL_SNAPSHOT.to_le_bytes());
+            body.extend_from_slice(&1u64.to_le_bytes());
+            body.extend_from_slice(&u64::MAX.to_le_bytes());
+            body.extend_from_slice(&schema_count.to_le_bytes());
+            body.extend_from_slice(&file_count.to_le_bytes());
+            body.extend_from_slice(&record_count.to_le_bytes());
+            let digest = crate::sha256::sha256(&body);
+            body.extend_from_slice(META_COMPLETE_MAGIC);
+            body.extend_from_slice(&digest);
+            body
+        }
+
+        // An 80-byte blob claiming the maximum record count. Reserving
+        // `MAX_META_RECORDS` records would allocate hundreds of MiB; the
+        // remaining zero bytes can hold none of them.
+        let blob = crafted(0, 0, MAX_META_RECORDS as u32);
+        assert_eq!(blob.len(), 80);
+        assert_eq!(
+            MetadataSegment::decode(&blob),
+            Err(MetadataDecodeError::Truncated)
+        );
+        assert_eq!(
+            MetadataSegment::decode(&crafted(MAX_META_FIELDS as u32, 0, 0)),
+            Err(MetadataDecodeError::Truncated)
+        );
+        assert_eq!(
+            MetadataSegment::decode(&crafted(0, MAX_META_FIELDS as u32, 0)),
+            Err(MetadataDecodeError::Truncated)
+        );
+        // A count past the ceiling is still a resource-limit rejection.
+        assert_eq!(
+            MetadataSegment::decode(&crafted(0, 0, MAX_META_RECORDS as u32 + 1)),
+            Err(MetadataDecodeError::ResourceLimit)
+        );
+    }
+
     #[test]
     fn rejects_non_monotonic_delta_and_non_finite_float() {
         let mut segment = MetadataSegment {

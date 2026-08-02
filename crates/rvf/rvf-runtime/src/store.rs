@@ -52,6 +52,12 @@ const MAX_COW_LINEAGE_DEPTH: u32 = 1024;
 /// Bound dense membership bitmaps so a sparse, attacker-controlled vector ID
 /// cannot turn branch creation into an unbounded allocation.
 const MAX_MEMBERSHIP_FILTER_BYTES: u64 = 64 * 1024 * 1024;
+/// Delta metadata generations written before the next full snapshot.
+///
+/// ADR-280 §5 caps replay at [`rvf_types::metadata::MAX_META_DELTAS`] deltas;
+/// materializing well inside that ceiling keeps a reopen bounded and leaves
+/// headroom for the torn-generation fallback in `restore_metadata`.
+const META_SNAPSHOT_INTERVAL: u64 = 32;
 
 enum IngestMetadata<'a> {
     None,
@@ -117,6 +123,9 @@ pub struct RvfStore {
     metadata: MetadataStore,
     file_metadata: BTreeMap<String, MetadataValue>,
     metadata_generation: u64,
+    /// Generation of the newest full metadata snapshot. `metadata_generation`
+    /// minus this is the current delta-chain length (ADR-280 §5).
+    metadata_snapshot_generation: u64,
     embedding_compatibility: EmbeddingCompatibility,
     metadata_filter_scanned_records: AtomicU64,
     metadata_filter_scanned_bytes: AtomicU64,
@@ -208,6 +217,7 @@ impl RvfStore {
             metadata: MetadataStore::new(),
             file_metadata: BTreeMap::new(),
             metadata_generation: 0,
+            metadata_snapshot_generation: 0,
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -269,6 +279,7 @@ impl RvfStore {
             metadata: MetadataStore::new(),
             file_metadata: BTreeMap::new(),
             metadata_generation: 0,
+            metadata_snapshot_generation: 0,
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -338,6 +349,7 @@ impl RvfStore {
             metadata: MetadataStore::new(),
             file_metadata: BTreeMap::new(),
             metadata_generation: 0,
+            metadata_snapshot_generation: 0,
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -446,7 +458,9 @@ impl RvfStore {
 
         let old_vectors = self.vectors.clone();
         let old_metadata = self.metadata.clone();
+        let old_file_metadata = self.file_metadata.clone();
         let old_generation = self.metadata_generation;
+        let old_snapshot_generation = self.metadata_snapshot_generation;
         let old_directory = self.segment_dir.clone();
         let old_epoch = self.epoch;
         let old_witness_hash = self.last_witness_hash;
@@ -521,9 +535,10 @@ impl RvfStore {
 
         if has_metadata {
             self.metadata = candidate_metadata;
-            if let Err(error) = self.write_metadata_snapshot() {
+            if let Err(error) = self.write_metadata_generation(&old_metadata, &old_file_metadata) {
                 self.metadata = old_metadata;
                 self.metadata_generation = old_generation;
+                self.metadata_snapshot_generation = old_snapshot_generation;
                 self.vectors = old_vectors;
                 self.segment_dir = old_directory;
                 *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -536,6 +551,7 @@ impl RvfStore {
             self.vectors = old_vectors;
             self.metadata = old_metadata;
             self.metadata_generation = old_generation;
+            self.metadata_snapshot_generation = old_snapshot_generation;
             self.segment_dir = old_directory;
             *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
             *self.rabitq.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -551,6 +567,7 @@ impl RvfStore {
                 self.vectors = old_vectors;
                 self.metadata = old_metadata;
                 self.metadata_generation = old_generation;
+                self.metadata_snapshot_generation = old_snapshot_generation;
                 self.segment_dir = old_directory;
                 self.epoch = old_epoch;
                 self.last_witness_hash = old_witness_hash;
@@ -564,6 +581,7 @@ impl RvfStore {
             self.vectors = old_vectors;
             self.metadata = old_metadata;
             self.metadata_generation = old_generation;
+            self.metadata_snapshot_generation = old_snapshot_generation;
             self.segment_dir = old_directory;
             self.epoch = old_epoch;
             self.last_witness_hash = old_witness_hash;
@@ -1418,12 +1436,24 @@ impl RvfStore {
             }
         }
         let old_metadata = self.metadata.clone();
+        let old_file_metadata = self.file_metadata.clone();
         let old_generation = self.metadata_generation;
+        let old_snapshot_generation = self.metadata_snapshot_generation;
         let old_directory_len = self.segment_dir.len();
         self.metadata.remove_ids(ids);
-        if let Err(error) = self.write_metadata_snapshot() {
+        // Data before pointer: the metadata payload must be durable before the
+        // manifest that publishes it (ADR-280 §4, steps 2-3).
+        let metadata_result = self
+            .write_metadata_generation(&old_metadata, &old_file_metadata)
+            .and_then(|()| {
+                self.file
+                    .sync_all()
+                    .map_err(|_| err(ErrorCode::FsyncFailed))
+            });
+        if let Err(error) = metadata_result {
             self.metadata = old_metadata;
             self.metadata_generation = old_generation;
+            self.metadata_snapshot_generation = old_snapshot_generation;
             self.segment_dir.truncate(old_directory_len);
             return Err(error);
         }
@@ -1545,6 +1575,11 @@ impl RvfStore {
         let temp_path = self.path.with_extension("rvf.compact.tmp");
         let mut new_segment_dir = Vec::new();
         let mut seg_writer = SegmentWriter::new(1);
+        let keeps_metadata = !self.metadata.is_empty() || !self.file_metadata.is_empty();
+        let compacted_generation = self
+            .metadata_generation
+            .checked_add(1)
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
         {
             let temp_file = OpenOptions::new()
                 .read(true)
@@ -1590,6 +1625,14 @@ impl RvfStore {
                 if *seg_type == SegmentType::Index as u8 {
                     continue;
                 }
+                // Drop META_SEGs: compaction removes vectors, so a preserved
+                // generation would reference identifiers the compacted file no
+                // longer holds. The complete live snapshot is rewritten below,
+                // which is also what reclaims superseded metadata history
+                // (ADR-280 §1).
+                if *seg_type == SegmentType::Meta as u8 {
+                    continue;
+                }
                 // Use checked arithmetic for bounds safety.
                 let total_bytes = match (*payload_len as usize).checked_add(SEGMENT_HEADER_SIZE) {
                     Some(t) => t,
@@ -1619,6 +1662,21 @@ impl RvfStore {
                 }
 
                 new_segment_dir.push((*seg_id, new_offset, *payload_len, *seg_type));
+            }
+
+            // Rewrite the live metadata as a single full snapshot, replacing
+            // every superseded generation dropped above.
+            if keeps_metadata {
+                let payload = self.encode_metadata_generation(compacted_generation, None)?;
+                let (seg_id, offset) = seg_writer
+                    .write_meta_seg(&mut temp_writer, &payload)
+                    .map_err(|_| err(ErrorCode::FsyncFailed))?;
+                new_segment_dir.push((
+                    seg_id,
+                    offset,
+                    payload.len() as u64,
+                    SegmentType::Meta as u8,
+                ));
             }
 
             self.epoch += 1;
@@ -1657,11 +1715,12 @@ impl RvfStore {
 
         fs::rename(&temp_path, &self.path).map_err(|_| err(ErrorCode::FsyncFailed))?;
 
-        // Sync parent directory to make rename durable
+        // Sync the parent directory so the rename itself is durable. A failure
+        // here leaves the rename possibly unpersisted, so it is reported rather
+        // than discarded (ADR-280 §4, step 7).
         if let Some(parent) = self.path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
+            let dir = std::fs::File::open(parent).map_err(|_| err(ErrorCode::FsyncFailed))?;
+            dir.sync_all().map_err(|_| err(ErrorCode::FsyncFailed))?;
         }
 
         self.file = OpenOptions::new()
@@ -1670,6 +1729,13 @@ impl RvfStore {
             .open(&self.path)
             .map_err(|_| err(ErrorCode::InvalidManifest))?;
 
+        if keeps_metadata {
+            self.metadata_generation = compacted_generation;
+            self.metadata_snapshot_generation = compacted_generation;
+        } else {
+            self.metadata_generation = 0;
+            self.metadata_snapshot_generation = 0;
+        }
         self.segment_dir = new_segment_dir;
         self.seg_writer = Some(seg_writer);
         self.last_compaction_time = now_secs();
@@ -2606,13 +2672,20 @@ impl RvfStore {
         {
             return Err(err(ErrorCode::ReadOnly));
         }
+        let old_metadata = self.metadata.clone();
         let old_file_metadata = self.file_metadata.clone();
         let old_generation = self.metadata_generation;
+        let old_snapshot_generation = self.metadata_snapshot_generation;
         let old_epoch = self.epoch;
         let old_directory_len = self.segment_dir.len();
         self.file_metadata.insert(key, value);
         let result = (|| {
-            self.write_metadata_snapshot()?;
+            self.write_metadata_generation(&old_metadata, &old_file_metadata)?;
+            // Data before pointer: the metadata payload must be durable before
+            // the manifest that publishes it (ADR-280 §4, steps 2-3).
+            self.file
+                .sync_all()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
             self.epoch = self
                 .epoch
                 .checked_add(1)
@@ -2622,6 +2695,7 @@ impl RvfStore {
         if result.is_err() {
             self.file_metadata = old_file_metadata;
             self.metadata_generation = old_generation;
+            self.metadata_snapshot_generation = old_snapshot_generation;
             self.epoch = old_epoch;
             self.segment_dir.truncate(old_directory_len);
         }
@@ -2831,7 +2905,11 @@ impl RvfStore {
             deletion_bitmap: DeletionBitmap::new(),
             metadata: self.metadata.clone(),
             file_metadata: self.file_metadata.clone(),
-            metadata_generation: self.metadata_generation,
+            // The child file carries its own `META_SEG` generation sequence and
+            // starts empty, so its first commit is a full snapshot rather than
+            // a delta against a base generation only the parent file holds.
+            metadata_generation: 0,
+            metadata_snapshot_generation: 0,
             embedding_compatibility: self.embedding_compatibility,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -3398,75 +3476,151 @@ impl RvfStore {
         Ok(())
     }
 
-    fn write_metadata_snapshot(&mut self) -> Result<(), RvfError> {
-        let generation = self
-            .metadata_generation
-            .checked_add(1)
-            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
-        let mut schema_by_id: BTreeMap<u16, MetadataType> = BTreeMap::new();
-        let mut nullable = HashSet::new();
-        for (_, fields) in self.metadata.records() {
-            for (field_id, value) in fields {
-                if matches!(value, MetadataValue::Null) {
-                    nullable.insert(field_id);
-                    continue;
-                }
-                let Some(value_type) = runtime_metadata_type(&value) else {
-                    continue;
-                };
-                if schema_by_id
-                    .insert(field_id, value_type)
-                    .is_some_and(|previous| previous != value_type)
-                {
-                    return Err(err(ErrorCode::InvalidManifest));
+    /// True when `vector_id` belongs to this store's committed vector state and
+    /// may therefore carry a metadata record (ADR-280 §4).
+    ///
+    /// Mirrors the acceptance rule in [`Self::build_ingest_metadata`]: a record
+    /// is valid for a locally held live vector, or for a parent vector a COW
+    /// child still exposes through its membership filter. A lineage child
+    /// created by [`Self::derive`] holds neither, so it persists no record it
+    /// cannot resolve on reopen.
+    fn metadata_id_is_committed(&self, vector_id: u64) -> bool {
+        if self.deletion_bitmap.is_deleted(vector_id) {
+            return false;
+        }
+        self.vectors.get(vector_id).is_some()
+            || self
+                .membership_filter
+                .as_ref()
+                .is_some_and(|membership| membership.contains(vector_id))
+    }
+
+    /// Encode the metadata generation `generation` describing the current
+    /// in-memory state relative to `base`.
+    ///
+    /// `base` is the state the previous generation committed. When it is
+    /// `None` the result is a full snapshot; otherwise it is a delta carrying
+    /// only the records and fields that changed, which is what keeps commit
+    /// cost proportional to the mutation rather than to the live snapshot
+    /// (ADR-280 §5, and the rejected "write a complete metadata snapshot on
+    /// every mutation" alternative).
+    fn encode_metadata_generation(
+        &self,
+        generation: u64,
+        base: Option<(&MetadataStore, &BTreeMap<String, MetadataValue>)>,
+    ) -> Result<Vec<u8>, RvfError> {
+        let (base_metadata, base_file_metadata) = match base {
+            Some((metadata, file_metadata)) => (Some(metadata), Some(file_metadata)),
+            None => (None, None),
+        };
+
+        let mut file_metadata: Vec<WireFileMetadata> = Vec::new();
+        for (key, value) in &self.file_metadata {
+            if base_file_metadata.is_some_and(|base| base.get(key) == Some(value)) {
+                continue;
+            }
+            file_metadata.push(WireFileMetadata {
+                key: key.clone(),
+                value: runtime_to_wire(value),
+            });
+        }
+        if let Some(base) = base_file_metadata {
+            for key in base.keys() {
+                if !self.file_metadata.contains_key(key) {
+                    file_metadata.push(WireFileMetadata {
+                        key: key.clone(),
+                        value: WireMetadataValue::DeleteField,
+                    });
                 }
             }
         }
-        // The legacy field-id API has no schema declaration. A null-only
-        // field is conservatively declared nullable UTF-8.
-        for &field_id in &nullable {
-            schema_by_id.entry(field_id).or_insert(MetadataType::String);
-        }
-        let schema = schema_by_id
-            .into_iter()
-            .map(|(field_id, value_type)| MetadataSchemaEntry {
-                field_id,
-                value_type,
-                nullable: nullable.contains(&field_id),
-                name: format!("field.{field_id}"),
-            })
-            .collect();
-        let file_metadata = self
-            .file_metadata
-            .iter()
-            .map(|(key, value)| WireFileMetadata {
-                key: key.clone(),
-                value: runtime_to_wire(value),
-            })
-            .collect();
-        let records = self
-            .metadata
-            .records()
-            .map(|(vector_id, fields)| WireMetadataRecord {
+        file_metadata.sort_by(|left, right| left.key.cmp(&right.key));
+
+        let mut records: Vec<WireMetadataRecord> = Vec::new();
+        for vector_id in self.metadata.ids() {
+            if !self.metadata_id_is_committed(vector_id) {
+                continue;
+            }
+            let Some(fields) = self.metadata.fields(vector_id) else {
+                continue;
+            };
+            let previous = base_metadata.and_then(|base| base.fields(vector_id));
+            let mut wire_fields: Vec<(u16, WireMetadataValue)> = Vec::new();
+            for (&field_id, value) in fields {
+                if previous.is_some_and(|previous| previous.get(&field_id) == Some(value)) {
+                    continue;
+                }
+                wire_fields.push((field_id, runtime_to_wire(value)));
+            }
+            if let Some(previous) = previous {
+                for &field_id in previous.keys() {
+                    if !fields.contains_key(&field_id) {
+                        wire_fields.push((field_id, WireMetadataValue::DeleteField));
+                    }
+                }
+            }
+            // An unchanged record is absent from a delta and inherited from the
+            // base; in a full snapshot every live record is written out.
+            if previous.is_some() && wire_fields.is_empty() {
+                continue;
+            }
+            wire_fields.sort_by_key(|&(field_id, _)| field_id);
+            records.push(WireMetadataRecord {
                 vector_id,
-                operation: WireMetadataRecordOp::Upsert(
-                    fields
-                        .into_iter()
-                        .map(|(field_id, value)| (field_id, runtime_to_wire(&value)))
-                        .collect(),
-                ),
-            })
-            .collect();
-        let payload = MetadataSegment {
+                operation: WireMetadataRecordOp::Upsert(wire_fields),
+            });
+        }
+        if let Some(base) = base_metadata {
+            for vector_id in base.ids() {
+                if self.metadata.fields(vector_id).is_none()
+                    || !self.metadata_id_is_committed(vector_id)
+                {
+                    records.push(WireMetadataRecord {
+                        vector_id,
+                        operation: WireMetadataRecordOp::DeleteRecord,
+                    });
+                }
+            }
+        }
+        records.sort_by_key(|record| record.vector_id);
+
+        let schema = build_metadata_schema(&records)?;
+        MetadataSegment {
             generation,
-            base_generation: None,
-            full_snapshot: true,
+            base_generation: base.is_some().then(|| generation.saturating_sub(1)),
+            full_snapshot: base.is_none(),
             schema,
             file_metadata,
             records,
         }
         .encode()
-        .map_err(|_| err(ErrorCode::InvalidManifest))?;
+        .map_err(|_| err(ErrorCode::InvalidManifest))
+    }
+
+    /// Append the next authoritative `META_SEG` generation.
+    ///
+    /// `base` is the metadata state the previous generation committed, which
+    /// every caller already holds because it snapshots it for rollback. A full
+    /// snapshot is written for the first generation and again before the delta
+    /// chain reaches the ADR-280 §5 replay ceiling, so reopening never replays
+    /// more than [`META_SNAPSHOT_INTERVAL`] deltas.
+    fn write_metadata_generation(
+        &mut self,
+        base: &MetadataStore,
+        base_file_metadata: &BTreeMap<String, MetadataValue>,
+    ) -> Result<(), RvfError> {
+        let generation = self
+            .metadata_generation
+            .checked_add(1)
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+        let write_full_snapshot = self.metadata_generation == 0
+            || self.metadata_snapshot_generation > self.metadata_generation
+            || self.metadata_generation - self.metadata_snapshot_generation
+                >= META_SNAPSHOT_INTERVAL;
+        let payload = self.encode_metadata_generation(
+            generation,
+            (!write_full_snapshot).then_some((base, base_file_metadata)),
+        )?;
 
         let writer = self
             .seg_writer
@@ -3490,67 +3644,104 @@ impl RvfStore {
             SegmentType::Meta as u8,
         ));
         self.metadata_generation = generation;
+        if write_full_snapshot {
+            self.metadata_snapshot_generation = generation;
+        }
         Ok(())
     }
 
+    /// Restore the authoritative metadata snapshot (ADR-280 §1, §5).
+    ///
+    /// Only the newest committed generation is authoritative; every older
+    /// generation it does not name as an ancestor is superseded history. The
+    /// scan therefore walks `META_SEG` entries newest-first and stops as soon
+    /// as the chain reaches a full snapshot, so open cost tracks the live
+    /// snapshot and its delta chain rather than the number of commits ever
+    /// made.
+    ///
+    /// Corruption is tolerated exactly where it cannot change the answer: a
+    /// torn newest generation (a crash between appending the payload and
+    /// publishing the manifest that names it) falls back to the previous one,
+    /// and an unreadable superseded generation is skipped. A generation the
+    /// authoritative chain actually needs is never skipped -- the chain either
+    /// resolves completely or the artifact reports an error.
     fn restore_metadata(&mut self) -> Result<(), RvfError> {
-        let mut segments = Vec::new();
+        let meta_offsets: Vec<u64> = self
+            .segment_dir
+            .iter()
+            .filter(|&&(_, _, _, segment_type)| segment_type == SegmentType::Meta as u8)
+            .map(|&(_, offset, _, _)| offset)
+            .collect();
+        if meta_offsets.is_empty() {
+            return Ok(());
+        }
+
         let mut decoded_bytes = 0usize;
-        for &(_, offset, _, segment_type) in &self.segment_dir {
-            if segment_type != SegmentType::Meta as u8 {
-                continue;
+        let mut chain: Vec<MetadataSegment> = Vec::new();
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut required_base: Option<u64> = None;
+        let mut complete = false;
+
+        for &offset in meta_offsets.iter().rev() {
+            if chain.len() >= rvf_types::metadata::MAX_META_DELTAS {
+                return Err(err(ErrorCode::MetadataReplayLimitExceeded));
             }
             let payload = {
                 let mut reader = BufReader::new(&self.file);
                 read_path::read_segment_payload(&mut reader, offset)
-                    .map_err(|_| err(ErrorCode::InvalidChecksum))?
-                    .1
+                    .ok()
+                    .map(|(_, payload)| payload)
             };
+            let Some(payload) = payload else { continue };
             decoded_bytes = decoded_bytes
                 .checked_add(payload.len())
                 .ok_or_else(|| err(ErrorCode::MetadataReplayLimitExceeded))?;
             if decoded_bytes > rvf_types::metadata::MAX_META_DECODED_BYTES {
                 return Err(err(ErrorCode::MetadataReplayLimitExceeded));
             }
-            segments.push(
-                MetadataSegment::decode(&payload).map_err(|_| err(ErrorCode::InvalidMetadata))?,
-            );
-        }
-        if segments.is_empty() {
-            return Ok(());
-        }
-        let mut by_generation = BTreeMap::new();
-        for segment in segments {
-            let generation = segment.generation;
-            if by_generation.insert(generation, segment).is_some() {
+            let Ok(segment) = MetadataSegment::decode(&payload) else {
+                continue;
+            };
+            // Older generations that the authoritative chain does not name are
+            // superseded and contribute nothing.
+            if required_base.is_some_and(|base| base != segment.generation) {
+                continue;
+            }
+            if !visited.insert(segment.generation) {
                 return Err(err(ErrorCode::MetadataAncestryInvalid));
             }
-        }
-        let latest = *by_generation
-            .keys()
-            .next_back()
-            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
-        let mut chain = Vec::new();
-        let mut generation = latest;
-        let mut visited = HashSet::new();
-        loop {
-            if !visited.insert(generation) || chain.len() >= rvf_types::metadata::MAX_META_DELTAS {
-                return Err(err(ErrorCode::MetadataReplayLimitExceeded));
-            }
-            let segment = by_generation
-                .get(&generation)
-                .ok_or_else(|| err(ErrorCode::MetadataAncestryInvalid))?;
+            let base_generation = segment.base_generation;
+            let full_snapshot = segment.full_snapshot;
             chain.push(segment);
-            match segment.base_generation {
-                Some(base) => generation = base,
-                None if segment.full_snapshot => break,
+            match base_generation {
+                Some(base) => required_base = Some(base),
+                None if full_snapshot => {
+                    complete = true;
+                    break;
+                }
                 None => return Err(err(ErrorCode::MetadataAncestryInvalid)),
             }
         }
+        if chain.is_empty() {
+            // Every generation is unreadable, so no committed snapshot can be
+            // reconstructed and the artifact must not silently serve none.
+            return Err(err(ErrorCode::InvalidMetadata));
+        }
+        if !complete {
+            return Err(err(ErrorCode::MetadataAncestryInvalid));
+        }
+        let latest = chain
+            .first()
+            .map(|segment| segment.generation)
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+        let snapshot_generation = chain
+            .last()
+            .map(|segment| segment.generation)
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
         chain.reverse();
         let mut metadata = MetadataStore::new();
         let mut file_metadata = BTreeMap::new();
-        for segment in chain {
+        for segment in &chain {
             if segment.full_snapshot {
                 metadata = MetadataStore::new();
                 file_metadata.clear();
@@ -3582,7 +3773,7 @@ impl RvfStore {
             .segment_dir
             .iter()
             .any(|entry| entry.3 == SegmentType::CowMap as u8);
-        for (vector_id, _) in metadata.records() {
+        for vector_id in metadata.ids() {
             if (!is_cow && self.vectors.get(vector_id).is_none())
                 || self.deletion_bitmap.is_deleted(vector_id)
             {
@@ -3592,20 +3783,69 @@ impl RvfStore {
         self.metadata = metadata;
         self.file_metadata = file_metadata;
         self.metadata_generation = latest;
+        self.metadata_snapshot_generation = snapshot_generation;
         Ok(())
     }
 }
 
-fn runtime_metadata_type(value: &MetadataValue) -> Option<MetadataType> {
-    match value {
-        MetadataValue::String(_) => Some(MetadataType::String),
-        MetadataValue::Bytes(_) => Some(MetadataType::Bytes),
-        MetadataValue::I64(_) => Some(MetadataType::I64),
-        MetadataValue::U64(_) => Some(MetadataType::U64),
-        MetadataValue::F64(_) => Some(MetadataType::F64),
-        MetadataValue::Bool(_) => Some(MetadataType::Bool),
-        MetadataValue::Null | MetadataValue::DeleteField => None,
+/// Declare the schema entries a `META_SEG` payload needs to be self-describing.
+///
+/// The wire format requires every field referenced by a record to be declared
+/// in the same segment. The legacy field-id API carries no schema, so types are
+/// inferred from the values present and a field seen only as null is
+/// conservatively declared nullable UTF-8.
+fn build_metadata_schema(
+    records: &[WireMetadataRecord],
+) -> Result<Vec<MetadataSchemaEntry>, RvfError> {
+    let mut schema_by_id: BTreeMap<u16, MetadataType> = BTreeMap::new();
+    let mut nullable: HashSet<u16> = HashSet::new();
+    // Fields named only by a null or a deletion carry no type of their own, so
+    // they are typed after the pass in case a real value appears elsewhere.
+    let mut untyped: HashSet<u16> = HashSet::new();
+    for record in records {
+        let WireMetadataRecordOp::Upsert(fields) = &record.operation else {
+            continue;
+        };
+        for (field_id, value) in fields {
+            let value_type = match value {
+                WireMetadataValue::Null => {
+                    nullable.insert(*field_id);
+                    untyped.insert(*field_id);
+                    continue;
+                }
+                // A field deletion names a field without carrying a value, so
+                // it still needs a declaration but constrains no type.
+                WireMetadataValue::DeleteField => {
+                    untyped.insert(*field_id);
+                    continue;
+                }
+                WireMetadataValue::String(_) => MetadataType::String,
+                WireMetadataValue::Bytes(_) => MetadataType::Bytes,
+                WireMetadataValue::I64(_) => MetadataType::I64,
+                WireMetadataValue::U64(_) => MetadataType::U64,
+                WireMetadataValue::F64(_) => MetadataType::F64,
+                WireMetadataValue::Bool(_) => MetadataType::Bool,
+            };
+            if schema_by_id
+                .insert(*field_id, value_type)
+                .is_some_and(|previous| previous != value_type)
+            {
+                return Err(err(ErrorCode::InvalidManifest));
+            }
+        }
     }
+    for &field_id in &untyped {
+        schema_by_id.entry(field_id).or_insert(MetadataType::String);
+    }
+    Ok(schema_by_id
+        .into_iter()
+        .map(|(field_id, value_type)| MetadataSchemaEntry {
+            field_id,
+            value_type,
+            nullable: nullable.contains(&field_id),
+            name: format!("field.{field_id}"),
+        })
+        .collect())
 }
 
 fn runtime_to_wire(value: &MetadataValue) -> WireMetadataValue {

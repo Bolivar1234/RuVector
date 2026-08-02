@@ -7,9 +7,10 @@
 //! > complete snapshot, never a mixed or torn snapshot.
 //!
 //! Mechanism. RVF is a single append-only file. Committing a metadata batch
-//! appends a VEC segment, a full-snapshot META segment, an optional witness
-//! segment, and finally a MANIFEST segment, fsyncing before and after the
-//! manifest write (see `RvfStore::ingest_batch_internal` /
+//! appends a VEC segment, a META segment (a delta against the previous
+//! generation, or a full snapshot when the delta chain is materialized), an
+//! optional witness segment, and finally a MANIFEST segment, fsyncing before
+//! and after the manifest write (see `RvfStore::ingest_batch_internal` /
 //! `write_manifest`). The manifest is always written last, and
 //! `read_path::find_latest_manifest` scans backward from EOF, skipping any
 //! torn or unparseable manifest and falling back to the previous valid one.
@@ -30,7 +31,7 @@ use rvf_runtime::options::{
     DistanceMetric, MetadataEntry, MetadataValue, RvfOptions, VectorMetadata,
 };
 use rvf_runtime::RvfStore;
-use rvf_types::{SEGMENT_ALIGNMENT, SEGMENT_HEADER_SIZE, SEGMENT_MAGIC};
+use rvf_types::{SEGMENT_HEADER_SIZE, SEGMENT_MAGIC};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use tempfile::TempDir;
@@ -43,22 +44,37 @@ fn make_options(dim: u16) -> RvfOptions {
     }
 }
 
-/// The observable metadata snapshot: `None` for an absent record, `Some(fields)`
-/// (sorted by `field_id`) for a present record, including the empty record.
-type Snapshot = BTreeMap<u64, Option<Vec<MetadataEntry>>>;
+/// The observable metadata snapshot: per-vector records (`None` for an absent
+/// record, `Some(fields)` sorted by `field_id` for a present one, including the
+/// empty record) plus the probed file-level keys.
+#[derive(Debug, Default, PartialEq)]
+struct Snapshot {
+    records: BTreeMap<u64, Option<Vec<MetadataEntry>>>,
+    file: BTreeMap<String, Option<MetadataValue>>,
+}
 
-/// Open `bytes` as an RVF file and read back the metadata for `ids`.
-fn snapshot_of(bytes: &[u8], ids: &[u64], probe_path: &std::path::Path) -> Snapshot {
+/// Open `bytes` as an RVF file and read back the metadata for `ids` and
+/// `file_keys`.
+fn snapshot_of(
+    bytes: &[u8],
+    ids: &[u64],
+    file_keys: &[&str],
+    probe_path: &std::path::Path,
+) -> Snapshot {
     fs::write(probe_path, bytes).unwrap();
     let store = RvfStore::open_readonly(probe_path)
         .unwrap_or_else(|e| panic!("reopen after crash must recover a valid snapshot: {e:?}"));
-    let mut snap = Snapshot::new();
+    let mut snap = Snapshot::default();
     for &id in ids {
         let entry = store.get_metadata(id).map(|mut fields| {
             fields.sort_by_key(|f| f.field_id);
             fields
         });
-        snap.insert(id, entry);
+        snap.records.insert(id, entry);
+    }
+    for &key in file_keys {
+        snap.file
+            .insert(key.to_string(), store.get_file_metadata(key).cloned());
     }
     snap
 }
@@ -76,9 +92,9 @@ fn segment_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
         }
         let payload_len =
             u64::from_le_bytes(bytes[off + 0x10..off + 0x18].try_into().unwrap()) as usize;
-        let raw = SEGMENT_HEADER_SIZE + payload_len;
-        let total = (raw + SEGMENT_ALIGNMENT - 1) & !(SEGMENT_ALIGNMENT - 1);
-        let end = match off.checked_add(total) {
+        // Segments are written back-to-back: header, then payload, with no
+        // inter-segment padding (`SegmentWriter::write_segment`).
+        let end = match off.checked_add(SEGMENT_HEADER_SIZE + payload_len) {
             Some(end) if end <= bytes.len() => end,
             _ => break,
         };
@@ -135,6 +151,7 @@ fn crash_points(len_a: usize, len_b: usize, ranges: &[(usize, usize)]) -> Vec<us
 fn assert_atomic_metadata_commit(
     label: &str,
     all_ids: &[u64],
+    file_keys: &[&str],
     bytes_a: &[u8],
     bytes_b: &[u8],
     probe_path: &std::path::Path,
@@ -150,8 +167,8 @@ fn assert_atomic_metadata_commit(
         "[{label}] batch B must not rewrite the committed batch-A prefix"
     );
 
-    let expected_a = snapshot_of(bytes_a, all_ids, probe_path);
-    let expected_b = snapshot_of(bytes_b, all_ids, probe_path);
+    let expected_a = snapshot_of(bytes_a, all_ids, file_keys, probe_path);
+    let expected_b = snapshot_of(bytes_b, all_ids, file_keys, probe_path);
     assert_ne!(
         expected_a, expected_b,
         "[{label}] the two snapshots must be distinguishable for the test to mean anything"
@@ -168,7 +185,7 @@ fn assert_atomic_metadata_commit(
     let mut saw_prior = false;
     let mut saw_new = false;
     for l in points {
-        let observed = snapshot_of(&bytes_b[..l], all_ids, probe_path);
+        let observed = snapshot_of(&bytes_b[..l], all_ids, file_keys, probe_path);
         if observed == expected_a {
             saw_prior = true;
         } else if observed == expected_b {
@@ -279,7 +296,7 @@ fn metadata_upsert_commit_is_atomic_under_crash_injection() {
     let bytes_b = fs::read(&path).unwrap();
     store.close().unwrap();
 
-    assert_atomic_metadata_commit("upsert", &all_ids, &bytes_a, &bytes_b, &probe);
+    assert_atomic_metadata_commit("upsert", &all_ids, &[], &bytes_a, &bytes_b, &probe);
 }
 
 /// Criterion 6 (delete path): a metadata commit that tombstones an existing
@@ -351,5 +368,110 @@ fn metadata_tombstone_commit_is_atomic_under_crash_injection() {
     let bytes_b = fs::read(&path).unwrap();
     store.close().unwrap();
 
-    assert_atomic_metadata_commit("tombstone", &all_ids, &bytes_a, &bytes_b, &probe);
+    assert_atomic_metadata_commit("tombstone", &all_ids, &[], &bytes_a, &bytes_b, &probe);
+}
+
+/// Criterion 6 (delete path): `delete` drops the metadata records of the
+/// vectors it tombstones and commits that as its own metadata generation, so it
+/// must be atomic under the same crash injection as an ingest.
+#[test]
+fn delete_metadata_commit_is_atomic_under_crash_injection() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("meta_crash_delete.rvf");
+    let probe = dir.path().join("probe.rvf");
+    let dim: u16 = 2;
+    let all_ids = [10u64, 20, 30];
+
+    let mut store = RvfStore::create(&path, make_options(dim)).unwrap();
+    store
+        .ingest_batch_with_metadata(
+            &[&[1.0, 0.0], &[0.0, 1.0], &[1.0, 1.0]],
+            &[10, 20, 30],
+            &[
+                VectorMetadata {
+                    vector_id: 10,
+                    fields: vec![MetadataEntry {
+                        field_id: 1,
+                        value: MetadataValue::String("ten".into()),
+                    }],
+                    delete_record: false,
+                },
+                VectorMetadata {
+                    vector_id: 20,
+                    fields: vec![MetadataEntry {
+                        field_id: 1,
+                        value: MetadataValue::String("twenty".into()),
+                    }],
+                    delete_record: false,
+                },
+                VectorMetadata {
+                    vector_id: 30,
+                    fields: vec![MetadataEntry {
+                        field_id: 1,
+                        value: MetadataValue::String("thirty".into()),
+                    }],
+                    delete_record: false,
+                },
+            ],
+        )
+        .unwrap();
+    let bytes_a = fs::read(&path).unwrap();
+
+    store.delete(&[20]).unwrap();
+    let bytes_b = fs::read(&path).unwrap();
+    store.close().unwrap();
+
+    assert_atomic_metadata_commit("delete", &all_ids, &[], &bytes_a, &bytes_b, &probe);
+}
+
+/// Criterion 6 (file-metadata path): `set_file_metadata` commits a metadata
+/// generation carrying only file-level state, and must expose exactly the prior
+/// or the new value after a crash at any boundary.
+#[test]
+fn file_metadata_commit_is_atomic_under_crash_injection() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("meta_crash_file_metadata.rvf");
+    let probe = dir.path().join("probe.rvf");
+    let dim: u16 = 2;
+    let all_ids = [10u64];
+    let file_keys = ["app.schema", "app.owner"];
+
+    let mut store = RvfStore::create(&path, make_options(dim)).unwrap();
+    store
+        .ingest_batch_with_metadata(
+            &[&[1.0, 0.0]],
+            &[10],
+            &[VectorMetadata {
+                vector_id: 10,
+                fields: vec![MetadataEntry {
+                    field_id: 1,
+                    value: MetadataValue::String("ten".into()),
+                }],
+                delete_record: false,
+            }],
+        )
+        .unwrap();
+    store
+        .set_file_metadata("app.schema".into(), MetadataValue::U64(1))
+        .unwrap();
+    store
+        .set_file_metadata("app.owner".into(), MetadataValue::String("catalog".into()))
+        .unwrap();
+    let bytes_a = fs::read(&path).unwrap();
+
+    // Batch B is a single commit that replaces one file-level value.
+    store
+        .set_file_metadata("app.schema".into(), MetadataValue::U64(2))
+        .unwrap();
+    let bytes_b = fs::read(&path).unwrap();
+    store.close().unwrap();
+
+    assert_atomic_metadata_commit(
+        "file-metadata",
+        &all_ids,
+        &file_keys,
+        &bytes_a,
+        &bytes_b,
+        &probe,
+    );
 }
