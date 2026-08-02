@@ -50,11 +50,17 @@ jobs:
           ref: main
           path: trusted
           persist-credentials: false
+      - name: Use a pinned interpreter rather than the PEP 668 system python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
       - name: Install pinned trusted gate dependencies
         run: |
           set -euo pipefail
+          # Fully hashed lock: a substituted or tampered artifact fails the
+          # install rather than silently changing what the trusted gate accepts.
           python3 -m pip install --disable-pip-version-check --no-input \
-            -r trusted/scripts/research-gate/requirements.txt
+            --require-hashes -r trusted/scripts/research-gate/requirements.txt
       - name: Validate exact immutable scope
         env:
           BASE_SHA: ${{ inputs.base_sha }}

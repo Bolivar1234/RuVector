@@ -379,6 +379,79 @@ class ResearchGateTests(unittest.TestCase):
             with self.assertRaisesRegex(GateError, "size changed|hash changed"):
                 validate_artifact_index(index, root)
 
+    def test_unindexed_files_cannot_ride_along_into_the_attested_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "raw.json").write_text("{}\n", encoding="utf-8")
+            index = {
+                "schema_version": 1,
+                "candidate_commit": COMMIT,
+                "candidate_ref": "research/nightly/fixture",
+                "workflow_revision": "c" * 40,
+                "evaluator_version": "research-gate-v1@sha256:" + HEX,
+                "created_at": "2026-07-29T00:00:00Z",
+                "retention_class": "candidate",
+                "retention_days": 365,
+                "immutable_storage_required": True,
+                "artifacts": [{
+                    "path": "raw.json",
+                    "sha256": __import__("hashlib").sha256(b"{}\n").hexdigest(),
+                    "size_bytes": 3,
+                }],
+            }
+            validate_artifact_index(index, root)
+
+            # The index cannot hash itself, so it is allowed to be unindexed.
+            (root / "artifact-index.json").write_text("{}\n", encoding="utf-8")
+            validate_artifact_index(index, root)
+
+            smuggled = root / "SMUGGLED.sh"
+            smuggled.write_text("#!/bin/sh\n", encoding="utf-8")
+            with self.assertRaisesRegex(GateError, "SMUGGLED.sh"):
+                validate_artifact_index(index, root)
+            smuggled.unlink()
+
+            # Nested payloads are caught too.
+            nested = root / "logs"
+            nested.mkdir()
+            (nested / "payload.bin").write_text("x", encoding="utf-8")
+            with self.assertRaisesRegex(GateError, "logs/payload.bin"):
+                validate_artifact_index(index, root)
+
+    def test_symlinked_directory_is_reported_and_never_followed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "raw.json").write_text("{}\n", encoding="utf-8")
+            outside = root.parent / "outside-evidence"
+            outside.mkdir(exist_ok=True)
+            (outside / "secret.txt").write_text("secret", encoding="utf-8")
+            try:
+                (root / "escape").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable on this platform")
+            index = {
+                "schema_version": 1,
+                "candidate_commit": COMMIT,
+                "candidate_ref": "research/nightly/fixture",
+                "workflow_revision": "c" * 40,
+                "evaluator_version": "research-gate-v1@sha256:" + HEX,
+                "created_at": "2026-07-29T00:00:00Z",
+                "retention_class": "candidate",
+                "retention_days": 365,
+                "immutable_storage_required": True,
+                "artifacts": [{
+                    "path": "raw.json",
+                    "sha256": __import__("hashlib").sha256(b"{}\n").hexdigest(),
+                    "size_bytes": 3,
+                }],
+            }
+            with self.assertRaises(GateError) as caught:
+                validate_artifact_index(index, root)
+            message = str(caught.exception)
+            self.assertIn("escape", message)
+            # The link is named, but its contents were never walked.
+            self.assertNotIn("secret.txt", message)
+
 
 class SchemaEnforcementTests(unittest.TestCase):
     """The schemas in schemas/ must be load-bearing, not documentation."""

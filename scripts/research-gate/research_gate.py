@@ -16,6 +16,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 import re
 import statistics
 import sys
@@ -74,6 +75,13 @@ MEMORY_PROTOCOL_FIELDS = {
     "kernel",
     "alternating_order",
 }
+# Files that are legitimately absent from the artifact index because a different
+# cryptographic mechanism binds them: an index cannot contain its own digest, and
+# the attestation subject carries artifact_index_sha256 and is itself signed.
+# Nothing else may sit in the evidence root without a recorded hash. A candidate
+# that needs to retain an extra artifact adds it to the trusted index, not here.
+UNINDEXED_BY_DESIGN = frozenset({"artifact-index.json"})
+PROMOTION_UNINDEXED = UNINDEXED_BY_DESIGN | {"attestation-subject.json"}
 T_CRITICAL_95 = {
     1: 12.706,
     2: 4.303,
@@ -498,7 +506,27 @@ def validate_report(report: dict[str, Any], manifest: dict[str, Any],
     _same_number(min(effects), float(evaluation["worst_seed_effect"]), "per_seed_effects minimum")
 
 
-def validate_artifact_index(index: dict[str, Any], root: str | Path) -> None:
+def _present_paths(root_path: Path) -> set[str]:
+    """Every file and symlink under root, relative and POSIX-normalized.
+
+    Symlinked directories are recorded but never descended into, so a candidate
+    cannot hide payloads behind a link or escape the evidence root.
+    """
+    present: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(root_path, followlinks=False):
+        base = Path(dirpath)
+        for name in filenames:
+            present.add((base / name).relative_to(root_path).as_posix())
+        for name in list(dirnames):
+            entry = base / name
+            if entry.is_symlink():
+                present.add(entry.relative_to(root_path).as_posix())
+                dirnames.remove(name)
+    return present
+
+
+def validate_artifact_index(index: dict[str, Any], root: str | Path,
+                            allow_unindexed: frozenset[str] = UNINDEXED_BY_DESIGN) -> None:
     _schema(index, schema_validate.ARTIFACT_INDEX_SCHEMA)
     _require(index.get("schema_version") == 1, "artifact index schema_version must be 1")
     _require(index.get("retention_class") in {"candidate", "accepted", "publication"},
@@ -508,6 +536,7 @@ def validate_artifact_index(index: dict[str, Any], root: str | Path) -> None:
     root_path = Path(root).resolve()
     artifacts = index.get("artifacts", [])
     _require(isinstance(artifacts, list) and artifacts, "artifact index cannot be empty")
+    indexed: set[str] = set()
     for item in artifacts:
         rel = Path(item["path"])
         _require(not rel.is_absolute() and ".." not in rel.parts, "artifact path escapes root")
@@ -516,6 +545,14 @@ def validate_artifact_index(index: dict[str, Any], root: str | Path) -> None:
         _require(target.is_file() and not target.is_symlink(), f"artifact missing or symlink: {rel}")
         _require(target.stat().st_size == item["size_bytes"], f"artifact size changed: {rel}")
         _require(sha256_file(target) == item["sha256"], f"artifact hash changed: {rel}")
+        indexed.add(rel.as_posix())
+
+    # The index must account for the whole evidence tree. Anything else would be
+    # uploaded and attested without a recorded digest.
+    unindexed = sorted(_present_paths(root_path) - indexed - set(allow_unindexed))
+    _require(not unindexed,
+             "evidence root contains file(s) missing from the artifact index: "
+             f"{unindexed}; every retained artifact must carry a recorded digest")
 
 
 def main() -> int:

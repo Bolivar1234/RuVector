@@ -10,6 +10,7 @@ from pathlib import Path
 
 from research_gate import (
     FULL_SHA_RE,
+    PROMOTION_UNINDEXED,
     GateError,
     load_json,
     sha256_file,
@@ -65,7 +66,8 @@ def main() -> int:
     checks = subject.get("required_checks", {})
     if not checks or any(value != "success" for value in checks.values()):
         raise GateError("attestation does not bind a complete green check set")
-    validate_artifact_index(index, root)
+    # The downloaded attested bundle also carries the signed attestation subject.
+    validate_artifact_index(index, root, allow_unindexed=PROMOTION_UNINDEXED)
     Path(args.output).write_text(
         f"candidate_sha={commit}\ncandidate_ref={ref}\n", encoding="utf-8"
     )

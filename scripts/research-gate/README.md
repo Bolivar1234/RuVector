@@ -2,12 +2,26 @@
 
 This directory is the trusted implementation of the pre-pull-request gate.
 Candidate code is evaluated in a separate contained process; these scripts
-validate its data and never import candidate modules. The only third-party
-dependency is the pinned `jsonschema` in `requirements.txt`, installed by the
-trusted jobs before any gate script runs.
+validate its data and never import candidate modules.
+
+Third-party dependencies are declared in `requirements.in` (`jsonschema` for
+validation, `referencing` for the offline schema registry) and compiled into
+`requirements.txt`, a fully hashed lock covering the whole transitive closure.
+The trusted jobs install it with `--require-hashes` on a pinned interpreter, so
+a substituted artifact fails the install instead of quietly changing what the
+gate accepts. Regenerate the lock after editing `requirements.in`:
 
 ```bash
-python3 -m pip install -r scripts/research-gate/requirements.txt
+uv pip compile scripts/research-gate/requirements.in \
+  --generate-hashes --universal --python-version 3.12 \
+  -o scripts/research-gate/requirements.txt
+```
+
+`--universal` is required: it records hashes for every platform's wheels, so the
+same lock installs on the Linux runners and on a developer machine.
+
+```bash
+python3 -m pip install --require-hashes -r scripts/research-gate/requirements.txt
 python3 scripts/research-gate/research_gate.py validate-manifest \
   research-manifest.json --expect-sha "$CANDIDATE_SHA"
 python3 scripts/research-gate/research_gate.py evaluate \
@@ -34,6 +48,14 @@ against `schemas/research-report-v1.json` and then rebinds every headline value
 to the trusted evaluation of the hashed raw results (ADR-282 acceptance
 criterion 13). Report headline values must be the evaluator's values, not a
 re-rounded restatement of them; round only in prose.
+
+The artifact index must account for the entire evidence tree. Validation walks
+the evidence root and rejects any file, nested payload, or symlink that has no
+recorded digest, so nothing rides into the attested bundle unhashed. Only
+`artifact-index.json` (which cannot contain its own digest) and, during
+promotion, the signed `attestation-subject.json` are exempt. A candidate that
+legitimately needs to retain another artifact gets it added to the trusted
+index in this workflow — not added to the exemption list.
 
 Base health is read with `gh api --paginate`. This repository routinely has
 more than one page of check runs per commit, and `base_health.py` cross-checks
