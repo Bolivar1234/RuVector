@@ -245,6 +245,19 @@ impl VectorDB {
         &self.options
     }
 
+    /// Persist a provenance value in the vector store itself, so it cannot be
+    /// removed without removing the vectors it describes.
+    #[cfg(feature = "storage")]
+    pub fn save_config_value(&self, key: &str, value: &str) -> Result<()> {
+        self.storage.save_config_value(key, value)
+    }
+
+    /// Read a value written by [`save_config_value`](Self::save_config_value).
+    #[cfg(feature = "storage")]
+    pub fn load_config_value(&self, key: &str) -> Result<Option<String>> {
+        self.storage.load_config_value(key)
+    }
+
     /// Get all vector IDs (for iteration/serialization)
     pub fn keys(&self) -> Result<Vec<String>> {
         self.storage.all_ids()

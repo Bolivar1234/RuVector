@@ -127,6 +127,48 @@ pub struct EmbeddingSpaceIdentity {
 
 const EMBEDDING_SPACE_DOMAIN: &[u8] = b"ruvector.embedding-space.v1\0";
 
+/// Revision of this crate's *embedding semantics*, and the only ruvector-owned
+/// version number that may reach `runtime_revision` and therefore
+/// `embedding_space_id`.
+///
+/// Bump this ONLY when a change alters the vectors ruvector produces for an
+/// otherwise-identical model: pooling, normalization, tokenization, truncation,
+/// quantization, or role/prefix handling. Never bump it for a release, a
+/// refactor, or a dependency upgrade.
+///
+/// # Why the crate version is not used here
+/// `embedding_space_id` gates corpus compatibility and cache reuse. If the
+/// crate version were an input, a routine workspace version bump (2.2.3 → 2.3.0
+/// has already happened once in this repo's history) would change every id:
+/// every persisted `AgenticDB` corpus would refuse to reopen with
+/// `EmbeddingSpaceMismatch`, and 100% of cluster cache entries would be
+/// invalidated, without a single vector actually changing. The id must be a
+/// function of the embedding function alone.
+pub const EMBEDDING_SPACE_FORMAT_REVISION: u32 = 1;
+
+/// Build provenance of the running binary — informational only.
+///
+/// This is deliberately NOT a field of [`EmbeddingSpaceIdentity`]: the identity
+/// is a closed, cross-language wire contract (`schemas/embedding-space-identity-v1.json`
+/// pins exactly 17 properties with `additionalProperties: false`, and
+/// `npm/packages/ruvector/src/core/embedding-provenance.ts` mirrors it), and
+/// every field it carries is hashed into `embedding_space_id`. A build version
+/// belongs in logs and diagnostics, not in the vector-space identity — see
+/// [`EMBEDDING_SPACE_FORMAT_REVISION`].
+pub fn build_revision() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// `runtime_revision` value for a provider class.
+///
+/// Identifies which inference stack produced the vectors plus the semantics
+/// revision above. It carries no crate or dependency version, so upgrading
+/// ruvector or its runtime dependencies leaves every persisted corpus readable
+/// and every cache entry valid.
+fn runtime_revision_for(provider_class: &str) -> String {
+    format!("{provider_class}/space-rev-{EMBEDDING_SPACE_FORMAT_REVISION}")
+}
+
 impl EmbeddingSpaceIdentity {
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != 1 {
@@ -507,7 +549,7 @@ pub fn default_space_identity(
         truncation_tokens: 512,
         output_dimension: dimension as u32,
         output_dtype: OutputDtype::F32,
-        runtime_revision: env!("CARGO_PKG_VERSION").into(),
+        runtime_revision: runtime_revision_for("ruvector-core"),
         distance_metric: EmbeddingDistanceMetric::Cosine,
         role_policy: EmbeddingRolePolicy::Symmetric,
         prefix_policy: PrefixPolicy::None,
@@ -875,6 +917,14 @@ impl ApiEmbedding {
                 "remote provider identity must match the requested model and dimension".into(),
             ));
         }
+        // Fail at construction, not on the first embed: a prefix policy this
+        // provider cannot honor would otherwise send raw text to the API while
+        // the identity attests that a template was applied. Probing with a
+        // sample of each role is enough — `apply_prompt_template` is
+        // deterministic in the identity, not the text.
+        for role in [EmbeddingRole::Query, EmbeddingRole::Passage] {
+            apply_prompt_template(&identity, role, "probe")?;
+        }
         Ok(Self {
             api_key,
             endpoint,
@@ -942,8 +992,14 @@ impl ApiEmbedding {
 #[cfg(feature = "api-embeddings")]
 impl EmbeddingProvider for ApiEmbedding {
     fn embed_for(&self, role: EmbeddingRole, text: &str) -> Result<Vec<f32>> {
+        // Same contract as the ONNX path: the provider owns prefixing, and the
+        // templates come from the identity's registry fixture so the text sent
+        // upstream matches what `prompt_template_sha256` attests (ADR-281 §4).
+        // Endpoints whose own `input_type` handles the role declare
+        // PrefixPolicy::None and are unaffected.
+        let prepared = apply_prompt_template(&self.identity, role, text)?;
         let mut request_body = serde_json::json!({
-            "input": text,
+            "input": prepared,
             "model": self.model,
         });
         if self.identity.role_policy == EmbeddingRolePolicy::Asymmetric {
@@ -1168,18 +1224,26 @@ pub mod onnx {
             let max_length = 512;
 
             tracing::info!(
-                "Loaded ONNX embedding model: {} ({}D)",
                 model_id,
-                dimensions
+                dimensions,
+                build_revision = build_revision(),
+                "Loaded ONNX embedding model"
             );
 
+            // `registry_identity` already sets `runtime_revision` to the
+            // provider class plus EMBEDDING_SPACE_FORMAT_REVISION. It carries
+            // no `ort` version on purpose: the previous value hardcoded
+            // "ort-2.0.0-rc.9" while Cargo.lock resolved rc.10 — a claim that
+            // was both untrue and, being hashed, would have re-keyed every
+            // corpus and cache on a patch upgrade of a dependency. What
+            // actually pins this vector space is the pair of artifact digests
+            // below plus the registry's prompt templates.
             let mut identity = registry_identity("ruvector-onnx", model_id, dimensions)?;
             let model_bytes = std::fs::read(model_path)?;
             let tokenizer_bytes = std::fs::read(tokenizer_path)?;
             identity.model_artifact_sha256 = sha256_hex(&model_bytes);
             identity.model_graph_sha256 = identity.model_artifact_sha256.clone();
             identity.tokenizer_sha256 = sha256_hex(&tokenizer_bytes);
-            identity.runtime_revision = format!("ort-2.0.0-rc.9/{}", env!("CARGO_PKG_VERSION"));
             identity.validate()?;
 
             Ok(Self {
@@ -1625,6 +1689,57 @@ pub mod lattice_native {
             Self::with_model_and_identity(model, identity)
         }
 
+        /// Who owns prefixing on this provider, and the check that keeps the
+        /// two owners honest.
+        ///
+        /// `lattice-embed` applies role prompts itself, inside
+        /// `EmbeddingService::embed_query` / `embed_passage`, from
+        /// `EmbeddingModel::query_instruction()` / `document_instruction()`.
+        /// So this provider must NOT call [`apply_prompt_template`]: that would
+        /// prefix a second time and break ADR-281 §4's "exactly once" rule.
+        ///
+        /// That leaves a gap the other providers do not have — ruvector's
+        /// registry templates are a *claim* about what lattice-embed will do,
+        /// and `prompt_template_sha256` attests to that claim. If a
+        /// lattice-embed upgrade changed a model's instruction, the attested
+        /// hash would silently describe a prompt that is no longer applied. So
+        /// construction compares the two sources of truth and fails closed on
+        /// divergence rather than shipping a false attestation.
+        fn assert_lattice_owns_matching_prefixes(
+            model: LatticeEmbeddingModel,
+            identity: &EmbeddingSpaceIdentity,
+        ) -> Result<()> {
+            let templates = registry_prompt_templates(&identity.model_id)?;
+            const PROBE: &str = "\u{1}probe\u{1}";
+            for (role, lattice_instruction, template_side) in [
+                (
+                    EmbeddingRole::Query,
+                    model.query_instruction(),
+                    templates.query,
+                ),
+                (
+                    EmbeddingRole::Passage,
+                    model.document_instruction(),
+                    templates.passage,
+                ),
+            ] {
+                let lattice_applies = format!("{}{PROBE}", lattice_instruction.unwrap_or_default());
+                let registry_claims = templates.apply(role, PROBE);
+                if lattice_applies != registry_claims {
+                    return Err(RuvectorError::InvalidParameter(format!(
+                        "prefix ownership divergence for '{}' on the {role:?} side: \
+                         lattice-embed applies {lattice_applies:?} but ruvector's registry \
+                         template {template_side:?} attests {registry_claims:?}. The \
+                         prompt_template_sha256 in this identity would describe a prompt that \
+                         is never applied; update the ruvector registry entry to match \
+                         lattice-embed (and re-embed, since the space identity changes).",
+                        identity.model_id
+                    )));
+                }
+            }
+            Ok(())
+        }
+
         /// Load a resolved model only after validating complete provenance and
         /// the exact role/prompt registry fixture.
         pub fn with_model_and_identity(
@@ -1662,6 +1777,7 @@ pub mod lattice_native {
                     "lattice identity disagrees with exact role/prompt registry fixture".into(),
                 ));
             }
+            Self::assert_lattice_owns_matching_prefixes(model, &identity)?;
 
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1895,6 +2011,62 @@ pub mod lattice_native {
                     provider.name(),
                     "BAAI/bge-small-en-v1.5",
                     "alias '{alias}' resolved to a different model than 'bge-small-en-v1.5'"
+                );
+            }
+        }
+
+        /// Extends the bge-small/minilm contract above to the two asymmetric
+        /// families it never covered — E5 (`query: ` / `passage: `, both sides
+        /// prefixed) and Qwen3 (instruction on the query side, bare passage).
+        ///
+        /// Prefixing on this provider is owned by lattice-embed, not by
+        /// `apply_prompt_template` (see
+        /// [`assert_lattice_owns_matching_prefixes`](LatticeEmbedding::assert_lattice_owns_matching_prefixes)).
+        /// This test pins that split: the constructor must succeed exactly when
+        /// lattice-embed's instructions agree with ruvector's registry
+        /// templates, and must fail closed — never silently attest a prompt
+        /// hash for a template it does not apply — when they diverge.
+        #[test]
+        fn lattice_prefix_ownership_matches_registry_for_e5_and_qwen3() {
+            const PROBE: &str = "\u{1}probe\u{1}";
+            for alias in [
+                "multilingual-e5-small",
+                "qwen3-embedding-0.6b",
+                "bge-small-en-v1.5",
+                "all-minilm-l6-v2",
+            ] {
+                let Ok(model) = alias.parse::<LatticeEmbeddingModel>() else {
+                    continue; // alias not carried by this lattice-embed version
+                };
+                let templates = registry_prompt_templates(model.model_id()).unwrap_or_else(|e| {
+                    panic!("lattice model '{alias}' must have a ruvector registry entry: {e}")
+                });
+
+                // Recompute the agreement independently of the constructor so
+                // this asserts the guard's behavior, not its own implementation.
+                let query_agrees =
+                    format!("{}{PROBE}", model.query_instruction().unwrap_or_default())
+                        == templates.apply(EmbeddingRole::Query, PROBE);
+                let passage_agrees = format!(
+                    "{}{PROBE}",
+                    model.document_instruction().unwrap_or_default()
+                ) == templates.apply(EmbeddingRole::Passage, PROBE);
+                let agrees = query_agrees && passage_agrees;
+
+                let built = LatticeEmbedding::from_pretrained(alias);
+                assert_eq!(
+                    built.is_ok(),
+                    agrees,
+                    "prefix ownership for '{alias}': lattice-embed applies \
+                     query={:?} passage={:?}, ruvector's registry claims query={:?} \
+                     passage={:?}. Construction must succeed iff those agree, so that \
+                     prompt_template_sha256 never attests a prompt lattice-embed will not \
+                     apply. Constructor said: {:?}",
+                    model.query_instruction(),
+                    model.document_instruction(),
+                    templates.query,
+                    templates.passage,
+                    built.err().map(|e| e.to_string()),
                 );
             }
         }

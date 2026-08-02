@@ -1,10 +1,11 @@
 //! Integration tests for embedding providers
 
 use ruvector_core::embeddings::{
-    ApiEmbedding, EmbeddingDistanceMetric, EmbeddingProvider, EmbeddingRolePolicy,
-    EmbeddingSpaceIdentity, HashEmbedding, OutputDtype, PoolingStrategy, PoolingStrategyName,
-    PrefixPolicy,
+    registry_identity, ApiEmbedding, EmbeddingDistanceMetric, EmbeddingProvider,
+    EmbeddingRolePolicy, EmbeddingSpaceIdentity, HashEmbedding, OutputDtype, PoolingStrategy,
+    PoolingStrategyName, PrefixPolicy,
 };
+use ruvector_core::error::RuvectorError;
 use ruvector_core::{types::DbOptions, AgenticDB};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -362,5 +363,134 @@ fn test_agenticdb_with_candle_embeddings() {
     println!(
         "Found skills: {:?}",
         skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADR-281 §4 for the remote provider (mirrors the ONNX path's contract)
+// ---------------------------------------------------------------------------
+
+/// A prefix policy the provider cannot honor must be refused at construction,
+/// not discovered on the first embed, and never silently degrade to raw text.
+#[test]
+fn api_embedding_rejects_unhonorable_prefix_policies_at_construction() {
+    let mut custom = registry_identity("test-remote", "intfloat/e5-base-v2", 768).unwrap();
+    custom.prefix_policy = PrefixPolicy::Custom;
+    let err = ApiEmbedding::new(
+        "sk-test".into(),
+        "https://example.invalid/v1/embeddings".into(),
+        "intfloat/e5-base-v2".into(),
+        768,
+        custom,
+    )
+    .err()
+    .expect("PrefixPolicy::Custom has no template ruvector can apply");
+    assert!(
+        matches!(err, RuvectorError::InvalidParameter(_)),
+        "expected InvalidParameter, got {err:?}"
+    );
+
+    let mut tampered = registry_identity("test-remote", "intfloat/e5-base-v2", 768).unwrap();
+    tampered.prompt_template_sha256 = "ee".repeat(32);
+    assert!(
+        ApiEmbedding::new(
+            "sk-test".into(),
+            "https://example.invalid/v1/embeddings".into(),
+            "intfloat/e5-base-v2".into(),
+            768,
+            tampered,
+        )
+        .is_err(),
+        "a prompt hash that disagrees with the registry must fail closed"
+    );
+
+    // A registry-consistent asymmetric identity constructs normally.
+    ApiEmbedding::new(
+        "sk-test".into(),
+        "https://example.invalid/v1/embeddings".into(),
+        "intfloat/e5-base-v2".into(),
+        768,
+        registry_identity("test-remote", "intfloat/e5-base-v2", 768).unwrap(),
+    )
+    .expect("a model whose templates ruvector knows must construct");
+}
+
+/// One-shot HTTP server: captures the request body of a single request and
+/// answers with an OpenAI-shaped response. Returns `(endpoint, join handle)`.
+fn capture_one_request() -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let endpoint = format!("http://{}/v1/embeddings", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 1024];
+        // Read headers, then exactly Content-Length body bytes.
+        let body = loop {
+            let n = match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break String::new(),
+                Ok(n) => n,
+            };
+            raw.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&raw).into_owned();
+            let Some(split) = text.find("\r\n\r\n") else {
+                continue;
+            };
+            let content_length: usize = text
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("content-length: ")
+                        .or_else(|| line.strip_prefix("Content-Length: "))
+                })
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let body = &text[split + 4..];
+            if body.len() >= content_length {
+                break body.to_string();
+            }
+        };
+        let response_body = r#"{"data":[{"embedding":[0.0,1.0,0.0]}]}"#;
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        let _ = stream.flush();
+        body
+    });
+    (endpoint, handle)
+}
+
+/// The remote provider must send the text the identity attests: the registry
+/// template applied exactly once, by the provider, from raw caller text.
+#[test]
+fn api_embedding_sends_the_identitys_template_not_raw_text() {
+    let (endpoint, server) = capture_one_request();
+    let provider = ApiEmbedding::new(
+        "sk-test".into(),
+        endpoint,
+        "intfloat/e5-base-v2".into(),
+        768,
+        registry_identity("test-remote", "intfloat/e5-base-v2", 768).unwrap(),
+    )
+    .unwrap();
+
+    provider
+        .embed_query("how tall is it")
+        .expect("the stub endpoint answers with a valid embedding");
+
+    let body = server.join().expect("server thread");
+    assert!(
+        body.contains("query: how tall is it"),
+        "the E5 query template must reach the wire, got body: {body}"
+    );
+    assert_eq!(
+        body.matches("query: ").count(),
+        1,
+        "the prefix must be applied exactly once, got body: {body}"
     );
 }

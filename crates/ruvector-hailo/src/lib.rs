@@ -129,9 +129,28 @@ impl HefBackend {
     }
 }
 
-/// Artifact filenames this backend knows how to fingerprint, most specific
-/// first. Provenance verification is only meaningful for these layouts, so an
+/// Artifact filenames this backend knows how to fingerprint, in preference
+/// order. Provenance verification is only meaningful for these layouts, so an
 /// `open_with_identity` against a directory holding none of them fails closed.
+///
+/// # Layouts and what the two model hashes mean
+/// `EmbeddingSpaceIdentity` has separate `model_artifact_sha256` (the weights
+/// the operator deployed) and `model_graph_sha256` (the executable graph those
+/// weights run as). This backend serves three layouts, and the two hashes are
+/// only distinct in the first:
+///
+/// | layout | artifact | graph |
+/// |---|---|---|
+/// | NPU + CPU fallback (`model.safetensors` + `model.hef`) | safetensors | hef |
+/// | CPU fallback only (`model.safetensors`) | safetensors | safetensors |
+/// | NPU only (`model.hef`) | hef | hef |
+///
+/// In the single-file layouts the two hashes are deliberately equal: there is
+/// no separately-compiled graph to fingerprint, and claiming a different value
+/// would be inventing provenance. Anyone producing an identity to hand to
+/// [`HailoEmbedder::open_with_identity`] should build the hash fields with
+/// [`HailoEmbedder::artifact_digests`] rather than guessing, which is why that
+/// helper is public.
 const MODEL_ARTIFACT_FILES: &[&str] = &["model.safetensors", "model.hef"];
 const MODEL_GRAPH_FILES: &[&str] = &["model.hef", "model.safetensors"];
 const TOKENIZER_FILES: &[&str] = &["tokenizer.json", "vocab.txt"];
@@ -139,6 +158,17 @@ const TOKENIZER_FILES: &[&str] = &["tokenizer.json", "vocab.txt"];
 /// The model this backend's HEF and cpu-fallback weights are built for
 /// (ADR-167). Used to look up the registry fixture for the default identity.
 const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
+
+/// SHA-256 digests of the artifacts found in a model directory.
+///
+/// `None` for a class the directory does not provide. Produced by
+/// [`HailoEmbedder::artifact_digests`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactDigests {
+    pub model_artifact: Option<String>,
+    pub model_graph: Option<String>,
+    pub tokenizer: Option<String>,
+}
 
 impl HailoEmbedder {
     /// Open a Hailo NPU device and load the HEF + tokenizer artifacts found
@@ -210,6 +240,41 @@ impl HailoEmbedder {
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
+    /// SHA-256 digests of the artifacts in `model_dir`, ready to drop into the
+    /// three hash fields of an [`EmbeddingSpaceIdentity`].
+    ///
+    /// This is the supported way to build an identity that
+    /// [`open_with_identity`](Self::open_with_identity) will accept: it applies
+    /// the same file-preference rules the verifier uses, including the
+    /// single-file layouts where the artifact and graph digests are equal (see
+    /// [`MODEL_ARTIFACT_FILES`]). Errors when the directory holds none of the
+    /// artifacts this backend knows how to fingerprint, since there is nothing
+    /// to attest.
+    pub fn artifact_digests(model_dir: &Path) -> Result<ArtifactDigests> {
+        let (model_artifact, model_graph, tokenizer) = Self::artifact_paths(model_dir);
+        if model_artifact.is_none() && model_graph.is_none() && tokenizer.is_none() {
+            return Err(HailoError::EmbeddingProvenance(format!(
+                "cannot fingerprint `{}`: none of the known artifacts were found (model \
+                 artifact: {}; model graph: {}; tokenizer: {})",
+                model_dir.display(),
+                MODEL_ARTIFACT_FILES.join(", "),
+                MODEL_GRAPH_FILES.join(", "),
+                TOKENIZER_FILES.join(", "),
+            )));
+        }
+        Ok(ArtifactDigests {
+            model_artifact: model_artifact
+                .map(|p| Self::digest_file(model_dir, &p))
+                .transpose()?,
+            model_graph: model_graph
+                .map(|p| Self::digest_file(model_dir, &p))
+                .transpose()?,
+            tokenizer: tokenizer
+                .map(|p| Self::digest_file(model_dir, &p))
+                .transpose()?,
+        })
+    }
+
     /// Check every hash a caller-supplied identity declares against the bytes
     /// on disk.
     ///
@@ -223,43 +288,36 @@ impl HailoEmbedder {
         model_dir: &Path,
         identity: &EmbeddingSpaceIdentity,
     ) -> Result<()> {
-        let (model_artifact, model_graph, tokenizer) = Self::artifact_paths(model_dir);
-        if model_artifact.is_none() && model_graph.is_none() && tokenizer.is_none() {
-            return Err(HailoError::EmbeddingProvenance(format!(
-                "cannot verify artifact provenance in `{}`: none of the known artifacts were \
-                 found (model artifact: {}; model graph: {}; tokenizer: {}). Use \
-                 HailoEmbedder::open for the unattested default identity.",
-                model_dir.display(),
-                MODEL_ARTIFACT_FILES.join(", "),
-                MODEL_GRAPH_FILES.join(", "),
-                TOKENIZER_FILES.join(", "),
-            )));
-        }
-        for (label, path, expected) in [
+        let digests = Self::artifact_digests(model_dir)?;
+        for (label, found, expected) in [
             (
                 "model artifact",
-                model_artifact.as_ref(),
+                digests.model_artifact.as_deref(),
                 &identity.model_artifact_sha256,
             ),
             (
                 "model graph",
-                model_graph.as_ref(),
+                digests.model_graph.as_deref(),
                 &identity.model_graph_sha256,
             ),
-            ("tokenizer", tokenizer.as_ref(), &identity.tokenizer_sha256),
+            (
+                "tokenizer",
+                digests.tokenizer.as_deref(),
+                &identity.tokenizer_sha256,
+            ),
         ] {
             // A missing individual file is still a verification gap: the
             // identity declares a hash for it, so refuse rather than skip.
-            let Some(path) = path else {
+            let Some(found) = found else {
                 return Err(HailoError::EmbeddingProvenance(format!(
                     "identity declares a {label} hash but `{}` holds no {label} file",
                     model_dir.display()
                 )));
             };
-            if &Self::digest_file(model_dir, path)? != expected {
+            if found != expected {
                 return Err(HailoError::EmbeddingProvenance(format!(
-                    "{label} SHA-256 mismatch for `{}`",
-                    path.display()
+                    "{label} SHA-256 mismatch in `{}`: on-disk {found}, identity declares {expected}",
+                    model_dir.display()
                 )));
             }
         }
@@ -279,7 +337,7 @@ impl HailoEmbedder {
         // values for `device_id` etc. so the cfg lattice still compiles.
         #[cfg(all(not(feature = "hailo"), not(feature = "cpu-fallback")))]
         {
-            let _ = model_dir;
+            let _ = (model_dir, &identity);
             return Err(HailoError::FeatureDisabled);
         }
         #[cfg(all(not(feature = "hailo"), not(feature = "cpu-fallback")))]
@@ -436,31 +494,50 @@ impl HailoEmbedder {
     /// Identity used by [`open`](Self::open), which has no caller-supplied
     /// provenance. See that method's docs for what it does and does not
     /// attest.
+    ///
+    /// Nothing here depends on the filesystem path. `model_dir` is where the
+    /// bytes happen to live today; moving or renaming that directory does not
+    /// change which vectors the model produces, so it must not change the
+    /// embedding-space id. An earlier version put the directory basename in the
+    /// fallback `model_id`, which meant renaming a model directory made every
+    /// persisted corpus reject on reopen. The fallback now keys off the model
+    /// artifact digest instead, which moves with the bytes.
     fn default_identity(model_dir: &Path, dimensions: usize) -> Result<EmbeddingSpaceIdentity> {
-        let (model_artifact, model_graph, tokenizer) = Self::artifact_paths(model_dir);
-        let mut identity = ruvector_core::embeddings::registry_identity(
+        let digests = Self::artifact_digests(model_dir).ok();
+        let mut identity = match ruvector_core::embeddings::registry_identity(
             "ruvector-hailo",
             DEFAULT_MODEL_ID,
             dimensions,
-        )
-        .unwrap_or_else(|_| {
-            ruvector_core::embeddings::default_space_identity(
-                "ruvector-hailo",
-                &Self::model_name(model_dir),
-                dimensions,
-            )
-        });
+        ) {
+            Ok(identity) => identity,
+            // Not the model this backend ships for (a HEF compiled at some
+            // other hidden size). Name the space after the artifact bytes.
+            Err(_) => {
+                let fallback_id = digests
+                    .as_ref()
+                    .and_then(|d| d.model_artifact.as_deref())
+                    .map(|digest| format!("hailo-artifact-sha256:{digest}"))
+                    .unwrap_or_else(|| "hailo-artifact-sha256:absent".to_string());
+                ruvector_core::embeddings::default_space_identity(
+                    "ruvector-hailo",
+                    &fallback_id,
+                    dimensions,
+                )
+            }
+        };
         // Bind whatever artifacts are actually present into the identity, so
         // swapping model bytes changes the embedding-space id even on this
         // unattested path. Absent files keep the derived placeholder digest.
-        if let Some(path) = model_artifact {
-            identity.model_artifact_sha256 = Self::digest_file(model_dir, &path)?;
-        }
-        if let Some(path) = model_graph {
-            identity.model_graph_sha256 = Self::digest_file(model_dir, &path)?;
-        }
-        if let Some(path) = tokenizer {
-            identity.tokenizer_sha256 = Self::digest_file(model_dir, &path)?;
+        if let Some(digests) = digests {
+            if let Some(digest) = digests.model_artifact {
+                identity.model_artifact_sha256 = digest;
+            }
+            if let Some(digest) = digests.model_graph {
+                identity.model_graph_sha256 = digest;
+            }
+            if let Some(digest) = digests.tokenizer {
+                identity.tokenizer_sha256 = digest;
+            }
         }
         identity
             .validate()
@@ -752,6 +829,108 @@ mod tests {
             assert!(
                 message.contains(expected),
                 "error must list the artifacts looked for, missing {expected}: {message}"
+            );
+        }
+    }
+
+    /// The two model hashes must be independently useful: on the production
+    /// layout (weights + compiled graph) they fingerprint different files, and
+    /// on the single-file layouts they are equal by the documented convention.
+    /// If they were always equal, no real NPU deployment could ever be attested.
+    #[test]
+    fn artifact_digests_follow_the_documented_layout_table() {
+        let both = tempfile::tempdir().expect("tempdir");
+        std::fs::write(both.path().join("model.safetensors"), b"weights").unwrap();
+        std::fs::write(both.path().join("model.hef"), b"compiled graph").unwrap();
+        std::fs::write(both.path().join("vocab.txt"), b"[PAD]\n").unwrap();
+        let d = HailoEmbedder::artifact_digests(both.path()).expect("known layout");
+        assert_ne!(
+            d.model_artifact, d.model_graph,
+            "NPU + fallback layout must fingerprint safetensors and hef separately"
+        );
+        assert!(d.tokenizer.is_some());
+
+        for single in ["model.safetensors", "model.hef"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join(single), b"only artifact").unwrap();
+            let d = HailoEmbedder::artifact_digests(dir.path()).expect("known layout");
+            assert_eq!(
+                d.model_artifact, d.model_graph,
+                "{single}-only layout has no separately compiled graph"
+            );
+        }
+
+        let unknown = tempfile::tempdir().expect("tempdir");
+        std::fs::write(unknown.path().join("weights.bin"), b"x").unwrap();
+        assert!(
+            HailoEmbedder::artifact_digests(unknown.path()).is_err(),
+            "an unfingerprintable layout must not report digests"
+        );
+    }
+
+    /// An identity built from `artifact_digests` is exactly what the verifier
+    /// accepts — otherwise `open_with_identity` would be unusable in practice.
+    #[test]
+    fn digests_from_helper_satisfy_verification() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("model.safetensors"), b"weights").unwrap();
+        std::fs::write(dir.path().join("model.hef"), b"compiled graph").unwrap();
+        std::fs::write(dir.path().join("tokenizer.json"), b"{}").unwrap();
+
+        let digests = HailoEmbedder::artifact_digests(dir.path()).unwrap();
+        let mut identity = ruvector_core::embeddings::registry_identity(
+            "test",
+            "sentence-transformers/all-MiniLM-L6-v2",
+            crate::inference::MINI_LM_DIM,
+        )
+        .unwrap();
+        identity.model_artifact_sha256 = digests.model_artifact.unwrap();
+        identity.model_graph_sha256 = digests.model_graph.unwrap();
+        identity.tokenizer_sha256 = digests.tokenizer.unwrap();
+
+        HailoEmbedder::verify_artifact_provenance(dir.path(), &identity)
+            .expect("digests produced by artifact_digests must verify");
+    }
+
+    /// Where the bytes live is not part of what they embed: moving or renaming
+    /// a model directory must not change the embedding-space id, or every
+    /// persisted corpus would reject on reopen after a routine path change.
+    #[test]
+    fn default_identity_is_stable_across_directory_renames() {
+        // Both branches: the registry fixture (MiniLM dimensionality) and the
+        // artifact-keyed fallback (any other dimensionality).
+        for dimensions in [crate::inference::MINI_LM_DIM, 512] {
+            let parent = tempfile::tempdir().expect("tempdir");
+            let before = parent.path().join("all-minilm-l6-v2");
+            std::fs::create_dir(&before).unwrap();
+            std::fs::write(before.join("model.safetensors"), b"weights").unwrap();
+            std::fs::write(before.join("tokenizer.json"), b"{}").unwrap();
+            let id_before = HailoEmbedder::default_identity(&before, dimensions)
+                .unwrap()
+                .embedding_space_id()
+                .unwrap();
+
+            let after = parent.path().join("models-2026-08-02");
+            std::fs::rename(&before, &after).unwrap();
+            let id_after = HailoEmbedder::default_identity(&after, dimensions)
+                .unwrap()
+                .embedding_space_id()
+                .unwrap();
+
+            assert_eq!(
+                id_before, id_after,
+                "renaming a model dir changed the {dimensions}D embedding-space id"
+            );
+
+            // The bytes, in contrast, must change it.
+            std::fs::write(after.join("model.safetensors"), b"different weights").unwrap();
+            let id_new_bytes = HailoEmbedder::default_identity(&after, dimensions)
+                .unwrap()
+                .embedding_space_id()
+                .unwrap();
+            assert_ne!(
+                id_after, id_new_bytes,
+                "swapping model bytes must change the {dimensions}D embedding-space id"
             );
         }
     }

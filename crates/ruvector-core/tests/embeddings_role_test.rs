@@ -12,13 +12,16 @@
 //! BGE / E5 / Qwen and the cross-language conformance corpus are not available.
 
 use ruvector_core::embeddings::{
-    apply_prompt_template, default_space_identity, legacy_embed_call_count, registry_identity,
-    EmbeddingDistanceMetric, EmbeddingProvider, EmbeddingRole, EmbeddingRolePolicy,
-    EmbeddingSpaceIdentity, HashEmbedding, OutputDtype, PoolingStrategy, PoolingStrategyName,
-    PrefixPolicy,
+    apply_prompt_template, build_revision, default_space_identity, legacy_embed_call_count,
+    registry_identity, EmbeddingDistanceMetric, EmbeddingProvider, EmbeddingRole,
+    EmbeddingRolePolicy, EmbeddingSpaceIdentity, HashEmbedding, OutputDtype, PoolingStrategy,
+    PoolingStrategyName, PrefixPolicy,
 };
 use ruvector_core::error::{Result, RuvectorError};
-use ruvector_core::{types::DbOptions, AgenticDB};
+use ruvector_core::{
+    types::{DbOptions, VectorEntry},
+    AgenticDB, VectorDB,
+};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
@@ -596,8 +599,91 @@ fn reopening_a_corpus_with_a_different_same_dimension_model_is_rejected() {
     );
 }
 
+const EMBEDDING_SPACE_KEY: &str = "__ruvector_embedding_space__";
+
+/// Delete the whole `.agentic` sidecar file, exactly as an operator (or an
+/// attacker) could. The vectors and the identity copy inside the vector store
+/// survive.
+fn delete_sidecar_file(storage_path: &str) {
+    std::fs::remove_file(format!("{storage_path}.agentic")).expect("sidecar must exist");
+}
+
+/// Read the sidecar mirror, if present.
+fn sidecar_identity(storage_path: &str) -> Option<Vec<u8>> {
+    let db = redb::Database::create(format!("{storage_path}.agentic")).unwrap();
+    let txn = db.begin_read().unwrap();
+    let table = txn
+        .open_table(redb::TableDefinition::<&str, &[u8]>::new(
+            "embedding_space_identity",
+        ))
+        .unwrap();
+    let found = table
+        .get(EMBEDDING_SPACE_KEY)
+        .unwrap()
+        .map(|v| v.value().to_vec());
+    found
+}
+
+// The compatibility gate must not be removable on its own. The identity's
+// authoritative copy lives in the vector store, so deleting the `.agentic`
+// sidecar destroys the episodes but cannot silently re-open the corpus to a
+// different embedding space.
+#[test]
+fn deleting_the_sidecar_does_not_downgrade_the_identity_check() {
+    let dims = 32;
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("gated.db").to_string_lossy().to_string();
+    let options = || {
+        let mut o = DbOptions::default();
+        o.storage_path = storage_path.clone();
+        o.dimensions = dims;
+        o
+    };
+    let spy = |model: &str| {
+        let mut provider = asymmetric_spy(dims);
+        provider.identity = spy_identity(
+            model,
+            dims as u32,
+            EmbeddingRolePolicy::Asymmetric,
+            PrefixPolicy::Required,
+        );
+        Arc::new(provider)
+    };
+
+    {
+        let db = AgenticDB::with_embedding_provider(options(), spy("spy/model-a")).unwrap();
+        db.store_episode("t".into(), vec![], vec![], "c".into())
+            .unwrap();
+    }
+
+    delete_sidecar_file(&storage_path);
+
+    let err = match AgenticDB::with_embedding_provider(options(), spy("spy/model-b")) {
+        Ok(_) => panic!(
+            "deleting the sidecar downgraded the embedding-space check — a different model \
+             was allowed to mutate this corpus"
+        ),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, RuvectorError::EmbeddingSpaceMismatch { .. }),
+        "expected EmbeddingSpaceMismatch, got {err:?}"
+    );
+
+    // The original space still opens, and that reopen rewrites the sidecar
+    // mirror from the surviving primary copy.
+    AgenticDB::with_embedding_provider(options(), spy("spy/model-a"))
+        .expect("the original embedding space must still open");
+    assert!(
+        sidecar_identity(&storage_path).is_some(),
+        "reopening must heal the deleted sidecar mirror"
+    );
+}
+
 // Pre-ADR-281 corpora carry no stored identity. They must stay usable (adopt
-// the active identity) rather than being bricked.
+// the active identity) rather than being bricked — and because the vectors are
+// the thing at risk, "does this corpus already hold data?" has to look at the
+// vector store, not only at the agentic sidecar tables.
 #[test]
 fn corpus_without_a_stored_identity_is_adopted() {
     let dims = 32;
@@ -607,30 +693,43 @@ fn corpus_without_a_stored_identity_is_adopted() {
     options.storage_path = storage_path.clone();
     options.dimensions = dims;
 
+    // Written by a build that predates ADR-281: vectors, and no identity in
+    // either location. The sidecar tables are empty, so only the vector store
+    // can reveal that this corpus is populated.
     {
-        let db =
-            AgenticDB::with_embedding_provider(options.clone(), Arc::new(asymmetric_spy(dims)))
-                .unwrap();
-        db.store_episode("t".into(), vec![], vec![], "c".into())
-            .unwrap();
-    }
-    // Drop the recorded identity to simulate a corpus written before ADR-281.
-    {
-        let db = redb::Database::create(format!("{storage_path}.agentic")).unwrap();
-        let txn = db.begin_write().unwrap();
-        {
-            let mut table = txn
-                .open_table(redb::TableDefinition::<&str, &[u8]>::new(
-                    "embedding_space_identity",
-                ))
-                .unwrap();
-            table.remove("active").unwrap();
-        }
-        txn.commit().unwrap();
+        let raw = VectorDB::new(options.clone()).unwrap();
+        raw.insert(VectorEntry {
+            id: Some("v1".into()),
+            vector: vec![0.1; dims],
+            metadata: None,
+        })
+        .unwrap();
+        assert!(!raw.is_empty().unwrap());
     }
 
-    AgenticDB::with_embedding_provider(options, Arc::new(asymmetric_spy(dims)))
+    let db = AgenticDB::with_embedding_provider(options.clone(), Arc::new(asymmetric_spy(dims)))
         .expect("a corpus with no recorded identity must remain usable");
+    assert!(
+        db.get("v1").unwrap().is_some(),
+        "the vectors that triggered the adopt-with-warning path must still be there"
+    );
+    drop(db);
+
+    // Having adopted, the corpus is gated again from here on.
+    let mut other = asymmetric_spy(dims);
+    other.identity = spy_identity(
+        "spy/other",
+        dims as u32,
+        EmbeddingRolePolicy::Asymmetric,
+        PrefixPolicy::Required,
+    );
+    assert!(
+        matches!(
+            AgenticDB::with_embedding_provider(options, Arc::new(other)),
+            Err(RuvectorError::EmbeddingSpaceMismatch { .. })
+        ),
+        "the adopted identity must gate subsequent opens"
+    );
 }
 
 // Smoke test for the identity-free public entry points in this crate: they
@@ -649,5 +748,76 @@ fn identity_free_entry_points_construct() {
         provider.embedding_space().output_dimension,
         16,
         "HashEmbedding must carry a usable default identity"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// embedding_space_id stability (ADR-281 §7)
+// ---------------------------------------------------------------------------
+
+// The id gates corpus reopen and cache reuse, so it must be a function of the
+// embedding function alone. A crate release changes no vectors and must change
+// no id: when 2.2.3 -> 2.3.0 last happened, an id that hashed the crate version
+// would have made every persisted corpus unreadable and every cache entry cold.
+#[test]
+fn embedding_space_id_is_blind_to_the_crate_build_version() {
+    let identity = registry_identity("ruvector-core", "BAAI/bge-small-en-v1.5", 384).unwrap();
+    let canonical = identity.canonical_json().unwrap();
+
+    assert!(
+        !canonical.contains(build_revision()),
+        "the crate build version {:?} reached the hashed identity: {canonical}",
+        build_revision()
+    );
+    assert!(
+        !identity.runtime_revision.contains(build_revision()),
+        "runtime_revision must not carry the crate version, got {:?}",
+        identity.runtime_revision
+    );
+
+    // Simulate the version bump directly: an identity is only allowed to
+    // change id when an embedding-semantics input changes, so substituting any
+    // plausible crate version into the struct must be a no-op by construction.
+    for fake_crate_version in ["2.2.3", "2.3.0", "99.0.0-rc.1"] {
+        let mut bumped = identity.clone();
+        bumped.runtime_revision = bumped
+            .runtime_revision
+            .replace(build_revision(), fake_crate_version);
+        assert_eq!(
+            bumped.embedding_space_id().unwrap(),
+            identity.embedding_space_id().unwrap(),
+            "id moved when the crate version was rewritten to {fake_crate_version}"
+        );
+    }
+
+    // Control: an input that genuinely changes the embedding function must
+    // still change the id, so the test above is not passing vacuously.
+    let mut retemplated = identity.clone();
+    retemplated.prompt_template_sha256 = "ab".repeat(32);
+    assert_ne!(
+        retemplated.embedding_space_id().unwrap(),
+        identity.embedding_space_id().unwrap(),
+        "changing the prompt templates must change the embedding-space id"
+    );
+}
+
+// Golden id for a registered model. This is the value persisted corpora carry,
+// so it is a compatibility constant, not an implementation detail: if a change
+// moves it, every existing AgenticDB corpus stops opening and every cluster
+// cache entry is invalidated. A failure here means either a deliberate
+// EMBEDDING_SPACE_FORMAT_REVISION bump (update this constant and plan the
+// re-embed) or an accidental identity drift (revert it).
+#[test]
+fn embedding_space_id_golden_value_for_minilm() {
+    let identity = registry_identity(
+        "ruvector-core",
+        "sentence-transformers/all-MiniLM-L6-v2",
+        384,
+    )
+    .unwrap();
+    assert_eq!(
+        identity.embedding_space_id().unwrap(),
+        "4ce23f439462151f8546518f8d5fce92359b0996b2431c979197db61271ee48a",
+        "embedding-space id for all-MiniLM-L6-v2 drifted"
     );
 }

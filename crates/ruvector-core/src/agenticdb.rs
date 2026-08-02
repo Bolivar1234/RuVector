@@ -42,7 +42,9 @@ const LEARNING_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("learn
 /// ADR-281 §7: the embedding-space identity the corpus was written under.
 const EMBEDDING_SPACE_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("embedding_space_identity");
-const EMBEDDING_SPACE_KEY: &str = "active";
+/// Key for the identity in both the sidecar table and the vector store's
+/// shared config table, so it is namespaced like the other reserved keys there.
+const EMBEDDING_SPACE_KEY: &str = "__ruvector_embedding_space__";
 
 /// Reflexion episode for self-critique memory
 /// Note: Serialized using JSON (not bincode) due to serde_json::Value in metadata field
@@ -213,16 +215,34 @@ impl AgenticDB {
             // ADR-281 §7: dimension equality is never proof of embedding
             // compatibility, so the corpus records the identity it was written
             // under and refuses a provider from a different embedding space.
+            //
+            // The identity is written to two places. The authoritative copy
+            // lives in the vector store's own config table — the same file as
+            // the vectors, so it cannot be dropped without dropping the data it
+            // describes. The copy in this `.agentic` sidecar is a mirror for
+            // tools that only open the sidecar. The primary copy wins on
+            // disagreement, which is what closes the "delete the sidecar to
+            // downgrade the check" hole: removing `{path}.agentic` now loses
+            // the episodes and skills, not the compatibility gate.
             let mut spaces = write_txn.open_table(EMBEDDING_SPACE_TABLE)?;
             let active = embedding_provider.embedding_space();
             let active_id = active.embedding_space_id()?;
-            let stored = spaces
-                .get(EMBEDDING_SPACE_KEY)?
-                .map(|value| value.value().to_vec());
-            match stored {
-                Some(bytes) => {
+            let stored_json = match vector_db.load_config_value(EMBEDDING_SPACE_KEY)? {
+                Some(primary) => Some(primary),
+                None => spaces
+                    .get(EMBEDDING_SPACE_KEY)?
+                    .map(|value| {
+                        // Strict, not lossy: provenance bytes are never
+                        // silently rewritten to make them parse.
+                        String::from_utf8(value.value().to_vec())
+                            .map_err(|e| RuvectorError::SerializationError(e.to_string()))
+                    })
+                    .transpose()?,
+            };
+            match stored_json {
+                Some(json) => {
                     let stored: crate::embeddings::EmbeddingSpaceIdentity =
-                        serde_json::from_slice(&bytes)
+                        serde_json::from_str(&json)
                             .map_err(|e| RuvectorError::SerializationError(e.to_string()))?;
                     // AgenticDB is a text-embedding, corpus-mutating handle:
                     // every method either embeds text or writes vectors, so
@@ -236,26 +256,41 @@ impl AgenticDB {
                             active: active_id,
                         });
                     }
+                    // Heal a store whose primary copy predates this check, or
+                    // whose sidecar was deleted, so the next open is gated by
+                    // both copies again.
+                    vector_db.save_config_value(EMBEDDING_SPACE_KEY, &json)?;
+                    spaces.insert(EMBEDDING_SPACE_KEY, json.as_bytes())?;
                 }
                 None => {
                     // Pre-ADR-281 corpora carry no identity. Adopting the
                     // active identity keeps that data usable (the alternative
                     // would brick every existing store); the warning is the
                     // only signal available that the adoption is unverified.
-                    let populated =
-                        !reflexion.is_empty()? || !skills.is_empty()? || !causal.is_empty()?;
+                    //
+                    // "Has data" must include the vectors themselves: a corpus
+                    // whose sidecar was deleted still has every vector, and
+                    // that is exactly the case worth shouting about.
+                    let populated = !vector_db.is_empty()?
+                        || !reflexion.is_empty()?
+                        || !skills.is_empty()?
+                        || !causal.is_empty()?;
                     if populated {
                         tracing::warn!(
                             embedding_space_id = %active_id,
                             provider = %active.provider,
                             model_id = %active.model_id,
-                            "corpus has no recorded embedding-space identity; adopting the \
-                             active provider's identity without verification"
+                            vectors = vector_db.len()?,
+                            "corpus holds data but has no recorded embedding-space identity \
+                             (pre-ADR-281 store, or its provenance was removed); adopting the \
+                             active provider's identity WITHOUT verification — vectors already \
+                             in this store may come from a different embedding space"
                         );
                     }
-                    let json = serde_json::to_vec(active)
+                    let json = serde_json::to_string(active)
                         .map_err(|e| RuvectorError::SerializationError(e.to_string()))?;
-                    spaces.insert(EMBEDDING_SPACE_KEY, json.as_slice())?;
+                    vector_db.save_config_value(EMBEDDING_SPACE_KEY, &json)?;
+                    spaces.insert(EMBEDDING_SPACE_KEY, json.as_bytes())?;
                 }
             }
         }

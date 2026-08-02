@@ -40,11 +40,25 @@ const SHARD_MASK: usize = SHARDS - 1;
 
 /// Single-process LRU cache keyed by `(fingerprint, text)`. Thread-safe
 /// via 16-way sharded Mutex. Optional TTL bounds entry lifetime.
+///
+/// # Sizing: capacity below 2×[`SHARDS`] degenerates
+/// Capacity is split across the 16 shards, so the per-shard cap is
+/// `ceil(capacity / SHARDS)` — which is 1 for **any** capacity from 1 to 16.
+/// At a per-shard cap of 1, two keys that hash to the same shard evict each
+/// other on every alternation, so a nominal capacity of 16 can behave like a
+/// cache of 1 for an unlucky pair of texts, and hit rate collapses well before
+/// the cache looks full. This is a sizing property, not a bug: the shard split
+/// is what removes lock contention at >4 threads.
+///
+/// Pick a capacity of at least `2 * SHARDS` (32), and realistically in the
+/// thousands, or set it to 0 to disable the cache outright. Capacities in
+/// between are legal but will not behave like an LRU of that size.
 pub struct EmbeddingCache {
     shards: Box<[Mutex<Shard>]>,
     /// Total capacity divided across shards. Each shard caps at
     /// `capacity / SHARDS + 1` so the global hard limit is approximately
-    /// honoured (within ±SHARDS-1 entries).
+    /// honoured (within ±SHARDS-1 entries). See the type-level note on
+    /// small-capacity degeneracy.
     capacity: usize,
     per_shard_capacity: usize,
     /// `None` ≡ no time-based expiry; entries live until LRU evicts them.
