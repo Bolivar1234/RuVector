@@ -160,6 +160,10 @@ pub struct RvfStore {
     dropped_metadata_generations: u64,
     /// Records the truncated replay resurrected and open therefore discarded.
     dropped_metadata_records: u64,
+    /// `META_SEG` offsets a truncated replay could not reach. They are dropped
+    /// from the segment directory by the same write that re-anchors the chain,
+    /// never on their own -- see `restore_metadata`.
+    orphaned_metadata_offsets: Vec<u64>,
     embedding_compatibility: EmbeddingCompatibility,
     metadata_filter_scanned_records: AtomicU64,
     metadata_filter_scanned_bytes: AtomicU64,
@@ -255,6 +259,7 @@ impl RvfStore {
             committed_file_metadata: BTreeMap::new(),
             dropped_metadata_generations: 0,
             dropped_metadata_records: 0,
+            orphaned_metadata_offsets: Vec::new(),
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -330,6 +335,7 @@ impl RvfStore {
             committed_file_metadata: BTreeMap::new(),
             dropped_metadata_generations: 0,
             dropped_metadata_records: 0,
+            orphaned_metadata_offsets: Vec::new(),
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -406,6 +412,7 @@ impl RvfStore {
             committed_file_metadata: BTreeMap::new(),
             dropped_metadata_generations: 0,
             dropped_metadata_records: 0,
+            orphaned_metadata_offsets: Vec::new(),
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -1486,7 +1493,7 @@ impl RvfStore {
         // newest META_SEG, which open rejects outright.
         let old_metadata = self.metadata.clone();
         let old_chain = self.metadata_chain;
-        let old_directory_len = self.segment_dir.len();
+        let old_directory = self.segment_dir.clone();
         let old_deletion_bitmap = self.deletion_bitmap.clone();
         let old_membership_filter = self.membership_filter.clone();
         let old_epoch = self.epoch;
@@ -1533,7 +1540,7 @@ impl RvfStore {
         if let Err(error) = result {
             self.metadata = old_metadata;
             self.metadata_chain = old_chain;
-            self.segment_dir.truncate(old_directory_len);
+            self.segment_dir = old_directory;
             self.deletion_bitmap = old_deletion_bitmap;
             self.membership_filter = old_membership_filter;
             self.epoch = old_epoch;
@@ -2805,7 +2812,7 @@ impl RvfStore {
         let old_file_metadata = self.file_metadata.clone();
         let old_chain = self.metadata_chain;
         let old_epoch = self.epoch;
-        let old_directory_len = self.segment_dir.len();
+        let old_directory = self.segment_dir.clone();
         self.file_metadata.insert(key, value);
         let result = (|| {
             self.write_metadata_generation()?;
@@ -2824,7 +2831,7 @@ impl RvfStore {
             self.file_metadata = old_file_metadata;
             self.metadata_chain = old_chain;
             self.epoch = old_epoch;
-            self.segment_dir.truncate(old_directory_len);
+            self.segment_dir = old_directory;
         } else {
             self.commit_metadata_state();
         }
@@ -3042,6 +3049,7 @@ impl RvfStore {
             committed_file_metadata: BTreeMap::new(),
             dropped_metadata_generations: 0,
             dropped_metadata_records: 0,
+            orphaned_metadata_offsets: Vec::new(),
             embedding_compatibility: self.embedding_compatibility,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -3777,8 +3785,9 @@ impl RvfStore {
             .generation
             .checked_add(1)
             .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+        let re_anchoring = self.metadata_chain.needs_snapshot;
         let mut full_snapshot = self.metadata_chain.generation == 0
-            || self.metadata_chain.needs_snapshot
+            || re_anchoring
             || self.metadata_chain.deltas() >= META_SNAPSHOT_INTERVAL;
         let mut payload =
             self.encode_metadata_generation(generation, (!full_snapshot).then_some(()))?;
@@ -3813,6 +3822,18 @@ impl RvfStore {
             buffered.flush().map_err(|_| err(ErrorCode::FsyncFailed))?;
             result
         };
+        // A re-anchoring snapshot supersedes everything a truncated replay
+        // could not reach, so the orphans leave the directory in the very same
+        // write. Doing it here rather than at recovery time keeps the pruning
+        // and the new anchor in one commit, and keeps manifest-only mutations
+        // from publishing the pruning by itself.
+        if re_anchoring {
+            let orphans = self.orphaned_metadata_offsets.clone();
+            self.segment_dir
+                .retain(|&(_, segment_offset, _, segment_type)| {
+                    segment_type != SegmentType::Meta as u8 || !orphans.contains(&segment_offset)
+                });
+        }
         self.segment_dir.push((
             segment_id,
             offset,
@@ -3841,6 +3862,10 @@ impl RvfStore {
     fn commit_metadata_state(&mut self) {
         self.committed_metadata = self.committed_metadata_view();
         self.committed_file_metadata = self.file_metadata.clone();
+        // The manifest that just published no longer references the orphans.
+        self.orphaned_metadata_offsets.clear();
+        self.dropped_metadata_generations = 0;
+        self.dropped_metadata_records = 0;
     }
 
     /// The subset of `metadata` a `META_SEG` written now would contain.
@@ -3939,7 +3964,8 @@ impl RvfStore {
         let mut chain_bytes = snapshot_bytes;
         let mut applied_offsets: HashSet<u64> = HashSet::from([snapshot_offset]);
         let mut applied = vec![snapshot];
-        for (offset, bytes, segment) in chain {
+        let mut remaining = chain;
+        for (offset, bytes, segment) in remaining.by_ref() {
             let expected = applied
                 .last()
                 .and_then(|previous: &MetadataSegment| previous.generation.checked_add(1));
@@ -3953,6 +3979,9 @@ impl RvfStore {
             applied_offsets.insert(offset);
             applied.push(segment);
         }
+        // Everything after the break is unreachable too, so it is dropped as
+        // well and must be counted -- the CLI reports this number verbatim.
+        damaged = damaged.saturating_add(remaining.count() as u64);
         let latest = applied
             .last()
             .map(|segment| segment.generation)
@@ -4027,14 +4056,25 @@ impl RvfStore {
         };
         self.dropped_metadata_generations = damaged;
         self.dropped_metadata_records = resurrected.len() as u64;
-        if truncated {
-            // Drop the unreachable generations from the segment directory so
-            // the next committed manifest stops referencing them. Their bytes
-            // stay in the file until compaction reclaims them.
-            self.segment_dir.retain(|&(_, offset, _, segment_type)| {
-                segment_type != SegmentType::Meta as u8 || applied_offsets.contains(&offset)
-            });
-        }
+        // Record which generations the chain no longer reaches, but do NOT
+        // prune them here. Pruning edits `segment_dir`, which any manifest
+        // write persists, while the re-anchoring snapshot is written only by
+        // `write_metadata_generation`. Splitting them lets a manifest-only
+        // mutation commit the pruning alone, after which the damage is no
+        // longer discoverable, the chain reads as intact, and the resurrected
+        // records above become a fatal inconsistency. The two happen together
+        // in `write_metadata_generation` instead.
+        self.orphaned_metadata_offsets = if truncated {
+            self.segment_dir
+                .iter()
+                .filter(|&&(_, offset, _, segment_type)| {
+                    segment_type == SegmentType::Meta as u8 && !applied_offsets.contains(&offset)
+                })
+                .map(|&(_, offset, _, _)| offset)
+                .collect()
+        } else {
+            Vec::new()
+        };
         // The served state is what the next generation is encoded against. It
         // can differ from the applied prefix when records were discarded above,
         // which is safe only because that next generation is a full snapshot.

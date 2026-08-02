@@ -60,6 +60,47 @@ fn meta_segments(bytes: &[u8]) -> Vec<(usize, usize)> {
     found
 }
 
+/// The runtime's legacy segment content hash: an IEEE CRC32 of the payload
+/// rotated into four little-endian lanes (`rvf-runtime::hashing`). Rewriting a
+/// segment payload in place means repairing this, or the reader rejects the
+/// segment as damaged and the test would exercise recovery instead of the
+/// intact-chain path it means to pin.
+fn legacy_content_hash(data: &[u8]) -> [u8; 16] {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    let crc = !crc;
+    let mut hash = [0u8; 16];
+    for lane in 0..4 {
+        hash[lane * 4..(lane + 1) * 4]
+            .copy_from_slice(&crc.rotate_left(lane as u32 * 8).to_le_bytes());
+    }
+    hash
+}
+
+/// Replace one `META_SEG` payload in place, repairing the segment header's
+/// content hash so the segment still reads as intact. The replacement must be
+/// the same length, since the file is append-only and offsets are fixed.
+fn replace_meta_payload(bytes: &mut [u8], payload_start: usize, payload: &[u8]) {
+    let old_len = {
+        let header = payload_start - SEGMENT_HEADER_SIZE;
+        u64::from_le_bytes(bytes[header + 0x10..header + 0x18].try_into().unwrap()) as usize
+    };
+    assert_eq!(
+        payload.len(),
+        old_len,
+        "replacement must be the same length"
+    );
+    bytes[payload_start..payload_start + payload.len()].copy_from_slice(payload);
+    let header = payload_start - SEGMENT_HEADER_SIZE;
+    bytes[header + 0x28..header + 0x38].copy_from_slice(&legacy_content_hash(payload));
+}
+
 /// Several hundred single-vector metadata commits must not cost several hundred
 /// full snapshots: the committed metadata bytes stay proportional to the live
 /// snapshot, the artifact reopens with bounded work, and `compact()` reclaims
@@ -634,4 +675,121 @@ fn derived_child_metadata_write_stays_openable() {
         reopened.get_metadata(1).is_none(),
         "a derived child holds no parent vectors, so it carries no parent record"
     );
+}
+
+/// Build a store with vectors `1..=count` carrying metadata, then delete
+/// `to_delete` in a second generation. Returns the file path.
+fn store_with_metadata_then_delete(path: &std::path::Path, count: u64, to_delete: &[u64]) {
+    let mut store = RvfStore::create(path, make_options(2)).unwrap();
+    let vectors: Vec<[f32; 2]> = (1..=count).map(|i| [i as f32, 1.0]).collect();
+    let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
+    let ids: Vec<u64> = (1..=count).collect();
+    let records: Vec<VectorMetadata> = ids
+        .iter()
+        .map(|&i| record(i, &format!("value-{i}")))
+        .collect();
+    store
+        .ingest_batch_with_metadata(&refs, &ids, &records)
+        .unwrap();
+    store.delete(to_delete).unwrap();
+    store.close().unwrap();
+}
+
+/// CONTROL for the truncated-recovery tolerance: on an *intact* chain, metadata
+/// that references a deleted vector is a genuine inconsistency and must still be
+/// a hard error. Without this, relaxing the check unconditionally -- which makes
+/// every other test in this file pass -- would silently convert a corruption
+/// signal into data loss.
+///
+/// The inconsistency is built by retargeting generation 2's record tombstone
+/// from vector 3 (which the same generation deleted) to vector 4, leaving an
+/// intact, fully replayable chain whose metadata disagrees with the manifest's
+/// deletion set.
+#[test]
+fn intact_chain_with_deleted_vector_metadata_is_still_fatal() {
+    use rvf_types::metadata::{MetadataRecordOp, MetadataSegment};
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("intact_inconsistency.rvf");
+    store_with_metadata_then_delete(&path, 4, &[3]);
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let segments = meta_segments(&bytes);
+    assert_eq!(segments.len(), 2, "expected one snapshot and one delta");
+
+    let (start, len) = segments[1];
+    let mut delta = MetadataSegment::decode(&bytes[start..start + len]).unwrap();
+    let tombstone = delta
+        .records
+        .iter_mut()
+        .find(|r| matches!(r.operation, MetadataRecordOp::DeleteRecord))
+        .expect("generation 2 must tombstone the deleted record");
+    assert_eq!(tombstone.vector_id, 3);
+    tombstone.vector_id = 4;
+    let patched = delta.encode().unwrap();
+    replace_meta_payload(&mut bytes, start, &patched);
+    std::fs::write(&path, &bytes).unwrap();
+
+    // The chain is intact, so the surviving record for the deleted vector 3 is
+    // a real inconsistency rather than a consequence of damage.
+    let error = RvfStore::open_readonly(&path)
+        .err()
+        .expect("metadata for a deleted vector on an intact chain must be fatal");
+    assert!(
+        format!("{error:?}").contains("InvalidMetadata"),
+        "expected InvalidMetadata, got {error:?}"
+    );
+}
+
+/// A mutation that publishes a manifest without emitting a metadata generation
+/// must not destroy an artifact that opened through truncated recovery. The
+/// recovery's bookkeeping only becomes durable together with the re-anchoring
+/// snapshot, so a manifest-only write leaves the on-disk chain exactly as it
+/// was and the next open recovers identically.
+#[test]
+fn manifest_only_write_after_truncated_recovery_preserves_the_artifact() {
+    for (label, manifest_only) in [("ingest-without-metadata", 0u8), ("freeze", 1u8)] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("manifest_only.rvf");
+        store_with_metadata_then_delete(&path, 8, &[2, 4, 6, 8]);
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (start, len) = meta_segments(&bytes)[1];
+        bytes[start + len / 2] ^= 0xFF;
+        std::fs::write(&path, &bytes).unwrap();
+
+        // Recovery drops the deletion-carrying generation, resurrecting the
+        // records whose vectors the manifest still lists as deleted.
+        let mut store = RvfStore::open(&path)
+            .unwrap_or_else(|e| panic!("[{label}] recovery must open the artifact: {e:?}"));
+        let recovery = store.metadata_recovery();
+        assert!(recovery.dropped_generations > 0, "[{label}]");
+        assert_eq!(recovery.dropped_records, 4, "[{label}]");
+
+        // A mutation that writes a manifest but no metadata generation.
+        if manifest_only == 0 {
+            store.ingest_batch(&[&[99.0, 1.0]], &[99], None).unwrap();
+            store.close().unwrap();
+        } else {
+            store.freeze().unwrap();
+            drop(store);
+        }
+
+        let reopened = RvfStore::open_readonly(&path).unwrap_or_else(|e| {
+            panic!("[{label}] a manifest-only write must not destroy the artifact: {e:?}")
+        });
+        for i in [1u64, 3, 5, 7] {
+            assert_eq!(
+                reopened.get_metadata(i).unwrap(),
+                expected_record(i),
+                "[{label}] the recovered state must still be served for record {i}"
+            );
+        }
+        for i in [2u64, 4, 6, 8] {
+            assert!(
+                reopened.get_metadata(i).is_none(),
+                "[{label}] record {i} belongs to a deleted vector"
+            );
+        }
+    }
 }
