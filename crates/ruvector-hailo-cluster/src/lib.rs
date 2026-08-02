@@ -170,17 +170,29 @@ impl HailoClusterEmbedder {
     /// transport. The transport is what actually talks to the workers
     /// (gRPC / HTTP / in-memory mock) — the coordinator stays
     /// transport-agnostic.
+    ///
+    /// # Embedding-space identity
+    /// The coordinator never loads model artifacts — the workers do — so this
+    /// path derives a symmetric identity scoped to
+    /// `expected_model_fingerprint` and `dim` (ADR-281 §2). That is enough to
+    /// keep two fleets running different models out of each other's caches and
+    /// corpora: the fingerprint is already the fleet's model-compatibility
+    /// marker, so changing it changes the embedding-space id. It is not
+    /// artifact provenance; callers that have the workers' attested identity
+    /// pass it to [`new_with_identity`](Self::new_with_identity) instead.
     pub fn new(
         workers: Vec<WorkerEndpoint>,
         transport: Arc<dyn EmbeddingTransport + Send + Sync>,
         dim: usize,
         expected_model_fingerprint: impl Into<String>,
     ) -> Result<Self, ClusterError> {
-        let _ = (workers, transport, dim, expected_model_fingerprint);
-        Err(ClusterError::EmbeddingProvenance(
-            "HailoClusterEmbedder::new cannot infer immutable artifact identity; use new_with_identity"
-                .into(),
-        ))
+        let fingerprint = expected_model_fingerprint.into();
+        let identity = ruvector_core::embeddings::default_space_identity(
+            "ruvector-hailo-cluster",
+            &format!("fleet:{fingerprint}"),
+            dim,
+        );
+        Self::new_with_identity(workers, transport, dim, fingerprint, identity)
     }
 
     /// Build a cluster only with explicit, complete vector-space provenance.
@@ -1005,15 +1017,33 @@ mod tests {
         )
     }
 
+    /// Smoke test for the identity-free constructor: it must build a working
+    /// coordinator, and the derived identity must be scoped to the fleet's
+    /// model fingerprint so two fleets never share an embedding space.
     #[test]
-    fn legacy_constructor_fails_closed_without_identity() {
-        let result = HailoClusterEmbedder::new(
-            vec![WorkerEndpoint::new("pi-a", "127.0.0.1:1")],
-            transport::null_transport(),
-            384,
-            "fingerprint:test",
+    fn legacy_constructor_derives_a_fingerprint_scoped_identity() {
+        let build = |fingerprint: &str| {
+            HailoClusterEmbedder::new(
+                vec![WorkerEndpoint::new("pi-a", "127.0.0.1:1")],
+                transport::null_transport(),
+                384,
+                fingerprint,
+            )
+            .expect("legacy constructor must build a coordinator")
+        };
+
+        let a = build("fingerprint:test");
+        assert_eq!(a.dim(), 384);
+        assert_eq!(
+            ruvector_core::EmbeddingProvider::embedding_space(&a).output_dimension,
+            384
         );
-        assert!(matches!(result, Err(ClusterError::EmbeddingProvenance(_))));
+
+        let b = build("fingerprint:other");
+        assert_ne!(
+            a.embedding_space_id, b.embedding_space_id,
+            "a different model fingerprint must be a different embedding space"
+        );
     }
 
     #[test]

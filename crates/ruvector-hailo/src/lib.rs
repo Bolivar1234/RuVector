@@ -129,6 +129,17 @@ impl HefBackend {
     }
 }
 
+/// Artifact filenames this backend knows how to fingerprint, most specific
+/// first. Provenance verification is only meaningful for these layouts, so an
+/// `open_with_identity` against a directory holding none of them fails closed.
+const MODEL_ARTIFACT_FILES: &[&str] = &["model.safetensors", "model.hef"];
+const MODEL_GRAPH_FILES: &[&str] = &["model.hef", "model.safetensors"];
+const TOKENIZER_FILES: &[&str] = &["tokenizer.json", "vocab.txt"];
+
+/// The model this backend's HEF and cpu-fallback weights are built for
+/// (ADR-167). Used to look up the registry fixture for the default identity.
+const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
+
 impl HailoEmbedder {
     /// Open a Hailo NPU device and load the HEF + tokenizer artifacts found
     /// at `model_dir`.
@@ -141,12 +152,22 @@ impl HailoEmbedder {
     ///   vocab.txt             # WordPiece vocab (one token per line)
     ///   special_tokens.json   # CLS/SEP/PAD ids
     /// ```
+    ///
+    /// # Embedding-space identity
+    /// The caller supplies none, so this path derives a default one (ADR-281
+    /// §2): the registry fixture for `all-MiniLM-L6-v2` when the loaded model
+    /// has that dimensionality — what the ADR-167 HEF and the cpu-fallback
+    /// safetensors are compiled for — and otherwise a provider-scoped
+    /// symmetric identity naming this model directory. Both are `Symmetric` /
+    /// `PrefixPolicy::None`, which is what this backend actually does: it
+    /// applies no prompt template on either side. The artifact hash fields are
+    /// digests of whatever known artifacts the directory holds, so the
+    /// identity still changes when the model bytes change. Callers that need
+    /// an externally attested identity use
+    /// [`open_with_identity`](Self::open_with_identity), which verifies the
+    /// supplied hashes against the files on disk and fails closed.
     pub fn open(model_dir: &Path) -> Result<Self> {
-        let _ = model_dir;
-        Err(HailoError::EmbeddingProvenance(
-            "HailoEmbedder::open cannot infer immutable artifact identity; use open_with_identity"
-                .into(),
-        ))
+        Self::open_inner(model_dir, None)
     }
 
     /// Open only when the caller supplies complete identity and the artifact
@@ -155,6 +176,99 @@ impl HailoEmbedder {
         identity
             .validate()
             .map_err(|e| HailoError::EmbeddingProvenance(e.to_string()))?;
+        Self::verify_artifact_provenance(model_dir, &identity)?;
+        Self::open_inner(model_dir, Some(identity))
+    }
+
+    /// Paths of the known artifacts present under `model_dir`, in
+    /// `(model artifact, model graph, tokenizer)` order.
+    fn artifact_paths(
+        model_dir: &Path,
+    ) -> (
+        Option<std::path::PathBuf>,
+        Option<std::path::PathBuf>,
+        Option<std::path::PathBuf>,
+    ) {
+        let first_existing = |names: &[&str]| -> Option<std::path::PathBuf> {
+            names
+                .iter()
+                .map(|name| model_dir.join(name))
+                .find(|path| path.exists())
+        };
+        (
+            first_existing(MODEL_ARTIFACT_FILES),
+            first_existing(MODEL_GRAPH_FILES),
+            first_existing(TOKENIZER_FILES),
+        )
+    }
+
+    fn digest_file(model_dir: &Path, path: &Path) -> Result<String> {
+        let bytes = std::fs::read(path).map_err(|_| HailoError::BadModelDir {
+            path: model_dir.display().to_string(),
+            what: "artifact required by EmbeddingSpaceIdentity",
+        })?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    /// Check every hash a caller-supplied identity declares against the bytes
+    /// on disk.
+    ///
+    /// Fails closed when the directory holds none of the artifact layouts this
+    /// backend knows how to fingerprint: an unrecognized layout must not mean
+    /// "provenance verified" just because no file matched a known name. There
+    /// is no opt-out — callers that cannot supply artifact hashes use
+    /// [`open`](Self::open), whose default identity is documented as
+    /// unattested.
+    fn verify_artifact_provenance(
+        model_dir: &Path,
+        identity: &EmbeddingSpaceIdentity,
+    ) -> Result<()> {
+        let (model_artifact, model_graph, tokenizer) = Self::artifact_paths(model_dir);
+        if model_artifact.is_none() && model_graph.is_none() && tokenizer.is_none() {
+            return Err(HailoError::EmbeddingProvenance(format!(
+                "cannot verify artifact provenance in `{}`: none of the known artifacts were \
+                 found (model artifact: {}; model graph: {}; tokenizer: {}). Use \
+                 HailoEmbedder::open for the unattested default identity.",
+                model_dir.display(),
+                MODEL_ARTIFACT_FILES.join(", "),
+                MODEL_GRAPH_FILES.join(", "),
+                TOKENIZER_FILES.join(", "),
+            )));
+        }
+        for (label, path, expected) in [
+            (
+                "model artifact",
+                model_artifact.as_ref(),
+                &identity.model_artifact_sha256,
+            ),
+            (
+                "model graph",
+                model_graph.as_ref(),
+                &identity.model_graph_sha256,
+            ),
+            ("tokenizer", tokenizer.as_ref(), &identity.tokenizer_sha256),
+        ] {
+            // A missing individual file is still a verification gap: the
+            // identity declares a hash for it, so refuse rather than skip.
+            let Some(path) = path else {
+                return Err(HailoError::EmbeddingProvenance(format!(
+                    "identity declares a {label} hash but `{}` holds no {label} file",
+                    model_dir.display()
+                )));
+            };
+            if &Self::digest_file(model_dir, path)? != expected {
+                return Err(HailoError::EmbeddingProvenance(format!(
+                    "{label} SHA-256 mismatch for `{}`",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// `identity == None` derives the documented default identity; `Some(_)`
+    /// verifies caller-supplied provenance against the artifacts on disk.
+    fn open_inner(model_dir: &Path, identity: Option<EmbeddingSpaceIdentity>) -> Result<Self> {
         // Iter 137: combinatorial feature gating. Build matrix:
         //   * neither feature      → FeatureDisabled (default x86 dev)
         //   * hailo only           → device-only (HAT host, no Python deps)
@@ -278,64 +392,26 @@ impl HailoEmbedder {
         #[cfg(not(feature = "cpu-fallback"))]
         let dimensions = crate::inference::MINI_LM_DIM;
 
-        if identity.output_dimension as usize != dimensions {
-            return Err(HailoError::EmbeddingProvenance(format!(
-                "identity dimension {} does not match loaded model dimension {dimensions}",
-                identity.output_dimension
-            )));
-        }
-
-        let digest_file = |path: &Path| -> Result<String> {
-            let bytes = std::fs::read(path).map_err(|_| HailoError::BadModelDir {
-                path: model_dir.display().to_string(),
-                what: "artifact required by EmbeddingSpaceIdentity",
-            })?;
-            Ok(format!("{:x}", Sha256::digest(bytes)))
+        // Artifact hashes were already verified in `open_with_identity`, which
+        // runs before any model is loaded; only the dimension can be checked
+        // here, once the backend knows what it loaded.
+        let identity = match identity {
+            Some(identity) => {
+                if identity.output_dimension as usize != dimensions {
+                    return Err(HailoError::EmbeddingProvenance(format!(
+                        "identity dimension {} does not match loaded model dimension {dimensions}",
+                        identity.output_dimension
+                    )));
+                }
+                identity
+            }
+            None => Self::default_identity(model_dir, dimensions)?,
         };
-        let model_artifact = ["model.safetensors", "model.hef"]
-            .iter()
-            .map(|name| model_dir.join(name))
-            .find(|path| path.exists());
-        let model_graph = ["model.hef", "model.safetensors"]
-            .iter()
-            .map(|name| model_dir.join(name))
-            .find(|path| path.exists());
-        let tokenizer = ["tokenizer.json", "vocab.txt"]
-            .iter()
-            .map(|name| model_dir.join(name))
-            .find(|path| path.exists());
-        if let Some(path) = model_artifact {
-            if digest_file(&path)? != identity.model_artifact_sha256 {
-                return Err(HailoError::EmbeddingProvenance(
-                    "model artifact SHA-256 mismatch".into(),
-                ));
-            }
-        }
-        if let Some(path) = model_graph {
-            if digest_file(&path)? != identity.model_graph_sha256 {
-                return Err(HailoError::EmbeddingProvenance(
-                    "model graph SHA-256 mismatch".into(),
-                ));
-            }
-        }
-        if let Some(path) = tokenizer {
-            if digest_file(&path)? != identity.tokenizer_sha256 {
-                return Err(HailoError::EmbeddingProvenance(
-                    "tokenizer SHA-256 mismatch".into(),
-                ));
-            }
-        }
 
         Ok(Self {
             dimensions,
             identity,
-            name: format!(
-                "hailo:{}",
-                model_dir
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown-model")
-            ),
+            name: Self::model_name(model_dir),
             device_id,
             #[cfg(feature = "hailo")]
             device: device_opt.map(Mutex::new),
@@ -344,6 +420,52 @@ impl HailoEmbedder {
             #[cfg(all(feature = "hailo", feature = "cpu-fallback"))]
             hef_embedder,
         })
+    }
+
+    /// Human-readable model name derived from the model directory.
+    fn model_name(model_dir: &Path) -> String {
+        format!(
+            "hailo:{}",
+            model_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown-model")
+        )
+    }
+
+    /// Identity used by [`open`](Self::open), which has no caller-supplied
+    /// provenance. See that method's docs for what it does and does not
+    /// attest.
+    fn default_identity(model_dir: &Path, dimensions: usize) -> Result<EmbeddingSpaceIdentity> {
+        let (model_artifact, model_graph, tokenizer) = Self::artifact_paths(model_dir);
+        let mut identity = ruvector_core::embeddings::registry_identity(
+            "ruvector-hailo",
+            DEFAULT_MODEL_ID,
+            dimensions,
+        )
+        .unwrap_or_else(|_| {
+            ruvector_core::embeddings::default_space_identity(
+                "ruvector-hailo",
+                &Self::model_name(model_dir),
+                dimensions,
+            )
+        });
+        // Bind whatever artifacts are actually present into the identity, so
+        // swapping model bytes changes the embedding-space id even on this
+        // unattested path. Absent files keep the derived placeholder digest.
+        if let Some(path) = model_artifact {
+            identity.model_artifact_sha256 = Self::digest_file(model_dir, &path)?;
+        }
+        if let Some(path) = model_graph {
+            identity.model_graph_sha256 = Self::digest_file(model_dir, &path)?;
+        }
+        if let Some(path) = tokenizer {
+            identity.tokenizer_sha256 = Self::digest_file(model_dir, &path)?;
+        }
+        identity
+            .validate()
+            .map_err(|e| HailoError::EmbeddingProvenance(e.to_string()))?;
+        Ok(identity)
     }
 
     /// Read the on-die NPU temperature(s) from the held-open vdevice.
@@ -568,6 +690,95 @@ mod tests {
                 | HailoError::EmbeddingProvenance(_),
             ) => {}
             Err(other) => panic!("unexpected open() error: {:?}", other),
+        }
+    }
+
+    /// Smoke test for the identity-free entry point across every feature
+    /// combo: it must never be the ADR-281 provenance path that stops it.
+    /// Feature/device failures are expected on hosts without a HAT; a
+    /// provenance failure would mean `open` is unusable again, which is what
+    /// broke the worker daemon.
+    #[test]
+    fn open_never_fails_on_provenance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match HailoEmbedder::open(dir.path()) {
+            Ok(embedder) => {
+                assert!(
+                    embedder.dimensions() > 0,
+                    "default identity must carry a usable dimension"
+                );
+                assert_eq!(
+                    ruvector_core::EmbeddingProvider::embedding_space(&embedder).output_dimension
+                        as usize,
+                    embedder.dimensions()
+                );
+            }
+            Err(HailoError::EmbeddingProvenance(e)) => {
+                panic!("open must not require caller-supplied provenance: {e}")
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Provenance verification fails closed: a directory whose layout holds
+    /// none of the artifacts this backend knows how to fingerprint must be
+    /// refused, not silently accepted as verified.
+    #[test]
+    fn open_with_identity_fails_closed_on_unknown_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("weights.bin"), b"not a known artifact").unwrap();
+        let identity = ruvector_core::embeddings::registry_identity(
+            "test",
+            "sentence-transformers/all-MiniLM-L6-v2",
+            crate::inference::MINI_LM_DIM,
+        )
+        .unwrap();
+
+        let err = match HailoEmbedder::open_with_identity(dir.path(), identity) {
+            Ok(_) => panic!("unverifiable artifact layout must not open"),
+            Err(e) => e,
+        };
+        let message = err.to_string();
+        assert!(
+            matches!(err, HailoError::EmbeddingProvenance(_)),
+            "expected a provenance error, got {err:?}"
+        );
+        for expected in [
+            "model.safetensors",
+            "model.hef",
+            "tokenizer.json",
+            "vocab.txt",
+        ] {
+            assert!(
+                message.contains(expected),
+                "error must list the artifacts looked for, missing {expected}: {message}"
+            );
+        }
+    }
+
+    /// A known layout whose bytes disagree with the declared hashes is
+    /// rejected too.
+    #[test]
+    fn open_with_identity_rejects_hash_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("model.safetensors"), b"weights").unwrap();
+        std::fs::write(dir.path().join("tokenizer.json"), b"{}").unwrap();
+        let identity = ruvector_core::embeddings::registry_identity(
+            "test",
+            "sentence-transformers/all-MiniLM-L6-v2",
+            crate::inference::MINI_LM_DIM,
+        )
+        .unwrap();
+
+        match HailoEmbedder::open_with_identity(dir.path(), identity) {
+            Ok(_) => panic!("mismatched artifact hashes must not open"),
+            Err(HailoError::EmbeddingProvenance(msg)) => {
+                assert!(
+                    msg.contains("SHA-256 mismatch"),
+                    "unexpected message: {msg}"
+                )
+            }
+            Err(other) => panic!("expected a provenance error, got {other:?}"),
         }
     }
 

@@ -12,8 +12,9 @@
 //! BGE / E5 / Qwen and the cross-language conformance corpus are not available.
 
 use ruvector_core::embeddings::{
-    legacy_embed_call_count, EmbeddingDistanceMetric, EmbeddingProvider, EmbeddingRole,
-    EmbeddingRolePolicy, EmbeddingSpaceIdentity, OutputDtype, PoolingStrategy, PoolingStrategyName,
+    apply_prompt_template, default_space_identity, legacy_embed_call_count, registry_identity,
+    EmbeddingDistanceMetric, EmbeddingProvider, EmbeddingRole, EmbeddingRolePolicy,
+    EmbeddingSpaceIdentity, HashEmbedding, OutputDtype, PoolingStrategy, PoolingStrategyName,
     PrefixPolicy,
 };
 use ruvector_core::error::{Result, RuvectorError};
@@ -211,10 +212,19 @@ fn ingestion_paths_use_passage_role_only() {
         vec!["json.parse()".into()],
     )
     .unwrap();
-    db.add_causal_edge(vec!["rain".into()], vec!["wet".into()], 0.9, "weather".into())
+    db.add_causal_edge(
+        vec!["rain".into()],
+        vec!["wet".into()],
+        0.9,
+        "weather".into(),
+    )
+    .unwrap();
+    db.session_index("s1", 3600)
+        .add_turn(0, "user", "hello there")
         .unwrap();
-    db.session_index("s1", 3600).add_turn(0, "user", "hello there").unwrap();
-    db.witness_log().append("agent-1", "edit", "changed a file").unwrap();
+    db.witness_log()
+        .append("agent-1", "edit", "changed a file")
+        .unwrap();
 
     assert_eq!(
         spy.passage_count(),
@@ -239,7 +249,8 @@ fn search_paths_use_query_role() {
     {
         let spy = Arc::new(asymmetric_spy(dims));
         let (db, _dir) = agentic_db_with(spy.clone(), dims);
-        db.store_episode("t".into(), vec![], vec![], "c".into()).unwrap();
+        db.store_episode("t".into(), vec![], vec![], "c".into())
+            .unwrap();
         let before = spy.query_count();
         db.retrieve_similar_episodes("find me", 3).unwrap();
         assert_eq!(spy.query_count(), before + 1, "retrieve_similar_episodes");
@@ -249,8 +260,13 @@ fn search_paths_use_query_role() {
     {
         let spy = Arc::new(asymmetric_spy(dims));
         let (db, _dir) = agentic_db_with(spy.clone(), dims);
-        db.create_skill("n".into(), "d".into(), std::collections::HashMap::new(), vec![])
-            .unwrap();
+        db.create_skill(
+            "n".into(),
+            "d".into(),
+            std::collections::HashMap::new(),
+            vec![],
+        )
+        .unwrap();
         let before = spy.query_count();
         db.search_skills("find skill", 3).unwrap();
         assert_eq!(spy.query_count(), before + 1, "search_skills");
@@ -263,7 +279,8 @@ fn search_paths_use_query_role() {
         db.add_causal_edge(vec!["a".into()], vec!["b".into()], 0.5, "ctx".into())
             .unwrap();
         let before = spy.query_count();
-        db.query_with_utility("utility query", 3, 0.7, 0.2, 0.1).unwrap();
+        db.query_with_utility("utility query", 3, 0.7, 0.2, 0.1)
+            .unwrap();
         assert_eq!(spy.query_count(), before + 1, "query_with_utility");
     }
 
@@ -307,7 +324,8 @@ fn query_unsupported_provider_errors_without_falling_back() {
 
     // Through a high-level search path.
     let (db, _dir) = agentic_db_with(spy.clone(), dims);
-    db.store_episode("t".into(), vec![], vec![], "c".into()).unwrap();
+    db.store_episode("t".into(), vec![], vec![], "c".into())
+        .unwrap();
     let passage_before = spy.passage_count();
 
     let result = db.retrieve_similar_episodes("cannot embed this", 3);
@@ -355,8 +373,13 @@ fn prefix_applied_exactly_once_single_and_batch() {
     // DB passes raw text and never pre-prefixes).
     let spy = Arc::new(asymmetric_spy(dims));
     let (db, _dir) = agentic_db_with(spy.clone(), dims);
-    db.create_skill("n".into(), "d".into(), std::collections::HashMap::new(), vec![])
-        .unwrap();
+    db.create_skill(
+        "n".into(),
+        "d".into(),
+        std::collections::HashMap::new(),
+        vec![],
+    )
+    .unwrap();
     db.search_skills("kittens", 3).unwrap();
     assert_eq!(
         spy.last_query_text().as_deref(),
@@ -390,7 +413,10 @@ fn trait_object_preserves_both_roles_for_asymmetric_provider() {
         q, p,
         "trait object collapsed query and passage into the same vector"
     );
-    assert_eq!(q, ref_query, "trait-object query role diverged from concrete");
+    assert_eq!(
+        q, ref_query,
+        "trait-object query role diverged from concrete"
+    );
     assert_eq!(
         p, ref_passage,
         "trait-object passage role diverged from concrete"
@@ -407,5 +433,221 @@ fn trait_object_preserves_both_roles_for_asymmetric_provider() {
         legacy_embed_call_count(),
         legacy_before,
         "role-explicit trait-object calls must not route through deprecated embed"
+    );
+}
+
+// ADR-281 §4: the prefix the embedding path applies comes from the registered
+// identity's templates, so what is embedded matches what
+// `prompt_template_sha256` attests. Covers two models whose templates differ.
+#[test]
+fn applied_prefix_matches_the_identitys_registered_template() {
+    let e5 = registry_identity("test", "intfloat/e5-base-v2", 768).unwrap();
+    assert_eq!(
+        apply_prompt_template(&e5, EmbeddingRole::Query, "how tall is it").unwrap(),
+        "query: how tall is it"
+    );
+    assert_eq!(
+        apply_prompt_template(&e5, EmbeddingRole::Passage, "it is tall").unwrap(),
+        "passage: it is tall"
+    );
+
+    // A different model with a different template bundle: the query side is an
+    // instruction and the passage side is bare, so the hardcoded E5 pair would
+    // be wrong on both sides.
+    let qwen = registry_identity("test", "Qwen/Qwen3-Embedding-0.6B", 1024).unwrap();
+    let query = apply_prompt_template(&qwen, EmbeddingRole::Query, "how tall is it").unwrap();
+    assert!(
+        query.starts_with("Instruct: ") && query.ends_with("Query:how tall is it"),
+        "qwen query template not applied: {query:?}"
+    );
+    assert_eq!(
+        apply_prompt_template(&qwen, EmbeddingRole::Passage, "it is tall").unwrap(),
+        "it is tall"
+    );
+
+    assert_ne!(
+        e5.prompt_template_sha256, qwen.prompt_template_sha256,
+        "different templates must hash differently"
+    );
+
+    // A symmetric BGE-family control: query carries the retrieval instruction,
+    // passage is raw.
+    let bge = registry_identity("test", "BAAI/bge-small-en-v1.5", 384).unwrap();
+    assert_eq!(
+        apply_prompt_template(&bge, EmbeddingRole::Query, "cats").unwrap(),
+        "Represent this sentence for searching relevant passages: cats"
+    );
+    assert_eq!(
+        apply_prompt_template(&bge, EmbeddingRole::Passage, "cats").unwrap(),
+        "cats"
+    );
+}
+
+// A prefix policy that promises a transform must never silently degrade to no
+// prefix: Custom has no registered template, and a template hash that does not
+// match the registry means the attested identity does not describe what would
+// be applied.
+#[test]
+fn unverifiable_prefix_policies_fail_closed() {
+    let mut custom = registry_identity("test", "intfloat/e5-base-v2", 768).unwrap();
+    custom.prefix_policy = PrefixPolicy::Custom;
+    assert!(
+        apply_prompt_template(&custom, EmbeddingRole::Query, "text").is_err(),
+        "PrefixPolicy::Custom must fail closed rather than embed unprefixed text"
+    );
+
+    let mut tampered = registry_identity("test", "intfloat/e5-base-v2", 768).unwrap();
+    tampered.prompt_template_sha256 = "ee".repeat(32);
+    assert!(
+        apply_prompt_template(&tampered, EmbeddingRole::Query, "text").is_err(),
+        "a template hash that disagrees with the registry must fail closed"
+    );
+
+    // PrefixPolicy::None is the one policy that legitimately embeds raw text.
+    let none = default_space_identity("test", "symmetric-model", 8);
+    assert_eq!(
+        apply_prompt_template(&none, EmbeddingRole::Query, "text").unwrap(),
+        "text"
+    );
+}
+
+// ADR-281 §5 / finding: models the providers advertise must be registered with
+// the dimensions and templates from their model cards, not hard-error.
+#[test]
+fn registry_covers_advertised_models() {
+    for (model_id, dims, prefixed) in [
+        ("sentence-transformers/all-mpnet-base-v2", 768, false),
+        ("intfloat/multilingual-e5-large", 1024, true),
+        (
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            384,
+            false,
+        ),
+    ] {
+        let identity = registry_identity("test", model_id, dims)
+            .unwrap_or_else(|e| panic!("{model_id} must be registered: {e}"));
+        assert_eq!(identity.output_dimension, dims as u32);
+        let query = apply_prompt_template(&identity, EmbeddingRole::Query, "text").unwrap();
+        if prefixed {
+            assert_eq!(query, "query: text", "{model_id}");
+            assert_eq!(
+                apply_prompt_template(&identity, EmbeddingRole::Passage, "text").unwrap(),
+                "passage: text",
+                "{model_id}"
+            );
+        } else {
+            assert_eq!(query, "text", "{model_id} must not be prefixed");
+            assert_eq!(identity.prefix_policy, PrefixPolicy::None, "{model_id}");
+        }
+
+        // The registry is keyed by exact artifact revision: the right model at
+        // the wrong dimensionality is not a match.
+        assert!(
+            registry_identity("test", model_id, dims + 1).is_err(),
+            "{model_id} must not accept a dimension it is not registered at"
+        );
+    }
+}
+
+// ADR-281 §7 / criterion 10: a corpus refuses a provider from a different
+// embedding space even when the dimensions agree.
+#[test]
+fn reopening_a_corpus_with_a_different_same_dimension_model_is_rejected() {
+    let dims = 32;
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("space.db").to_string_lossy().to_string();
+    let options = || {
+        let mut o = DbOptions::default();
+        o.storage_path = storage_path.clone();
+        o.dimensions = dims;
+        o
+    };
+    let spy = |model: &str| {
+        let mut provider = asymmetric_spy(dims);
+        provider.identity = spy_identity(
+            model,
+            dims as u32,
+            EmbeddingRolePolicy::Asymmetric,
+            PrefixPolicy::Required,
+        );
+        Arc::new(provider)
+    };
+
+    {
+        let db = AgenticDB::with_embedding_provider(options(), spy("spy/model-a")).unwrap();
+        db.store_episode("t".into(), vec![], vec![], "c".into())
+            .unwrap();
+    }
+
+    // Same identity reopens cleanly.
+    {
+        AgenticDB::with_embedding_provider(options(), spy("spy/model-a"))
+            .expect("reopening under the same embedding space must succeed");
+    }
+
+    // Same dimensions, different model identity: rejected.
+    let err = match AgenticDB::with_embedding_provider(options(), spy("spy/model-b")) {
+        Ok(_) => panic!("a different embedding space must not be able to mutate this corpus"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, RuvectorError::EmbeddingSpaceMismatch { .. }),
+        "expected EmbeddingSpaceMismatch, got {err:?}"
+    );
+}
+
+// Pre-ADR-281 corpora carry no stored identity. They must stay usable (adopt
+// the active identity) rather than being bricked.
+#[test]
+fn corpus_without_a_stored_identity_is_adopted() {
+    let dims = 32;
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("legacy.db").to_string_lossy().to_string();
+    let mut options = DbOptions::default();
+    options.storage_path = storage_path.clone();
+    options.dimensions = dims;
+
+    {
+        let db =
+            AgenticDB::with_embedding_provider(options.clone(), Arc::new(asymmetric_spy(dims)))
+                .unwrap();
+        db.store_episode("t".into(), vec![], vec![], "c".into())
+            .unwrap();
+    }
+    // Drop the recorded identity to simulate a corpus written before ADR-281.
+    {
+        let db = redb::Database::create(format!("{storage_path}.agentic")).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn
+                .open_table(redb::TableDefinition::<&str, &[u8]>::new(
+                    "embedding_space_identity",
+                ))
+                .unwrap();
+            table.remove("active").unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    AgenticDB::with_embedding_provider(options, Arc::new(asymmetric_spy(dims)))
+        .expect("a corpus with no recorded identity must remain usable");
+}
+
+// Smoke test for the identity-free public entry points in this crate: they
+// must construct, not fail closed the way the first ADR-281 pass did.
+#[test]
+fn identity_free_entry_points_construct() {
+    let dir = tempdir().unwrap();
+    let mut options = DbOptions::default();
+    options.storage_path = dir.path().join("smoke.db").to_string_lossy().to_string();
+    options.dimensions = 16;
+    AgenticDB::new(options).expect("AgenticDB::new must construct with default embeddings");
+
+    let provider = HashEmbedding::new(16);
+    assert_eq!(provider.embed_query("x").unwrap().len(), 16);
+    assert_eq!(
+        provider.embedding_space().output_dimension,
+        16,
+        "HashEmbedding must carry a usable default identity"
     );
 }

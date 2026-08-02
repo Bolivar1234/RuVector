@@ -255,7 +255,242 @@ pub fn embedding_cache_key(
     ))
 }
 
-fn built_in_identity(provider: &str, model_id: &str, dimension: usize) -> EmbeddingSpaceIdentity {
+/// The exact query and passage prompt templates a registered model owns.
+///
+/// `{text}` is the single substitution point. The pair is hashed into
+/// [`EmbeddingSpaceIdentity::prompt_template_sha256`], so changing either
+/// template changes the embedding-space identity (ADR-281 §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptTemplates {
+    pub query: &'static str,
+    pub passage: &'static str,
+}
+
+impl PromptTemplates {
+    /// Hash covering the canonical query and passage template bundle.
+    pub fn sha256(&self) -> String {
+        sha256_hex(format!("query={}\0passage={}", self.query, self.passage).as_bytes())
+    }
+
+    /// Apply the role's template to raw caller text. Providers call this
+    /// exactly once; high-level callers never prepend prefixes themselves.
+    pub fn apply(&self, role: EmbeddingRole, text: &str) -> String {
+        let template = match role {
+            EmbeddingRole::Query => self.query,
+            EmbeddingRole::Passage => self.passage,
+        };
+        template.replace("{text}", text)
+    }
+}
+
+/// One pinned model fixture: exact artifact revision aliases, output
+/// dimension, role/prefix policy, and the exact prompt templates.
+struct RegistryEntry {
+    aliases: &'static [&'static str],
+    output_dimension: u32,
+    role_policy: EmbeddingRolePolicy,
+    prefix_policy: PrefixPolicy,
+    templates: PromptTemplates,
+}
+
+const SYMMETRIC_TEMPLATES: PromptTemplates = PromptTemplates {
+    query: "{text}",
+    passage: "{text}",
+};
+const BGE_TEMPLATES: PromptTemplates = PromptTemplates {
+    query: "Represent this sentence for searching relevant passages: {text}",
+    passage: "{text}",
+};
+const E5_TEMPLATES: PromptTemplates = PromptTemplates {
+    query: "query: {text}",
+    passage: "passage: {text}",
+};
+const QWEN3_TEMPLATES: PromptTemplates = PromptTemplates {
+    query: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:{text}",
+    passage: "{text}",
+};
+
+/// Registered models, keyed by exact artifact revision rather than family
+/// name (ADR-281 §2). Dimensions and templates come from each model card;
+/// an id that is not listed here requires a caller-supplied complete
+/// [`EmbeddingSpaceIdentity`].
+static MODEL_REGISTRY: &[RegistryEntry] = &[
+    RegistryEntry {
+        aliases: &[
+            "sentence-transformers/all-MiniLM-L6-v2",
+            "all-MiniLM-L6-v2",
+            "all-minilm-l6-v2",
+        ],
+        output_dimension: 384,
+        role_policy: EmbeddingRolePolicy::Symmetric,
+        prefix_policy: PrefixPolicy::None,
+        templates: SYMMETRIC_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &[
+            "sentence-transformers/all-mpnet-base-v2",
+            "all-mpnet-base-v2",
+        ],
+        output_dimension: 768,
+        role_policy: EmbeddingRolePolicy::Symmetric,
+        prefix_policy: PrefixPolicy::None,
+        templates: SYMMETRIC_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &[
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            "paraphrase-multilingual-MiniLM-L12-v2",
+            "paraphrase-multilingual-minilm-l12-v2",
+        ],
+        output_dimension: 384,
+        role_policy: EmbeddingRolePolicy::Symmetric,
+        prefix_policy: PrefixPolicy::None,
+        templates: SYMMETRIC_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["BAAI/bge-small-en-v1.5", "bge-small-en-v1.5"],
+        output_dimension: 384,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::QueryRecommended,
+        templates: BGE_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["BAAI/bge-base-en-v1.5", "bge-base-en-v1.5"],
+        output_dimension: 768,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::QueryRecommended,
+        templates: BGE_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["BAAI/bge-large-en-v1.5", "bge-large-en-v1.5"],
+        output_dimension: 1024,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::QueryRecommended,
+        templates: BGE_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["intfloat/e5-small-v2", "e5-small-v2"],
+        output_dimension: 384,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::Required,
+        templates: E5_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["intfloat/e5-base-v2", "e5-base-v2"],
+        output_dimension: 768,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::Required,
+        templates: E5_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["intfloat/e5-large-v2", "e5-large-v2"],
+        output_dimension: 1024,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::Required,
+        templates: E5_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["intfloat/multilingual-e5-small", "multilingual-e5-small"],
+        output_dimension: 384,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::Required,
+        templates: E5_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["intfloat/multilingual-e5-base", "multilingual-e5-base"],
+        output_dimension: 768,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::Required,
+        templates: E5_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["intfloat/multilingual-e5-large", "multilingual-e5-large"],
+        output_dimension: 1024,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::Required,
+        templates: E5_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["Qwen/Qwen3-Embedding-0.6B", "qwen3-embedding-0.6b"],
+        output_dimension: 1024,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::Required,
+        templates: QWEN3_TEMPLATES,
+    },
+    RegistryEntry {
+        aliases: &["Qwen/Qwen3-Embedding-4B", "qwen3-embedding-4b"],
+        output_dimension: 2560,
+        role_policy: EmbeddingRolePolicy::Asymmetric,
+        prefix_policy: PrefixPolicy::Required,
+        templates: QWEN3_TEMPLATES,
+    },
+];
+
+fn registry_entry(model_id: &str) -> Option<&'static RegistryEntry> {
+    MODEL_REGISTRY
+        .iter()
+        .find(|entry| entry.aliases.contains(&model_id))
+}
+
+/// The exact prompt templates registered for `model_id`.
+///
+/// Returns an error for models that carry no registry fixture: their prompt
+/// behavior cannot be attested, so no prefix may be guessed for them.
+pub fn registry_prompt_templates(model_id: &str) -> Result<PromptTemplates> {
+    registry_entry(model_id)
+        .map(|entry| entry.templates)
+        .ok_or_else(|| {
+            RuvectorError::InvalidParameter(format!(
+                "no registered prompt templates for embedding model '{model_id}'"
+            ))
+        })
+}
+
+/// Apply the identity's registered prompt template for `role` to raw text.
+///
+/// This is the single place a prefix is added, so the text actually embedded
+/// always matches the templates hashed into
+/// [`EmbeddingSpaceIdentity::prompt_template_sha256`] (ADR-281 §4). A prefix
+/// policy that promises a transform but whose templates cannot be verified
+/// fails closed rather than silently embedding unprefixed text.
+pub fn apply_prompt_template(
+    identity: &EmbeddingSpaceIdentity,
+    role: EmbeddingRole,
+    text: &str,
+) -> Result<String> {
+    match identity.prefix_policy {
+        PrefixPolicy::None => Ok(text.to_owned()),
+        PrefixPolicy::Custom => Err(RuvectorError::InvalidParameter(format!(
+            "model '{}' declares PrefixPolicy::Custom; ruvector has no template for it, so \
+             embedding would silently drop the model's required prompt",
+            identity.model_id
+        ))),
+        PrefixPolicy::Required | PrefixPolicy::QueryRecommended => {
+            let templates = registry_prompt_templates(&identity.model_id)?;
+            if templates.sha256() != identity.prompt_template_sha256 {
+                return Err(RuvectorError::InvalidParameter(format!(
+                    "prompt template hash for '{}' disagrees with the registry fixture; the \
+                     attested identity does not describe the templates that would be applied",
+                    identity.model_id
+                )));
+            }
+            Ok(templates.apply(role, text))
+        }
+    }
+}
+
+/// A non-attested symmetric identity for providers with no registry fixture
+/// (hash placeholders, opaque fleet backends, tests).
+///
+/// The artifact hashes are derived from `provider`/`model_id`, not from model
+/// bytes: this identity states "this vector space is whatever this named
+/// provider produces", which is enough to keep corpora from mixing but is not
+/// artifact provenance. Attested paths must supply a complete identity.
+pub fn default_space_identity(
+    provider: &str,
+    model_id: &str,
+    dimension: usize,
+) -> EmbeddingSpaceIdentity {
     let fixture = format!("{provider}\0{model_id}\0v1");
     EmbeddingSpaceIdentity {
         schema_version: 1,
@@ -280,41 +515,34 @@ fn built_in_identity(provider: &str, model_id: &str, dimension: usize) -> Embedd
     }
 }
 
-fn retrieval_identity(
+/// Build the identity a registered model must have, from the exact registry
+/// fixture for `model_id`.
+///
+/// Errors when the id is unregistered or when `dimension` disagrees with the
+/// registered output dimension — a family-name guess is never substituted.
+/// Callers that load real artifacts overwrite the hash fields with digests of
+/// the bytes they loaded.
+pub fn registry_identity(
     provider: &str,
     model_id: &str,
     dimension: usize,
 ) -> Result<EmbeddingSpaceIdentity> {
-    let mut identity = built_in_identity(provider, model_id, dimension);
-    let (role_policy, prefix_policy, query_template, passage_template) = match model_id {
-        "sentence-transformers/all-MiniLM-L6-v2" | "all-MiniLM-L6-v2" => (
-            EmbeddingRolePolicy::Symmetric, PrefixPolicy::None, "{text}", "{text}",
-        ),
-        "BAAI/bge-small-en-v1.5" | "BAAI/bge-base-en-v1.5" | "BAAI/bge-large-en-v1.5"
-        | "bge-small-en-v1.5" | "bge-base-en-v1.5" | "bge-large-en-v1.5" => (
-            EmbeddingRolePolicy::Asymmetric,
-            PrefixPolicy::QueryRecommended,
-            "Represent this sentence for searching relevant passages: {text}",
-            "{text}",
-        ),
-        "intfloat/e5-small-v2" | "intfloat/e5-base-v2" | "intfloat/e5-large-v2"
-        | "e5-small-v2" | "e5-base-v2" | "e5-large-v2"
-        | "intfloat/multilingual-e5-small" | "intfloat/multilingual-e5-base" => (
-            EmbeddingRolePolicy::Asymmetric, PrefixPolicy::Required, "query: {text}", "passage: {text}",
-        ),
-        "Qwen/Qwen3-Embedding-0.6B" | "Qwen/Qwen3-Embedding-4B" => (
-            EmbeddingRolePolicy::Asymmetric, PrefixPolicy::Required,
-            "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:{text}",
-            "{text}",
-        ),
-        _ => return Err(RuvectorError::InvalidParameter(format!(
-            "unknown embedding model '{model_id}' requires an explicit complete EmbeddingSpaceIdentity"
-        ))),
-    };
-    identity.role_policy = role_policy;
-    identity.prefix_policy = prefix_policy;
-    identity.prompt_template_sha256 =
-        sha256_hex(format!("query={query_template}\0passage={passage_template}").as_bytes());
+    let entry = registry_entry(model_id).ok_or_else(|| {
+        RuvectorError::InvalidParameter(format!(
+            "unknown embedding model '{model_id}' requires an explicit complete \
+             EmbeddingSpaceIdentity"
+        ))
+    })?;
+    if entry.output_dimension as usize != dimension {
+        return Err(RuvectorError::InvalidParameter(format!(
+            "embedding model '{model_id}' is registered at {} dimensions, not {dimension}",
+            entry.output_dimension
+        )));
+    }
+    let mut identity = default_space_identity(provider, model_id, dimension);
+    identity.role_policy = entry.role_policy;
+    identity.prefix_policy = entry.prefix_policy;
+    identity.prompt_template_sha256 = entry.templates.sha256();
     Ok(identity)
 }
 
@@ -470,7 +698,7 @@ impl HashEmbedding {
     pub fn new(dimensions: usize) -> Self {
         Self {
             dimensions,
-            identity: built_in_identity("ruvector-hash", "hash-v1", dimensions),
+            identity: default_space_identity("ruvector-hash", "hash-v1", dimensions),
         }
     }
 }
@@ -945,7 +1173,7 @@ pub mod onnx {
                 dimensions
             );
 
-            let mut identity = retrieval_identity("ruvector-onnx", model_id, dimensions)?;
+            let mut identity = registry_identity("ruvector-onnx", model_id, dimensions)?;
             let model_bytes = std::fs::read(model_path)?;
             let tokenizer_bytes = std::fs::read(tokenizer_path)?;
             identity.model_artifact_sha256 = sha256_hex(&model_bytes);
@@ -1039,14 +1267,10 @@ pub mod onnx {
 
     impl EmbeddingProvider for OnnxEmbedding {
         fn embed_for(&self, role: EmbeddingRole, text: &str) -> Result<Vec<f32>> {
-            let prepared = match (self.identity.prefix_policy, role) {
-                (PrefixPolicy::QueryRecommended, EmbeddingRole::Query) => {
-                    format!("Represent this sentence for searching relevant passages: {text}")
-                }
-                (PrefixPolicy::Required, EmbeddingRole::Query) => format!("query: {text}"),
-                (PrefixPolicy::Required, EmbeddingRole::Passage) => format!("passage: {text}"),
-                _ => text.to_owned(),
-            };
+            // The templates come from the identity's registry fixture, so the
+            // text embedded here is exactly what `prompt_template_sha256`
+            // attests to (ADR-281 §4).
+            let prepared = apply_prompt_template(&self.identity, role, text)?;
             // Tokenize
             let encoding = {
                 let tokenizer = self.tokenizer.read();
@@ -1358,12 +1582,23 @@ pub mod lattice_native {
         /// let provider = LatticeEmbedding::from_pretrained("bge-small-en-v1.5")?;
         /// # Ok::<(), Box<dyn std::error::Error>>(())
         /// ```
+        /// # Embedding-space identity
+        /// This entry point derives the model's identity from the registry
+        /// fixture for the resolved model id (ADR-281 §2), so role policy,
+        /// prefix policy, and prompt templates are authoritative. The artifact
+        /// hash fields are the registry defaults, not digests of the
+        /// downloaded weights: `lattice-embed` owns model fetching and does
+        /// not expose the bytes it loaded. Callers that need attested artifact
+        /// provenance pass their own identity to
+        /// [`from_pretrained_with_identity`](Self::from_pretrained_with_identity).
+        /// Models with no registry fixture are rejected here.
         pub fn from_pretrained(model_id: &str) -> Result<Self> {
-            Err(RuvectorError::ModelLoadError(format!(
-                "LatticeEmbedding::from_pretrained('{model_id}') cannot prove immutable artifact \
-                 fingerprints; use from_pretrained_with_identity with a validated complete \
-                 EmbeddingSpaceIdentity"
-            )))
+            let model: LatticeEmbeddingModel = model_id.parse().map_err(|e: String| {
+                RuvectorError::ModelLoadError(format!(
+                    "unknown lattice-embed model id '{model_id}': {e}"
+                ))
+            })?;
+            Self::with_model(model)
         }
 
         /// Load a model with caller-supplied, immutable artifact provenance.
@@ -1380,12 +1615,14 @@ pub mod lattice_native {
         }
 
         /// Load a pre-trained embedding model from an already-resolved
-        /// [`lattice_embed::EmbeddingModel`] variant.
+        /// [`lattice_embed::EmbeddingModel`] variant, using the registry
+        /// fixture for its id as the embedding-space identity. See
+        /// [`from_pretrained`](Self::from_pretrained) for what that identity
+        /// does and does not attest.
         pub fn with_model(model: LatticeEmbeddingModel) -> Result<Self> {
-            Err(RuvectorError::ModelLoadError(format!(
-                "LatticeEmbedding::with_model('{model}') cannot prove immutable artifact \
-                 fingerprints; use with_model_and_identity"
-            )))
+            let identity =
+                registry_identity("ruvector-lattice", model.model_id(), model.dimensions())?;
+            Self::with_model_and_identity(model, identity)
         }
 
         /// Load a resolved model only after validating complete provenance and
@@ -1412,7 +1649,7 @@ pub mod lattice_native {
                     model.dimensions()
                 )));
             }
-            let expected = retrieval_identity(
+            let expected = registry_identity(
                 "lattice-policy-fixture",
                 model.model_id(),
                 model.dimensions(),
@@ -1581,7 +1818,7 @@ pub mod lattice_native {
         use super::*;
 
         fn test_identity(model: LatticeEmbeddingModel) -> EmbeddingSpaceIdentity {
-            retrieval_identity("lattice-test", model.model_id(), model.dimensions()).unwrap()
+            registry_identity("lattice-test", model.model_id(), model.dimensions()).unwrap()
         }
 
         #[test]
@@ -1601,11 +1838,29 @@ pub mod lattice_native {
             );
         }
 
+        /// Smoke test for the identity-free entry points: they must construct
+        /// a working provider whose identity comes from the registry fixture,
+        /// and must still reject models with no fixture.
         #[test]
-        fn from_pretrained_fails_closed_without_identity() {
+        fn legacy_entry_points_use_the_registry_fixture() {
+            let provider = LatticeEmbedding::from_pretrained("bge-small-en-v1.5")
+                .expect("registered model must load through the legacy entry point");
+            let identity = provider.embedding_space();
+            assert_eq!(identity.model_id, "BAAI/bge-small-en-v1.5");
+            assert_eq!(identity.role_policy, EmbeddingRolePolicy::Asymmetric);
+            assert_eq!(identity.prefix_policy, PrefixPolicy::QueryRecommended);
+
+            let model: LatticeEmbeddingModel = "all-minilm-l6-v2".parse().unwrap();
+            let by_model = LatticeEmbedding::with_model(model)
+                .expect("with_model must load a registered model");
+            assert_eq!(
+                by_model.embedding_space().role_policy,
+                EmbeddingRolePolicy::Symmetric
+            );
+
             assert!(
-                LatticeEmbedding::from_pretrained("bge-small-en-v1.5").is_err(),
-                "native models must require complete artifact provenance"
+                LatticeEmbedding::from_pretrained("text-embedding-3-small").is_err(),
+                "a model with no registry fixture must not get a guessed identity"
             );
         }
 
@@ -1763,7 +2018,7 @@ mod tests {
 
     #[test]
     fn query_template_change_creates_a_new_space_and_read_only_access() {
-        let stored = built_in_identity("fixture", "same-model", 384);
+        let stored = default_space_identity("fixture", "same-model", 384);
         let mut active = stored.clone();
         active.prompt_template_sha256 = sha256_hex(b"changed query template");
         active.prefix_policy_version += 1;
@@ -1800,7 +2055,7 @@ mod tests {
 
     #[test]
     fn cache_key_is_role_aware() {
-        let identity = built_in_identity("fixture", "same-model", 4);
+        let identity = default_space_identity("fixture", "same-model", 4);
         assert_ne!(
             embedding_cache_key(&identity, EmbeddingRole::Query, "text").unwrap(),
             embedding_cache_key(&identity, EmbeddingRole::Passage, "text").unwrap(),
@@ -1869,7 +2124,7 @@ mod tests {
     #[ignore] // Requires API key
     fn test_api_embedding_openai() {
         let api_key = std::env::var("OPENAI_API_KEY").unwrap();
-        let identity = built_in_identity("test-api", "text-embedding-3-small", 1536);
+        let identity = default_space_identity("test-api", "text-embedding-3-small", 1536);
         let provider = ApiEmbedding::openai(&api_key, "text-embedding-3-small", identity).unwrap();
 
         let embedding = provider.embed("hello world").unwrap();
@@ -1946,7 +2201,7 @@ mod tests {
         fn test_provider(alias: &str) -> LatticeEmbedding {
             let model: LatticeEmbeddingModel = alias.parse().unwrap();
             let identity =
-                retrieval_identity("lattice-test", model.model_id(), model.dimensions()).unwrap();
+                registry_identity("lattice-test", model.model_id(), model.dimensions()).unwrap();
             LatticeEmbedding::from_pretrained_with_identity(alias, identity).unwrap()
         }
 
