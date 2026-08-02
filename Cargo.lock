@@ -9219,6 +9219,7 @@ dependencies = [
  "rkyv",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "simsimd",
  "tempfile",
  "thiserror 2.0.18",
@@ -9226,6 +9227,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -10583,6 +10585,7 @@ dependencies = [
  "csv",
  "flate2",
  "hdf5",
+ "ndarray 0.15.6",
  "rand 0.8.6",
  "rand_distr 0.4.3",
  "rayon",

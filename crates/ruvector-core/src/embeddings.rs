@@ -33,19 +33,414 @@
 //! // "dog" and "cat" WILL be similar (semantic understanding!)
 //! ```
 
-use crate::error::Result;
-#[cfg(any(
-    feature = "real-embeddings",
-    feature = "api-embeddings",
-    feature = "lattice-embeddings"
-))]
-use crate::error::RuvectorError;
+use crate::error::{Result, RuvectorError};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use unicode_normalization::UnicodeNormalization;
+
+/// The role of text at a retrieval boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingRole {
+    Query,
+    Passage,
+}
+
+/// Whether a model requires distinct query and passage transforms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingRolePolicy {
+    Symmetric,
+    Asymmetric,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PoolingStrategy {
+    Named(PoolingStrategyName),
+    Custom {
+        custom: String,
+        implementation_revision: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PoolingStrategyName {
+    Mean,
+    Cls,
+    LastToken,
+    WeightedMean,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputDtype {
+    F32,
+    F16,
+    Bf16,
+    I8,
+    U8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EmbeddingDistanceMetric {
+    Cosine,
+    Dot,
+    Euclidean,
+    Manhattan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrefixPolicy {
+    None,
+    Required,
+    QueryRecommended,
+    Custom,
+}
+
+/// Complete immutable identity of a retrieval vector space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingSpaceIdentity {
+    pub schema_version: u16,
+    pub provider: String,
+    pub model_id: String,
+    pub model_artifact_sha256: String,
+    pub model_graph_sha256: String,
+    pub tokenizer_sha256: String,
+    pub prompt_template_sha256: String,
+    pub pooling_strategy: PoolingStrategy,
+    pub normalize: bool,
+    pub truncation_tokens: u32,
+    pub output_dimension: u32,
+    pub output_dtype: OutputDtype,
+    pub runtime_revision: String,
+    pub distance_metric: EmbeddingDistanceMetric,
+    pub role_policy: EmbeddingRolePolicy,
+    pub prefix_policy: PrefixPolicy,
+    pub prefix_policy_version: u32,
+}
+
+const EMBEDDING_SPACE_DOMAIN: &[u8] = b"ruvector.embedding-space.v1\0";
+
+impl EmbeddingSpaceIdentity {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != 1 {
+            return Err(RuvectorError::InvalidParameter(format!(
+                "unsupported embedding identity schema version {}",
+                self.schema_version
+            )));
+        }
+        if self.output_dimension == 0
+            || self.truncation_tokens == 0
+            || self.prefix_policy_version == 0
+        {
+            return Err(RuvectorError::InvalidParameter(
+                "embedding identity dimensions, truncation, and policy version must be positive"
+                    .into(),
+            ));
+        }
+        for (name, value) in [
+            ("provider", self.provider.as_str()),
+            ("model_id", self.model_id.as_str()),
+            ("runtime_revision", self.runtime_revision.as_str()),
+        ] {
+            if value.is_empty() || value.nfc().collect::<String>() != value {
+                return Err(RuvectorError::InvalidParameter(format!(
+                    "embedding identity {name} must be non-empty NFC"
+                )));
+            }
+        }
+        for (name, value) in [
+            ("model_artifact_sha256", self.model_artifact_sha256.as_str()),
+            ("model_graph_sha256", self.model_graph_sha256.as_str()),
+            ("tokenizer_sha256", self.tokenizer_sha256.as_str()),
+            (
+                "prompt_template_sha256",
+                self.prompt_template_sha256.as_str(),
+            ),
+        ] {
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(RuvectorError::InvalidParameter(format!(
+                    "embedding identity {name} must be lowercase SHA-256 hex"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// RFC-8785 canonical JSON for this schema. The schema contains no
+    /// non-integer numbers, so recursively sorting object keys is sufficient.
+    pub fn canonical_json(&self) -> Result<String> {
+        self.validate()?;
+        fn canonical(value: &serde_json::Value, out: &mut String) -> Result<()> {
+            match value {
+                serde_json::Value::Null => out.push_str("null"),
+                serde_json::Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+                serde_json::Value::Number(v) => out.push_str(&v.to_string()),
+                serde_json::Value::String(v) => out.push_str(
+                    &serde_json::to_string(v)
+                        .map_err(|e| RuvectorError::SerializationError(e.to_string()))?,
+                ),
+                serde_json::Value::Array(values) => {
+                    out.push('[');
+                    for (index, item) in values.iter().enumerate() {
+                        if index > 0 {
+                            out.push(',');
+                        }
+                        canonical(item, out)?;
+                    }
+                    out.push(']');
+                }
+                serde_json::Value::Object(values) => {
+                    out.push('{');
+                    let mut keys: Vec<_> = values.keys().collect();
+                    keys.sort();
+                    for (index, key) in keys.iter().enumerate() {
+                        if index > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(
+                            &serde_json::to_string(key)
+                                .map_err(|e| RuvectorError::SerializationError(e.to_string()))?,
+                        );
+                        out.push(':');
+                        canonical(&values[*key], out)?;
+                    }
+                    out.push('}');
+                }
+            }
+            Ok(())
+        }
+        let value = serde_json::to_value(self)
+            .map_err(|e| RuvectorError::SerializationError(e.to_string()))?;
+        let mut output = String::new();
+        canonical(&value, &mut output)?;
+        Ok(output)
+    }
+
+    pub fn embedding_space_id(&self) -> Result<String> {
+        let mut hash = Sha256::new();
+        hash.update(EMBEDDING_SPACE_DOMAIN);
+        hash.update(self.canonical_json()?.as_bytes());
+        Ok(format!("{:x}", hash.finalize()))
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+pub fn embedding_cache_key(
+    identity: &EmbeddingSpaceIdentity,
+    role: EmbeddingRole,
+    text: &str,
+) -> Result<String> {
+    let text_hash = sha256_hex(text.as_bytes());
+    let role = match role {
+        EmbeddingRole::Query => "query",
+        EmbeddingRole::Passage => "passage",
+    };
+    Ok(format!(
+        "{}:{role}:{text_hash}",
+        identity.embedding_space_id()?
+    ))
+}
+
+fn built_in_identity(provider: &str, model_id: &str, dimension: usize) -> EmbeddingSpaceIdentity {
+    let fixture = format!("{provider}\0{model_id}\0v1");
+    EmbeddingSpaceIdentity {
+        schema_version: 1,
+        provider: provider.into(),
+        model_id: model_id.into(),
+        model_artifact_sha256: sha256_hex(format!("{fixture}\0artifact").as_bytes()),
+        model_graph_sha256: sha256_hex(format!("{fixture}\0graph").as_bytes()),
+        tokenizer_sha256: sha256_hex(format!("{fixture}\0tokenizer").as_bytes()),
+        prompt_template_sha256: sha256_hex(
+            format!("{fixture}\0query={{text}}\0passage={{text}}").as_bytes(),
+        ),
+        pooling_strategy: PoolingStrategy::Named(PoolingStrategyName::Mean),
+        normalize: true,
+        truncation_tokens: 512,
+        output_dimension: dimension as u32,
+        output_dtype: OutputDtype::F32,
+        runtime_revision: env!("CARGO_PKG_VERSION").into(),
+        distance_metric: EmbeddingDistanceMetric::Cosine,
+        role_policy: EmbeddingRolePolicy::Symmetric,
+        prefix_policy: PrefixPolicy::None,
+        prefix_policy_version: 1,
+    }
+}
+
+fn retrieval_identity(
+    provider: &str,
+    model_id: &str,
+    dimension: usize,
+) -> Result<EmbeddingSpaceIdentity> {
+    let mut identity = built_in_identity(provider, model_id, dimension);
+    let (role_policy, prefix_policy, query_template, passage_template) = match model_id {
+        "sentence-transformers/all-MiniLM-L6-v2" | "all-MiniLM-L6-v2" => (
+            EmbeddingRolePolicy::Symmetric, PrefixPolicy::None, "{text}", "{text}",
+        ),
+        "BAAI/bge-small-en-v1.5" | "BAAI/bge-base-en-v1.5" | "BAAI/bge-large-en-v1.5"
+        | "bge-small-en-v1.5" | "bge-base-en-v1.5" | "bge-large-en-v1.5" => (
+            EmbeddingRolePolicy::Asymmetric,
+            PrefixPolicy::QueryRecommended,
+            "Represent this sentence for searching relevant passages: {text}",
+            "{text}",
+        ),
+        "intfloat/e5-small-v2" | "intfloat/e5-base-v2" | "intfloat/e5-large-v2"
+        | "e5-small-v2" | "e5-base-v2" | "e5-large-v2"
+        | "intfloat/multilingual-e5-small" | "intfloat/multilingual-e5-base" => (
+            EmbeddingRolePolicy::Asymmetric, PrefixPolicy::Required, "query: {text}", "passage: {text}",
+        ),
+        "Qwen/Qwen3-Embedding-0.6B" | "Qwen/Qwen3-Embedding-4B" => (
+            EmbeddingRolePolicy::Asymmetric, PrefixPolicy::Required,
+            "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:{text}",
+            "{text}",
+        ),
+        _ => return Err(RuvectorError::InvalidParameter(format!(
+            "unknown embedding model '{model_id}' requires an explicit complete EmbeddingSpaceIdentity"
+        ))),
+    };
+    identity.role_policy = role_policy;
+    identity.prefix_policy = prefix_policy;
+    identity.prompt_template_sha256 =
+        sha256_hex(format!("query={query_template}\0passage={passage_template}").as_bytes());
+    Ok(identity)
+}
+
+static LEGACY_EMBED_CALLS: AtomicU64 = AtomicU64::new(0);
+
+pub fn legacy_embed_call_count() -> u64 {
+    LEGACY_EMBED_CALLS.load(Ordering::Relaxed)
+}
+
+/// Capabilities retained when opening a corpus with an incompatible active
+/// embedding space. Vector inspection never invokes the active embedder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingSpaceAccess {
+    pub text_embedding: bool,
+    pub corpus_mutation: bool,
+    pub vector_read: bool,
+    pub inspect: bool,
+    pub verify: bool,
+    pub export: bool,
+}
+
+impl EmbeddingSpaceAccess {
+    pub fn for_identities(
+        stored: &EmbeddingSpaceIdentity,
+        active: &EmbeddingSpaceIdentity,
+    ) -> Result<Self> {
+        let compatible = stored.embedding_space_id()? == active.embedding_space_id()?;
+        Ok(Self {
+            text_embedding: compatible,
+            corpus_mutation: compatible,
+            vector_read: true,
+            inspect: true,
+            verify: true,
+            export: true,
+        })
+    }
+}
+
+/// Explicit migration wrapper for symmetric embedding implementations.
+pub struct SymmetricEmbeddingAdapter<F>
+where
+    F: Fn(&str) -> Result<Vec<f32>> + Send + Sync,
+{
+    embed_fn: F,
+    identity: EmbeddingSpaceIdentity,
+    name: String,
+}
+
+impl<F> SymmetricEmbeddingAdapter<F>
+where
+    F: Fn(&str) -> Result<Vec<f32>> + Send + Sync,
+{
+    pub fn new(
+        name: impl Into<String>,
+        identity: EmbeddingSpaceIdentity,
+        embed_fn: F,
+    ) -> Result<Self> {
+        identity.validate()?;
+        if identity.role_policy != EmbeddingRolePolicy::Symmetric {
+            return Err(RuvectorError::InvalidParameter(
+                "SymmetricEmbeddingAdapter requires role_policy=symmetric".into(),
+            ));
+        }
+        Ok(Self {
+            embed_fn,
+            identity,
+            name: name.into(),
+        })
+    }
+}
+
+impl<F> EmbeddingProvider for SymmetricEmbeddingAdapter<F>
+where
+    F: Fn(&str) -> Result<Vec<f32>> + Send + Sync,
+{
+    fn embed_for(&self, _role: EmbeddingRole, text: &str) -> Result<Vec<f32>> {
+        (self.embed_fn)(text)
+    }
+
+    fn embedding_space(&self) -> &EmbeddingSpaceIdentity {
+        &self.identity
+    }
+
+    fn dimensions(&self) -> usize {
+        self.identity.output_dimension as usize
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
 
 /// Trait for text embedding providers
 pub trait EmbeddingProvider: Send + Sync {
-    /// Generate embedding vector for the given text
-    fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    fn embed_for(&self, role: EmbeddingRole, text: &str) -> Result<Vec<f32>>;
+
+    fn embedding_space(&self) -> &EmbeddingSpaceIdentity;
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed_for(EmbeddingRole::Query, text)
+    }
+
+    fn embed_passage(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed_for(EmbeddingRole::Passage, text)
+    }
+
+    #[deprecated(note = "use embed_query or embed_passage")]
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        LEGACY_EMBED_CALLS.fetch_add(1, Ordering::Relaxed);
+        self.embed_for(EmbeddingRole::Passage, text)
+    }
+
+    fn embed_batch_for(&self, role: EmbeddingRole, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        texts
+            .iter()
+            .map(|text| self.embed_for(role, text))
+            .collect()
+    }
+
+    fn embed_query_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.embed_batch_for(EmbeddingRole::Query, texts)
+    }
+
+    fn embed_passage_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.embed_batch_for(EmbeddingRole::Passage, texts)
+    }
 
     /// Get the dimensionality of embeddings produced by this provider
     fn dimensions(&self) -> usize;
@@ -67,17 +462,21 @@ pub trait EmbeddingProvider: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct HashEmbedding {
     dimensions: usize,
+    identity: EmbeddingSpaceIdentity,
 }
 
 impl HashEmbedding {
     /// Create a new hash-based embedding provider
     pub fn new(dimensions: usize) -> Self {
-        Self { dimensions }
+        Self {
+            dimensions,
+            identity: built_in_identity("ruvector-hash", "hash-v1", dimensions),
+        }
     }
 }
 
 impl EmbeddingProvider for HashEmbedding {
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+    fn embed_for(&self, _role: EmbeddingRole, text: &str) -> Result<Vec<f32>> {
         let mut embedding = vec![0.0; self.dimensions];
         let bytes = text.as_bytes();
 
@@ -94,6 +493,10 @@ impl EmbeddingProvider for HashEmbedding {
         }
 
         Ok(embedding)
+    }
+
+    fn embedding_space(&self) -> &EmbeddingSpaceIdentity {
+        &self.identity
     }
 
     fn dimensions(&self) -> usize {
@@ -140,6 +543,7 @@ pub mod candle {
     pub struct CandleEmbedding {
         dimensions: usize,
         model_id: String,
+        identity: EmbeddingSpaceIdentity,
     }
 
     impl CandleEmbedding {
@@ -174,10 +578,14 @@ pub mod candle {
     }
 
     impl EmbeddingProvider for CandleEmbedding {
-        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+        fn embed_for(&self, _role: EmbeddingRole, _text: &str) -> Result<Vec<f32>> {
             Err(RuvectorError::ModelInferenceError(
                 "Candle embedding not implemented - use ApiEmbedding instead".to_string(),
             ))
+        }
+
+        fn embedding_space(&self) -> &EmbeddingSpaceIdentity {
+            &self.identity
         }
 
         fn dimensions(&self) -> usize {
@@ -201,7 +609,8 @@ pub use candle::CandleEmbedding;
 /// ```rust,no_run
 /// use ruvector_core::embeddings::{EmbeddingProvider, ApiEmbedding};
 ///
-/// let provider = ApiEmbedding::openai("sk-...", "text-embedding-3-small");
+/// # let identity = todo!("load a pinned EmbeddingSpaceIdentity");
+/// let provider = ApiEmbedding::openai("sk-...", "text-embedding-3-small", identity)?;
 /// let embedding = provider.embed("hello world")?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -212,6 +621,7 @@ pub struct ApiEmbedding {
     endpoint: String,
     model: String,
     dimensions: usize,
+    identity: EmbeddingSpaceIdentity,
     client: reqwest::blocking::Client,
 }
 
@@ -224,14 +634,27 @@ impl ApiEmbedding {
     /// * `endpoint` - API endpoint URL
     /// * `model` - Model identifier
     /// * `dimensions` - Expected embedding dimensions
-    pub fn new(api_key: String, endpoint: String, model: String, dimensions: usize) -> Self {
-        Self {
+    pub fn new(
+        api_key: String,
+        endpoint: String,
+        model: String,
+        dimensions: usize,
+        identity: EmbeddingSpaceIdentity,
+    ) -> Result<Self> {
+        identity.validate()?;
+        if identity.model_id != model || identity.output_dimension as usize != dimensions {
+            return Err(RuvectorError::InvalidParameter(
+                "remote provider identity must match the requested model and dimension".into(),
+            ));
+        }
+        Ok(Self {
             api_key,
             endpoint,
             model,
             dimensions,
+            identity,
             client: reqwest::blocking::Client::new(),
-        }
+        })
     }
 
     /// Create OpenAI embedding provider
@@ -240,7 +663,7 @@ impl ApiEmbedding {
     /// - `text-embedding-3-small` - 1536 dimensions, $0.02/1M tokens
     /// - `text-embedding-3-large` - 3072 dimensions, $0.13/1M tokens
     /// - `text-embedding-ada-002` - 1536 dimensions (legacy)
-    pub fn openai(api_key: &str, model: &str) -> Self {
+    pub fn openai(api_key: &str, model: &str, identity: EmbeddingSpaceIdentity) -> Result<Self> {
         let dimensions = match model {
             "text-embedding-3-large" => 3072,
             _ => 1536, // text-embedding-3-small and ada-002
@@ -251,6 +674,7 @@ impl ApiEmbedding {
             "https://api.openai.com/v1/embeddings".to_string(),
             model.to_string(),
             dimensions,
+            identity,
         )
     }
 
@@ -259,12 +683,13 @@ impl ApiEmbedding {
     /// # Models
     /// - `embed-english-v3.0` - 1024 dimensions
     /// - `embed-multilingual-v3.0` - 1024 dimensions
-    pub fn cohere(api_key: &str, model: &str) -> Self {
+    pub fn cohere(api_key: &str, model: &str, identity: EmbeddingSpaceIdentity) -> Result<Self> {
         Self::new(
             api_key.to_string(),
             "https://api.cohere.ai/v1/embed".to_string(),
             model.to_string(),
             1024,
+            identity,
         )
     }
 
@@ -273,7 +698,7 @@ impl ApiEmbedding {
     /// # Models
     /// - `voyage-2` - 1024 dimensions
     /// - `voyage-large-2` - 1536 dimensions
-    pub fn voyage(api_key: &str, model: &str) -> Self {
+    pub fn voyage(api_key: &str, model: &str, identity: EmbeddingSpaceIdentity) -> Result<Self> {
         let dimensions = if model.contains("large") { 1536 } else { 1024 };
 
         Self::new(
@@ -281,17 +706,25 @@ impl ApiEmbedding {
             "https://api.voyageai.com/v1/embeddings".to_string(),
             model.to_string(),
             dimensions,
+            identity,
         )
     }
 }
 
 #[cfg(feature = "api-embeddings")]
 impl EmbeddingProvider for ApiEmbedding {
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let request_body = serde_json::json!({
+    fn embed_for(&self, role: EmbeddingRole, text: &str) -> Result<Vec<f32>> {
+        let mut request_body = serde_json::json!({
             "input": text,
             "model": self.model,
         });
+        if self.identity.role_policy == EmbeddingRolePolicy::Asymmetric {
+            let input_type = match role {
+                EmbeddingRole::Query => "search_query",
+                EmbeddingRole::Passage => "search_document",
+            };
+            request_body["input_type"] = serde_json::Value::String(input_type.into());
+        }
 
         let response = self
             .client
@@ -356,6 +789,10 @@ impl EmbeddingProvider for ApiEmbedding {
         embedding_vec
     }
 
+    fn embedding_space(&self) -> &EmbeddingSpaceIdentity {
+        &self.identity
+    }
+
     fn dimensions(&self) -> usize {
         self.dimensions
     }
@@ -411,6 +848,7 @@ pub mod onnx {
         tokenizer: RwLock<Tokenizer>,
         dimensions: usize,
         model_id: String,
+        identity: EmbeddingSpaceIdentity,
         #[allow(dead_code)]
         max_length: usize,
     }
@@ -507,11 +945,21 @@ pub mod onnx {
                 dimensions
             );
 
+            let mut identity = retrieval_identity("ruvector-onnx", model_id, dimensions)?;
+            let model_bytes = std::fs::read(model_path)?;
+            let tokenizer_bytes = std::fs::read(tokenizer_path)?;
+            identity.model_artifact_sha256 = sha256_hex(&model_bytes);
+            identity.model_graph_sha256 = identity.model_artifact_sha256.clone();
+            identity.tokenizer_sha256 = sha256_hex(&tokenizer_bytes);
+            identity.runtime_revision = format!("ort-2.0.0-rc.9/{}", env!("CARGO_PKG_VERSION"));
+            identity.validate()?;
+
             Ok(Self {
                 session: RwLock::new(session),
                 tokenizer: RwLock::new(tokenizer),
                 dimensions,
                 model_id: model_id.to_string(),
+                identity,
                 max_length,
             })
         }
@@ -550,7 +998,7 @@ pub mod onnx {
 
         /// Embed multiple texts in a batch (more efficient than individual calls)
         pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-            texts.iter().map(|text| self.embed(text)).collect()
+            self.embed_passage_batch(texts)
         }
 
         fn mean_pooling(
@@ -590,11 +1038,19 @@ pub mod onnx {
     }
 
     impl EmbeddingProvider for OnnxEmbedding {
-        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        fn embed_for(&self, role: EmbeddingRole, text: &str) -> Result<Vec<f32>> {
+            let prepared = match (self.identity.prefix_policy, role) {
+                (PrefixPolicy::QueryRecommended, EmbeddingRole::Query) => {
+                    format!("Represent this sentence for searching relevant passages: {text}")
+                }
+                (PrefixPolicy::Required, EmbeddingRole::Query) => format!("query: {text}"),
+                (PrefixPolicy::Required, EmbeddingRole::Passage) => format!("passage: {text}"),
+                _ => text.to_owned(),
+            };
             // Tokenize
             let encoding = {
                 let tokenizer = self.tokenizer.read();
-                tokenizer.encode(text, true).map_err(|e| {
+                tokenizer.encode(prepared, true).map_err(|e| {
                     RuvectorError::ModelInferenceError(format!("Tokenization failed: {}", e))
                 })?
             };
@@ -698,6 +1154,10 @@ pub mod onnx {
             };
 
             Ok(embedding)
+        }
+
+        fn embedding_space(&self) -> &EmbeddingSpaceIdentity {
+            &self.identity
         }
 
         fn dimensions(&self) -> usize {
@@ -871,6 +1331,7 @@ pub mod lattice_native {
         model: LatticeEmbeddingModel,
         model_id: &'static str,
         dimensions: usize,
+        identity: EmbeddingSpaceIdentity,
         request_tx: Mutex<mpsc::Sender<EmbedRequest>>,
         // Keeps the worker thread's handle alive for the lifetime of this
         // provider. Not joined on drop (that would block); dropping
@@ -898,17 +1359,41 @@ pub mod lattice_native {
         /// # Ok::<(), Box<dyn std::error::Error>>(())
         /// ```
         pub fn from_pretrained(model_id: &str) -> Result<Self> {
+            Err(RuvectorError::ModelLoadError(format!(
+                "LatticeEmbedding::from_pretrained('{model_id}') cannot prove immutable artifact \
+                 fingerprints; use from_pretrained_with_identity with a validated complete \
+                 EmbeddingSpaceIdentity"
+            )))
+        }
+
+        /// Load a model with caller-supplied, immutable artifact provenance.
+        pub fn from_pretrained_with_identity(
+            model_id: &str,
+            identity: EmbeddingSpaceIdentity,
+        ) -> Result<Self> {
             let model: LatticeEmbeddingModel = model_id.parse().map_err(|e: String| {
                 RuvectorError::ModelLoadError(format!(
                     "unknown lattice-embed model id '{model_id}': {e}"
                 ))
             })?;
-            Self::with_model(model)
+            Self::with_model_and_identity(model, identity)
         }
 
         /// Load a pre-trained embedding model from an already-resolved
         /// [`lattice_embed::EmbeddingModel`] variant.
         pub fn with_model(model: LatticeEmbeddingModel) -> Result<Self> {
+            Err(RuvectorError::ModelLoadError(format!(
+                "LatticeEmbedding::with_model('{model}') cannot prove immutable artifact \
+                 fingerprints; use with_model_and_identity"
+            )))
+        }
+
+        /// Load a resolved model only after validating complete provenance and
+        /// the exact role/prompt registry fixture.
+        pub fn with_model_and_identity(
+            model: LatticeEmbeddingModel,
+            identity: EmbeddingSpaceIdentity,
+        ) -> Result<Self> {
             if !model.is_local() {
                 return Err(RuvectorError::ModelLoadError(format!(
                     "'{model}' cannot be loaded natively: lattice-embed's \
@@ -916,6 +1401,29 @@ pub mod lattice_native {
                      on-device. Remote/API-only models (e.g. the OpenAI \
                      text-embedding-* family) are not supported by LatticeEmbedding."
                 )));
+            }
+            identity.validate()?;
+            if identity.model_id != model.model_id()
+                || identity.output_dimension as usize != model.dimensions()
+            {
+                return Err(RuvectorError::InvalidParameter(format!(
+                    "lattice identity disagrees with loaded model: expected {} ({}D)",
+                    model.model_id(),
+                    model.dimensions()
+                )));
+            }
+            let expected = retrieval_identity(
+                "lattice-policy-fixture",
+                model.model_id(),
+                model.dimensions(),
+            )?;
+            if identity.role_policy != expected.role_policy
+                || identity.prefix_policy != expected.prefix_policy
+                || identity.prompt_template_sha256 != expected.prompt_template_sha256
+            {
+                return Err(RuvectorError::InvalidParameter(
+                    "lattice identity disagrees with exact role/prompt registry fixture".into(),
+                ));
             }
 
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -969,6 +1477,7 @@ pub mod lattice_native {
                 model,
                 model_id: model.model_id(),
                 dimensions: model.dimensions(),
+                identity,
                 request_tx: Mutex::new(request_tx),
                 _worker: worker,
             })
@@ -1044,8 +1553,18 @@ pub mod lattice_native {
         /// asymmetric retrieval. Safe to call from any context, including
         /// from inside a Tokio runtime — see the
         /// [threading model](LatticeEmbedding#threading-model).
-        fn embed(&self, text: &str) -> Result<Vec<f32>> {
-            self.send_request(EmbedKind::Passage, text)
+        fn embed_for(&self, role: EmbeddingRole, text: &str) -> Result<Vec<f32>> {
+            self.send_request(
+                match role {
+                    EmbeddingRole::Query => EmbedKind::Query,
+                    EmbeddingRole::Passage => EmbedKind::Passage,
+                },
+                text,
+            )
+        }
+
+        fn embedding_space(&self) -> &EmbeddingSpaceIdentity {
+            &self.identity
         }
 
         fn dimensions(&self) -> usize {
@@ -1060,6 +1579,10 @@ pub mod lattice_native {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn test_identity(model: LatticeEmbeddingModel) -> EmbeddingSpaceIdentity {
+            retrieval_identity("lattice-test", model.model_id(), model.dimensions()).unwrap()
+        }
 
         #[test]
         fn from_pretrained_rejects_remote_only_models() {
@@ -1079,10 +1602,10 @@ pub mod lattice_native {
         }
 
         #[test]
-        fn from_pretrained_accepts_native_local_model() {
+        fn from_pretrained_fails_closed_without_identity() {
             assert!(
-                LatticeEmbedding::from_pretrained("bge-small-en-v1.5").is_ok(),
-                "native local model 'bge-small-en-v1.5' must construct successfully"
+                LatticeEmbedding::from_pretrained("bge-small-en-v1.5").is_err(),
+                "native models must require complete artifact provenance"
             );
         }
 
@@ -1102,8 +1625,12 @@ pub mod lattice_native {
                 "BAAI/bge-small-en-v1.5",
                 "BGE_SMALL_EN_V1.5",
             ] {
-                let provider = LatticeEmbedding::from_pretrained(alias)
-                    .unwrap_or_else(|e| panic!("alias '{alias}' must resolve to bge-small: {e}"));
+                let model: LatticeEmbeddingModel = alias.parse().unwrap();
+                let provider =
+                    LatticeEmbedding::from_pretrained_with_identity(alias, test_identity(model))
+                        .unwrap_or_else(|e| {
+                            panic!("alias '{alias}' must resolve to bge-small: {e}")
+                        });
                 assert_eq!(
                     provider.dimensions(),
                     384,
@@ -1124,8 +1651,12 @@ pub mod lattice_native {
         /// the calling side, so both calls must succeed here instead.
         #[tokio::test]
         async fn embed_from_inside_async_runtime_does_not_panic() {
-            let provider = LatticeEmbedding::from_pretrained("bge-small-en-v1.5")
-                .expect("bge-small-en-v1.5 is a native local model");
+            let model: LatticeEmbeddingModel = "bge-small-en-v1.5".parse().unwrap();
+            let provider = LatticeEmbedding::from_pretrained_with_identity(
+                "bge-small-en-v1.5",
+                test_identity(model),
+            )
+            .expect("bge-small-en-v1.5 is a native local model");
 
             let doc = provider
                 .embed("a nested-runtime regression test")
@@ -1231,6 +1762,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn query_template_change_creates_a_new_space_and_read_only_access() {
+        let stored = built_in_identity("fixture", "same-model", 384);
+        let mut active = stored.clone();
+        active.prompt_template_sha256 = sha256_hex(b"changed query template");
+        active.prefix_policy_version += 1;
+
+        assert_ne!(
+            stored.embedding_space_id().unwrap(),
+            active.embedding_space_id().unwrap()
+        );
+        let access = EmbeddingSpaceAccess::for_identities(&stored, &active).unwrap();
+        assert!(!access.text_embedding);
+        assert!(!access.corpus_mutation);
+        assert!(access.vector_read && access.inspect && access.verify && access.export);
+        assert_ne!(
+            embedding_cache_key(&stored, EmbeddingRole::Query, "same query").unwrap(),
+            embedding_cache_key(&active, EmbeddingRole::Query, "same query").unwrap(),
+        );
+    }
+
+    #[test]
+    fn canonical_identity_matches_cross_runtime_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/fixtures/embedding-space-identity-v1.json"
+        ))
+        .unwrap();
+        for variant in ["base", "changed_query_template"] {
+            let identity: EmbeddingSpaceIdentity =
+                serde_json::from_value(fixture[variant]["identity"].clone()).unwrap();
+            assert_eq!(
+                identity.embedding_space_id().unwrap(),
+                fixture[variant]["embedding_space_id"].as_str().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn cache_key_is_role_aware() {
+        let identity = built_in_identity("fixture", "same-model", 4);
+        assert_ne!(
+            embedding_cache_key(&identity, EmbeddingRole::Query, "text").unwrap(),
+            embedding_cache_key(&identity, EmbeddingRole::Passage, "text").unwrap(),
+        );
+    }
+
+    #[test]
+    fn trait_object_preserves_explicit_roles_and_legacy_metric() {
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(HashEmbedding::new(8));
+        assert_eq!(
+            provider.embed_query("same").unwrap(),
+            provider.embed_passage("same").unwrap()
+        );
+        let before = legacy_embed_call_count();
+        #[allow(deprecated)]
+        let _ = provider.embed("legacy").unwrap();
+        assert_eq!(legacy_embed_call_count(), before + 1);
+    }
+
+    #[test]
     fn test_hash_embedding() {
         let provider = HashEmbedding::new(128);
 
@@ -1275,10 +1865,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "api-embeddings")]
     #[ignore] // Requires API key
     fn test_api_embedding_openai() {
         let api_key = std::env::var("OPENAI_API_KEY").unwrap();
-        let provider = ApiEmbedding::openai(&api_key, "text-embedding-3-small");
+        let identity = built_in_identity("test-api", "text-embedding-3-small", 1536);
+        let provider = ApiEmbedding::openai(&api_key, "text-embedding-3-small", identity).unwrap();
 
         let embedding = provider.embed("hello world").unwrap();
         assert_eq!(embedding.len(), 1536);
@@ -1349,6 +1941,14 @@ mod tests {
     mod lattice_tests {
         use super::*;
         use crate::embeddings::LatticeEmbedding;
+        use lattice_embed::EmbeddingModel as LatticeEmbeddingModel;
+
+        fn test_provider(alias: &str) -> LatticeEmbedding {
+            let model: LatticeEmbeddingModel = alias.parse().unwrap();
+            let identity =
+                retrieval_identity("lattice-test", model.model_id(), model.dimensions()).unwrap();
+            LatticeEmbedding::from_pretrained_with_identity(alias, identity).unwrap()
+        }
 
         /// Pure model-id mapping test — no network, no model load.
         /// `LatticeEmbedding::from_pretrained` delegates to
@@ -1358,11 +1958,11 @@ mod tests {
         /// defaulting.
         #[test]
         fn test_lattice_from_pretrained_model_id_mapping() {
-            let by_display_name = LatticeEmbedding::from_pretrained("bge-small-en-v1.5").unwrap();
+            let by_display_name = test_provider("bge-small-en-v1.5");
             assert_eq!(by_display_name.dimensions(), 384);
             assert_eq!(EmbeddingProvider::dimensions(&by_display_name), 384);
 
-            let by_hf_id = LatticeEmbedding::from_pretrained("BAAI/bge-small-en-v1.5").unwrap();
+            let by_hf_id = test_provider("BAAI/bge-small-en-v1.5");
             assert_eq!(by_hf_id.dimensions(), 384);
 
             let unknown = LatticeEmbedding::from_pretrained("not-a-real-model");
@@ -1374,12 +1974,10 @@ mod tests {
 
         #[test]
         fn test_lattice_from_pretrained_minilm_mapping() {
-            let by_short = LatticeEmbedding::from_pretrained("all-minilm-l6-v2").unwrap();
+            let by_short = test_provider("all-minilm-l6-v2");
             assert_eq!(by_short.dimensions(), 384);
 
-            let by_hf_id =
-                LatticeEmbedding::from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-                    .unwrap();
+            let by_hf_id = test_provider("sentence-transformers/all-MiniLM-L6-v2");
             assert_eq!(by_hf_id.dimensions(), 384);
         }
 
@@ -1390,7 +1988,7 @@ mod tests {
         #[test]
         #[ignore]
         fn test_lattice_embedding_real() {
-            let provider = LatticeEmbedding::from_pretrained("bge-small-en-v1.5").unwrap();
+            let provider = test_provider("bge-small-en-v1.5");
 
             let embedding = provider.embed("hello world").unwrap();
             assert_eq!(embedding.len(), 384);

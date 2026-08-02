@@ -152,7 +152,8 @@ impl AgenticDB {
     /// options.dimensions = 1536; // OpenAI embedding dimensions
     /// options.storage_path = "agenticdb.db".to_string();
     ///
-    /// let provider = Arc::new(ApiEmbedding::openai("sk-...", "text-embedding-3-small"));
+    /// # let identity = todo!("load a pinned EmbeddingSpaceIdentity");
+    /// let provider = Arc::new(ApiEmbedding::openai("sk-...", "text-embedding-3-small", identity)?);
     /// let db = AgenticDB::with_embedding_provider(options, provider)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -269,7 +270,7 @@ impl AgenticDB {
         let id = uuid::Uuid::new_v4().to_string();
 
         // Generate embedding from critique for similarity search
-        let embedding = self.generate_text_embedding(&critique)?;
+        let embedding = self.generate_passage_embedding(&critique)?;
 
         let episode = ReflexionEpisode {
             id: id.clone(),
@@ -315,7 +316,7 @@ impl AgenticDB {
         k: usize,
     ) -> Result<Vec<ReflexionEpisode>> {
         // Generate embedding for query
-        let query_embedding = self.generate_text_embedding(query)?;
+        let query_embedding = self.generate_query_embedding(query)?;
 
         // Search in vector DB
         let results = self.vector_db.search(SearchQuery {
@@ -364,7 +365,7 @@ impl AgenticDB {
         let id = uuid::Uuid::new_v4().to_string();
 
         // Generate embedding from description
-        let embedding = self.generate_text_embedding(&description)?;
+        let embedding = self.generate_passage_embedding(&description)?;
 
         let skill = Skill {
             id: id.clone(),
@@ -406,7 +407,7 @@ impl AgenticDB {
 
     /// Search skills by description
     pub fn search_skills(&self, query_description: &str, k: usize) -> Result<Vec<Skill>> {
-        let query_embedding = self.generate_text_embedding(query_description)?;
+        let query_embedding = self.generate_query_embedding(query_description)?;
 
         let results = self.vector_db.search(SearchQuery {
             vector: query_embedding,
@@ -478,7 +479,7 @@ impl AgenticDB {
         let id = uuid::Uuid::new_v4().to_string();
 
         // Generate embedding from context
-        let embedding = self.generate_text_embedding(&context)?;
+        let embedding = self.generate_passage_embedding(&context)?;
 
         let edge = CausalEdge {
             id: id.clone(),
@@ -527,7 +528,7 @@ impl AgenticDB {
         gamma: f64,
     ) -> Result<Vec<UtilitySearchResult>> {
         let start_time = std::time::Instant::now();
-        let query_embedding = self.generate_text_embedding(query)?;
+        let query_embedding = self.generate_query_embedding(query)?;
 
         // Get all causal edges
         let results = self.vector_db.search(SearchQuery {
@@ -749,15 +750,20 @@ impl AgenticDB {
     ///
     /// let mut options = DbOptions::default();
     /// options.dimensions = 1536;
-    /// let provider = Arc::new(ApiEmbedding::openai("sk-...", "text-embedding-3-small"));
+    /// # let identity = todo!("load a pinned EmbeddingSpaceIdentity");
+    /// let provider = Arc::new(ApiEmbedding::openai("sk-...", "text-embedding-3-small", identity)?);
     /// let db = AgenticDB::with_embedding_provider(options, provider)?;
     ///
     /// // Now embeddings will be semantic! (internal method)
     /// let embedding = db.generate_text_embedding("hello world")?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    fn generate_text_embedding(&self, text: &str) -> Result<Vec<f32>> {
-        self.embedding_provider.embed(text)
+    fn generate_query_embedding(&self, text: &str) -> Result<Vec<f32>> {
+        self.embedding_provider.embed_query(text)
+    }
+
+    fn generate_passage_embedding(&self, text: &str) -> Result<Vec<f32>> {
+        self.embedding_provider.embed_passage(text)
     }
 }
 
@@ -1016,7 +1022,7 @@ impl<'a> SessionStateIndex<'a> {
         let expires_at = timestamp + self.ttl_seconds;
 
         // Generate embedding for the content
-        let embedding = self.db.generate_text_embedding(content)?;
+        let embedding = self.db.generate_passage_embedding(content)?;
 
         // Store in vector DB
         self.db.vector_db.insert(VectorEntry {
@@ -1044,7 +1050,7 @@ impl<'a> SessionStateIndex<'a> {
 
     /// Find relevant past turns based on current context
     pub fn find_relevant_turns(&self, query: &str, k: usize) -> Result<Vec<SessionTurn>> {
-        let query_embedding = self.db.generate_text_embedding(query)?;
+        let query_embedding = self.db.generate_query_embedding(query)?;
         let current_time = chrono::Utc::now().timestamp();
 
         let results = self.db.vector_db.search(SearchQuery {
@@ -1216,7 +1222,7 @@ impl<'a> WitnessLog<'a> {
         // Generate embedding for semantic search
         let embedding = self
             .db
-            .generate_text_embedding(&format!("{} {} {}", agent_id, action_type, details))?;
+            .generate_passage_embedding(&format!("{} {} {}", agent_id, action_type, details))?;
 
         // Store in vector DB (append-only)
         self.db.vector_db.insert(VectorEntry {
@@ -1246,7 +1252,7 @@ impl<'a> WitnessLog<'a> {
 
     /// Search witness log semantically
     pub fn search(&self, query: &str, k: usize) -> Result<Vec<WitnessEntry>> {
-        let query_embedding = self.db.generate_text_embedding(query)?;
+        let query_embedding = self.db.generate_query_embedding(query)?;
 
         let results = self.db.vector_db.search(SearchQuery {
             vector: query_embedding,

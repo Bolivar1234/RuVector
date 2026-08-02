@@ -95,7 +95,11 @@ pub use agenticdb::{
 
 #[cfg(feature = "api-embeddings")]
 pub use embeddings::ApiEmbedding;
-pub use embeddings::{BoxedEmbeddingProvider, EmbeddingProvider, HashEmbedding};
+pub use embeddings::{
+    BoxedEmbeddingProvider, EmbeddingDistanceMetric, EmbeddingProvider, EmbeddingRole,
+    EmbeddingRolePolicy, EmbeddingSpaceIdentity, HashEmbedding, OutputDtype, PoolingStrategy,
+    PoolingStrategyName, PrefixPolicy,
+};
 
 #[cfg(feature = "real-embeddings")]
 pub use embeddings::CandleEmbedding;

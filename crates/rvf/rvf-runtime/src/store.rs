@@ -3,11 +3,11 @@
 //! Ties together the write path, read path, indexing, deletion, and
 //! compaction into a single cohesive store.
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use rvf_types::cow_map::{CowMapHeader, MapFormat, COWMAP_MAGIC};
@@ -16,6 +16,11 @@ use rvf_types::ebpf::{EbpfHeader, EBPF_MAGIC};
 use rvf_types::kernel::{KernelHeader, KERNEL_MAGIC};
 use rvf_types::kernel_binding::KernelBinding;
 use rvf_types::membership::MembershipHeader;
+use rvf_types::metadata::{
+    FileMetadataRecord as WireFileMetadata, MetadataRecord as WireMetadataRecord,
+    MetadataRecordOp as WireMetadataRecordOp, MetadataSchemaEntry, MetadataSegment, MetadataType,
+    MetadataValue as WireMetadataValue,
+};
 use rvf_types::wasm_bootstrap::{WasmHeader, WasmRole, WASM_MAGIC};
 use rvf_types::{
     DomainProfile, ErrorCode, FileIdentity, RvfError, SegmentType, SEGMENT_HEADER_SIZE,
@@ -25,7 +30,7 @@ use rvf_types::{
 use crate::cow::{CowEngine, CowStats};
 use crate::cow_map::CowMap;
 use crate::deletion::DeletionBitmap;
-use crate::filter::{self, metadata_value_to_filter, FilterExpr, FilterValue, MetadataStore};
+use crate::filter::{self, FilterExpr, MetadataStore};
 use crate::index_path::{
     VectorIndex, INDEX_MAX_DELETED_FRACTION, INDEX_MIN_EF_SEARCH, INDEX_MIN_VECTORS,
 };
@@ -47,6 +52,12 @@ const MAX_COW_LINEAGE_DEPTH: u32 = 1024;
 /// Bound dense membership bitmaps so a sparse, attacker-controlled vector ID
 /// cannot turn branch creation into an unbounded allocation.
 const MAX_MEMBERSHIP_FILTER_BYTES: u64 = 64 * 1024 * 1024;
+
+enum IngestMetadata<'a> {
+    None,
+    Legacy(&'a [MetadataEntry]),
+    Records(&'a [VectorMetadata]),
+}
 
 fn relative_parent_reference(child_path: &Path, parent_path: &Path) -> Result<PathBuf, RvfError> {
     let child_dir = child_path
@@ -104,6 +115,12 @@ pub struct RvfStore {
     vectors: VectorData,
     deletion_bitmap: DeletionBitmap,
     metadata: MetadataStore,
+    file_metadata: BTreeMap<String, MetadataValue>,
+    metadata_generation: u64,
+    embedding_compatibility: EmbeddingCompatibility,
+    metadata_filter_scanned_records: AtomicU64,
+    metadata_filter_scanned_bytes: AtomicU64,
+    metadata_filter_aborts: AtomicU64,
     epoch: u32,
     segment_dir: Vec<(u64, u64, u64, u8)>,
     read_only: bool,
@@ -189,6 +206,12 @@ impl RvfStore {
             vectors: VectorData::new(options.dimension),
             deletion_bitmap: DeletionBitmap::new(),
             metadata: MetadataStore::new(),
+            file_metadata: BTreeMap::new(),
+            metadata_generation: 0,
+            embedding_compatibility: EmbeddingCompatibility::Unchecked,
+            metadata_filter_scanned_records: AtomicU64::new(0),
+            metadata_filter_scanned_bytes: AtomicU64::new(0),
+            metadata_filter_aborts: AtomicU64::new(0),
             epoch: 0,
             segment_dir: Vec::new(),
             read_only: false,
@@ -244,6 +267,12 @@ impl RvfStore {
             vectors: VectorData::new(0),
             deletion_bitmap: DeletionBitmap::new(),
             metadata: MetadataStore::new(),
+            file_metadata: BTreeMap::new(),
+            metadata_generation: 0,
+            embedding_compatibility: EmbeddingCompatibility::Unchecked,
+            metadata_filter_scanned_records: AtomicU64::new(0),
+            metadata_filter_scanned_bytes: AtomicU64::new(0),
+            metadata_filter_aborts: AtomicU64::new(0),
             epoch: 0,
             segment_dir: Vec::new(),
             read_only: false,
@@ -307,6 +336,12 @@ impl RvfStore {
             vectors: VectorData::new(0),
             deletion_bitmap: DeletionBitmap::new(),
             metadata: MetadataStore::new(),
+            file_metadata: BTreeMap::new(),
+            metadata_generation: 0,
+            embedding_compatibility: EmbeddingCompatibility::Unchecked,
+            metadata_filter_scanned_records: AtomicU64::new(0),
+            metadata_filter_scanned_bytes: AtomicU64::new(0),
+            metadata_filter_aborts: AtomicU64::new(0),
             epoch: 0,
             segment_dir: Vec::new(),
             read_only: true,
@@ -336,7 +371,36 @@ impl RvfStore {
         ids: &[u64],
         metadata: Option<&[MetadataEntry]>,
     ) -> Result<IngestResult, RvfError> {
+        self.ingest_batch_internal(
+            vectors,
+            ids,
+            metadata.map_or(IngestMetadata::None, IngestMetadata::Legacy),
+        )
+    }
+
+    /// Atomically ingest vectors with explicitly associated metadata records.
+    ///
+    /// Record field counts may differ. Metadata IDs are validated against the
+    /// resulting vector snapshot (existing live vectors plus this batch).
+    pub fn ingest_batch_with_metadata(
+        &mut self,
+        vectors: &[&[f32]],
+        ids: &[u64],
+        metadata: &[VectorMetadata],
+    ) -> Result<IngestResult, RvfError> {
+        self.ingest_batch_internal(vectors, ids, IngestMetadata::Records(metadata))
+    }
+
+    fn ingest_batch_internal(
+        &mut self,
+        vectors: &[&[f32]],
+        ids: &[u64],
+        metadata: IngestMetadata<'_>,
+    ) -> Result<IngestResult, RvfError> {
         if self.read_only {
+            return Err(err(ErrorCode::ReadOnly));
+        }
+        if self.embedding_compatibility == EmbeddingCompatibility::VectorReadOnly {
             return Err(err(ErrorCode::ReadOnly));
         }
         if vectors.len() != ids.len() {
@@ -368,6 +432,27 @@ impl RvfStore {
                 epoch: self.epoch,
             });
         }
+        if matches!(
+            metadata,
+            IngestMetadata::Legacy(entries)
+                if !entries.is_empty() && entries.len() % valid_ids.len() != 0
+        ) {
+            return Err(err(ErrorCode::InvalidManifest));
+        }
+        let unique_ids: HashSet<u64> = valid_ids.iter().copied().collect();
+        if unique_ids.len() != valid_ids.len() {
+            return Err(err(ErrorCode::InvalidManifest));
+        }
+
+        let old_vectors = self.vectors.clone();
+        let old_metadata = self.metadata.clone();
+        let old_generation = self.metadata_generation;
+        let old_directory = self.segment_dir.clone();
+        let old_epoch = self.epoch;
+        let old_witness_hash = self.last_witness_hash;
+
+        let candidate_metadata = self.build_ingest_metadata(&metadata, &valid_ids)?;
+        let has_metadata = !matches!(metadata, IngestMetadata::None);
 
         let writer = self
             .seg_writer
@@ -434,34 +519,58 @@ impl RvfStore {
             }
         }
 
-        if let Some(meta_entries) = metadata {
-            let entries_per_id = meta_entries.len() / valid_ids.len().max(1);
-            if entries_per_id > 0 {
-                for (i, &vid) in valid_ids.iter().enumerate() {
-                    let start = i * entries_per_id;
-                    let end = ((i + 1) * entries_per_id).min(meta_entries.len());
-                    let fields: Vec<(u16, FilterValue)> = meta_entries[start..end]
-                        .iter()
-                        .map(|e| (e.field_id, metadata_value_to_filter(&e.value)))
-                        .collect();
-                    self.metadata.insert(vid, fields);
-                }
+        if has_metadata {
+            self.metadata = candidate_metadata;
+            if let Err(error) = self.write_metadata_snapshot() {
+                self.metadata = old_metadata;
+                self.metadata_generation = old_generation;
+                self.vectors = old_vectors;
+                self.segment_dir = old_directory;
+                *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.rabitq.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                return Err(error);
             }
         }
 
-        self.file
-            .sync_all()
-            .map_err(|_| err(ErrorCode::FsyncFailed))?;
+        if self.file.sync_all().is_err() {
+            self.vectors = old_vectors;
+            self.metadata = old_metadata;
+            self.metadata_generation = old_generation;
+            self.segment_dir = old_directory;
+            *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *self.rabitq.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return Err(err(ErrorCode::FsyncFailed));
+        }
 
         self.epoch += 1;
 
         // Append a witness entry recording this ingest operation.
         if self.options.witness.witness_ingest {
             let action = format!("ingest:count={},epoch={}", accepted, self.epoch);
-            self.append_witness(witness_types::COMPUTATION, action.as_bytes())?;
+            if let Err(error) = self.append_witness(witness_types::COMPUTATION, action.as_bytes()) {
+                self.vectors = old_vectors;
+                self.metadata = old_metadata;
+                self.metadata_generation = old_generation;
+                self.segment_dir = old_directory;
+                self.epoch = old_epoch;
+                self.last_witness_hash = old_witness_hash;
+                *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.rabitq.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                return Err(error);
+            }
         }
 
-        self.write_manifest()?;
+        if let Err(error) = self.write_manifest() {
+            self.vectors = old_vectors;
+            self.metadata = old_metadata;
+            self.metadata_generation = old_generation;
+            self.segment_dir = old_directory;
+            self.epoch = old_epoch;
+            self.last_witness_hash = old_witness_hash;
+            *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *self.rabitq.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return Err(error);
+        }
 
         Ok(IngestResult {
             accepted,
@@ -483,7 +592,26 @@ impl RvfStore {
         k: usize,
         options: &QueryOptions,
     ) -> Result<Vec<SearchResult>, RvfError> {
-        self.query_routed(vector, k, options).map(|(r, _)| r)
+        let (mut results, _) = self.query_routed(vector, k, options)?;
+        self.attach_metadata(&mut results, options);
+        Ok(results)
+    }
+
+    /// Populate [`SearchResult::metadata`] on each hit when the query opted
+    /// in via [`QueryOptions::include_metadata`] (ADR-280 §6).
+    ///
+    /// Metadata is resolved from `self.metadata`, the same committed,
+    /// COW-resolved store that backs [`Self::get_metadata`], so child field
+    /// overrides and record tombstones are reflected identically and hits
+    /// come from the same committed snapshot as the hit list. This is a
+    /// no-op (and allocates nothing) when `include_metadata` is `false`.
+    fn attach_metadata(&self, results: &mut [SearchResult], options: &QueryOptions) {
+        if !options.include_metadata {
+            return;
+        }
+        for result in results.iter_mut() {
+            result.metadata = self.get_metadata(result.id);
+        }
     }
 
     /// Internal query entry point. Returns the results plus whether the
@@ -529,7 +657,7 @@ impl RvfStore {
             }
         }
 
-        Ok((self.query_exact(vector, k, options), false))
+        Ok((self.query_exact(vector, k, options)?, false))
     }
 
     /// Whether this query can be served by the opt-in RaBitQ two-stage
@@ -599,6 +727,7 @@ impl RvfStore {
                     id,
                     distance: compute_distance(vector, v, &self.options.metric, 0.0),
                     retrieval_quality: rvf_types::quality::RetrievalQuality::Full,
+                    metadata: None,
                 })
             })
             .collect();
@@ -794,6 +923,7 @@ impl RvfStore {
                 id,
                 distance,
                 retrieval_quality: rvf_types::quality::RetrievalQuality::Full,
+                metadata: None,
             })
             .collect();
         results.sort_by(|a, b| {
@@ -863,6 +993,7 @@ impl RvfStore {
                 id,
                 distance,
                 retrieval_quality: rvf_types::quality::RetrievalQuality::Full,
+                metadata: None,
             })
             .collect();
         if results.len() < k.min(live) {
@@ -881,7 +1012,12 @@ impl RvfStore {
     }
 
     /// Exact brute-force k-nearest-neighbor scan over all live vectors.
-    fn query_exact(&self, vector: &[f32], k: usize, options: &QueryOptions) -> Vec<SearchResult> {
+    fn query_exact(
+        &self,
+        vector: &[f32],
+        k: usize,
+        options: &QueryOptions,
+    ) -> Result<Vec<SearchResult>, RvfError> {
         // Max-heap: peek() returns the largest (farthest) distance in our k set.
         // When a closer vector is found, evict the farthest.
         let mut heap: BinaryHeap<(OrderedFloat, u64)> = BinaryHeap::new();
@@ -901,11 +1037,21 @@ impl RvfStore {
 
         // Scan the contiguous slab in ordinal order (cache-friendly: rows
         // are adjacent in memory, no per-vector pointer chase).
+        let filter_started = std::time::Instant::now();
+        let mut filter_records = 0u64;
+        let mut filter_bytes = 0u64;
         for (vec_id, stored_vec) in self.vectors.iter() {
             if self.deletion_bitmap.is_deleted(vec_id) {
                 continue;
             }
             if let Some(ref filter_expr) = options.filter {
+                self.check_metadata_filter_budget(
+                    vec_id,
+                    options,
+                    filter_started,
+                    &mut filter_records,
+                    &mut filter_bytes,
+                )?;
                 if !filter::evaluate(filter_expr, vec_id, &self.metadata) {
                     continue;
                 }
@@ -928,7 +1074,16 @@ impl RvfStore {
         // and not overridden by the child's own slab.  This makes `query_exact`
         // the correct ground-truth for recall comparison against the ANN path.
         if self.cow_engine.is_some() {
-            self.cow_exact_parent_scan(vector, query_norm_sq, k, &mut heap);
+            self.cow_exact_parent_scan(
+                vector,
+                query_norm_sq,
+                k,
+                options,
+                filter_started,
+                &mut filter_records,
+                &mut filter_bytes,
+                &mut heap,
+            )?;
         }
 
         // Drain the max-heap into sorted results (closest first).
@@ -938,6 +1093,7 @@ impl RvfStore {
                 id,
                 distance: dist,
                 retrieval_quality: rvf_types::quality::RetrievalQuality::Full,
+                metadata: None,
             })
             .collect();
         results.sort_by(|a, b| {
@@ -946,7 +1102,7 @@ impl RvfStore {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        results
+        Ok(results)
     }
 
     /// Extend the `query_exact` result heap with parent vectors visible in the
@@ -967,11 +1123,15 @@ impl RvfStore {
         vector: &[f32],
         query_norm_sq: f32,
         k: usize,
+        options: &QueryOptions,
+        filter_started: std::time::Instant,
+        filter_records: &mut u64,
+        filter_bytes: &mut u64,
         heap: &mut BinaryHeap<(OrderedFloat, u64)>,
-    ) {
+    ) -> Result<(), RvfError> {
         let parent_path = match self.parent_path.as_ref() {
             Some(p) => p,
-            None => return,
+            None => return Ok(()),
         };
 
         let mut guard = self.parent_store.lock().unwrap_or_else(|e| e.into_inner());
@@ -979,13 +1139,13 @@ impl RvfStore {
             if let Ok(p) = RvfStore::open_readonly(parent_path) {
                 *guard = Some(Box::new(p));
             } else {
-                return; // parent unreadable; skip silently
+                return Ok(()); // parent unreadable; skip silently
             }
         }
 
         let parent = match guard.as_ref() {
             Some(p) => p,
-            None => return,
+            None => return Ok(()),
         };
 
         // IDs in the child slab override their parent counterpart.
@@ -1006,6 +1166,18 @@ impl RvfStore {
             if parent.deletion_bitmap.is_deleted(vid) {
                 continue;
             }
+            if let Some(ref filter_expr) = options.filter {
+                self.check_metadata_filter_budget(
+                    vid,
+                    options,
+                    filter_started,
+                    filter_records,
+                    filter_bytes,
+                )?;
+                if !filter::evaluate(filter_expr, vid, &self.metadata) {
+                    continue;
+                }
+            }
 
             let dist = compute_distance(vector, stored_vec, &self.options.metric, query_norm_sq);
             if heap.len() < k {
@@ -1017,6 +1189,7 @@ impl RvfStore {
                 }
             }
         }
+        Ok(())
     }
 
     /// Query the store and return a full QualityEnvelope (ADR-033 §2.4).
@@ -1087,6 +1260,7 @@ impl RvfStore {
                     id: candidate.id,
                     distance: candidate.distance,
                     retrieval_quality: RetrievalQuality::BruteForceBudgeted,
+                    metadata: None,
                 });
             }
 
@@ -1123,6 +1297,11 @@ impl RvfStore {
             hnsw_candidate_count,
             safety_net_candidate_count,
         };
+
+        // Attach committed metadata to the final hit set on the same code
+        // path as `query`, after safety-net merge and truncation so only the
+        // returned hits pay the decode cost (ADR-280 §6).
+        self.attach_metadata(&mut all_results, options);
 
         let envelope = QualityEnvelope {
             results: all_results,
@@ -1185,6 +1364,9 @@ impl RvfStore {
         if self.read_only {
             return Err(err(ErrorCode::ReadOnly));
         }
+        if self.embedding_compatibility == EmbeddingCompatibility::VectorReadOnly {
+            return Err(err(ErrorCode::ReadOnly));
+        }
 
         let writer = self
             .seg_writer
@@ -1234,6 +1416,16 @@ impl RvfStore {
                 }
                 mf.remove(id);
             }
+        }
+        let old_metadata = self.metadata.clone();
+        let old_generation = self.metadata_generation;
+        let old_directory_len = self.segment_dir.len();
+        self.metadata.remove_ids(ids);
+        if let Err(error) = self.write_metadata_snapshot() {
+            self.metadata = old_metadata;
+            self.metadata_generation = old_generation;
+            self.segment_dir.truncate(old_directory_len);
+            return Err(error);
         }
 
         self.epoch = epoch;
@@ -2227,6 +2419,215 @@ impl RvfStore {
             .collect()
     }
 
+    /// Return one vector's committed metadata, preserving null and binary
+    /// values. An empty record is distinct from no record.
+    pub fn get_metadata(&self, vector_id: u64) -> Option<Vec<MetadataEntry>> {
+        self.metadata.get(vector_id).map(|fields| {
+            fields
+                .into_iter()
+                .map(|(field_id, value)| MetadataEntry { field_id, value })
+                .collect()
+        })
+    }
+
+    /// Return a file-level metadata value.
+    pub fn get_file_metadata(&self, key: &str) -> Option<&MetadataValue> {
+        self.file_metadata.get(key)
+    }
+
+    /// Persist a file-level metadata value in the authoritative META_SEG.
+    pub fn set_file_metadata(&mut self, key: String, value: MetadataValue) -> Result<(), RvfError> {
+        if self.read_only || self.embedding_compatibility == EmbeddingCompatibility::VectorReadOnly
+        {
+            return Err(err(ErrorCode::ReadOnly));
+        }
+        if key.starts_with("rvf.") {
+            return Err(err(ErrorCode::InvalidManifest));
+        }
+        self.set_file_metadata_inner(key, value)
+    }
+
+    /// Persist an implementation-owned `rvf.*` value such as canonical
+    /// embedding identity JSON or its immutable space ID.
+    pub fn set_system_file_metadata(
+        &mut self,
+        key: String,
+        value: MetadataValue,
+    ) -> Result<(), RvfError> {
+        if !key.starts_with("rvf.") {
+            return Err(err(ErrorCode::InvalidManifest));
+        }
+        self.set_file_metadata_inner(key, value)
+    }
+
+    /// Compare the caller's immutable embedding-space ID with the artifact.
+    /// A mismatch is sticky and permits vector-only reads, inspection, and
+    /// export while rejecting subsequent corpus mutation.
+    pub fn verify_embedding_space(&mut self, expected_space_id: &str) -> EmbeddingCompatibility {
+        self.embedding_compatibility = match self.file_metadata.get("rvf.embedding.space_id") {
+            Some(MetadataValue::String(actual)) if actual == expected_space_id => {
+                EmbeddingCompatibility::Compatible
+            }
+            Some(MetadataValue::Bytes(actual))
+                if actual.as_slice() == expected_space_id.as_bytes() =>
+            {
+                EmbeddingCompatibility::Compatible
+            }
+            _ => EmbeddingCompatibility::VectorReadOnly,
+        };
+        self.embedding_compatibility
+    }
+
+    pub fn embedding_compatibility(&self) -> EmbeddingCompatibility {
+        self.embedding_compatibility
+    }
+
+    /// Cumulative observability counters for bounded linear metadata scans.
+    pub fn metadata_filter_stats(&self) -> MetadataFilterStats {
+        MetadataFilterStats {
+            scanned_records: self.metadata_filter_scanned_records.load(Ordering::Relaxed),
+            scanned_bytes: self.metadata_filter_scanned_bytes.load(Ordering::Relaxed),
+            aborted_scans: self.metadata_filter_aborts.load(Ordering::Relaxed),
+        }
+    }
+
+    fn build_ingest_metadata(
+        &self,
+        metadata: &IngestMetadata<'_>,
+        batch_ids: &[u64],
+    ) -> Result<MetadataStore, RvfError> {
+        let mut candidate = self.metadata.clone();
+        match metadata {
+            IngestMetadata::None => {}
+            IngestMetadata::Legacy(entries) => {
+                if entries.iter().any(
+                    |entry| matches!(entry.value, MetadataValue::F64(value) if !value.is_finite()),
+                ) {
+                    return Err(err(ErrorCode::InvalidMetadata));
+                }
+                let entries_per_id = entries.len() / batch_ids.len().max(1);
+                for (index, &vector_id) in batch_ids.iter().enumerate() {
+                    let start = index * entries_per_id;
+                    let end = start.saturating_add(entries_per_id).min(entries.len());
+                    let fields = entries[start..end]
+                        .iter()
+                        .map(|entry| (entry.field_id, entry.value.clone()))
+                        .collect();
+                    candidate.insert(vector_id, fields);
+                }
+            }
+            IngestMetadata::Records(records) => {
+                let mut record_ids = HashSet::with_capacity(records.len());
+                let batch_ids: HashSet<u64> = batch_ids.iter().copied().collect();
+                for record in *records {
+                    if !record_ids.insert(record.vector_id) {
+                        return Err(err(ErrorCode::InvalidMetadata));
+                    }
+                    let existing_live = self.vectors.get(record.vector_id).is_some()
+                        && !self.deletion_bitmap.is_deleted(record.vector_id);
+                    let inherited_live = self
+                        .membership_filter
+                        .as_ref()
+                        .is_some_and(|membership| membership.contains(record.vector_id));
+                    if !batch_ids.contains(&record.vector_id) && !existing_live && !inherited_live {
+                        return Err(err(ErrorCode::InvalidMetadata));
+                    }
+                    let mut field_ids = HashSet::with_capacity(record.fields.len());
+                    for field in &record.fields {
+                        if !field_ids.insert(field.field_id)
+                            || matches!(field.value, MetadataValue::F64(value) if !value.is_finite())
+                        {
+                            return Err(err(ErrorCode::InvalidMetadata));
+                        }
+                    }
+                    if record.delete_record {
+                        if !record.fields.is_empty() {
+                            return Err(err(ErrorCode::InvalidMetadata));
+                        }
+                        candidate.remove_ids(&[record.vector_id]);
+                    } else {
+                        candidate.insert(
+                            record.vector_id,
+                            record
+                                .fields
+                                .iter()
+                                .map(|field| (field.field_id, field.value.clone()))
+                                .collect(),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(candidate)
+    }
+
+    fn check_metadata_filter_budget(
+        &self,
+        vector_id: u64,
+        options: &QueryOptions,
+        started: std::time::Instant,
+        records: &mut u64,
+        bytes: &mut u64,
+    ) -> Result<(), RvfError> {
+        *records = records.saturating_add(1);
+        let record_bytes = self.metadata.decoded_size(vector_id) as u64;
+        *bytes = bytes.saturating_add(record_bytes);
+        self.metadata_filter_scanned_records
+            .fetch_add(1, Ordering::Relaxed);
+        self.metadata_filter_scanned_bytes
+            .fetch_add(record_bytes, Ordering::Relaxed);
+        let cancelled = options
+            .metadata_filter_cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
+        let deadline_exceeded = options.timeout_ms != 0
+            && started.elapsed() >= std::time::Duration::from_millis(options.timeout_ms as u64);
+        if cancelled
+            || deadline_exceeded
+            || *records > options.metadata_filter_max_records
+            || *bytes > options.metadata_filter_max_bytes
+        {
+            self.metadata_filter_aborts.fetch_add(1, Ordering::Relaxed);
+            return Err(err(if deadline_exceeded {
+                ErrorCode::Timeout
+            } else {
+                ErrorCode::FilterBudgetExceeded
+            }));
+        }
+        Ok(())
+    }
+
+    fn set_file_metadata_inner(
+        &mut self,
+        key: String,
+        value: MetadataValue,
+    ) -> Result<(), RvfError> {
+        if self.read_only || self.embedding_compatibility == EmbeddingCompatibility::VectorReadOnly
+        {
+            return Err(err(ErrorCode::ReadOnly));
+        }
+        let old_file_metadata = self.file_metadata.clone();
+        let old_generation = self.metadata_generation;
+        let old_epoch = self.epoch;
+        let old_directory_len = self.segment_dir.len();
+        self.file_metadata.insert(key, value);
+        let result = (|| {
+            self.write_metadata_snapshot()?;
+            self.epoch = self
+                .epoch
+                .checked_add(1)
+                .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+            self.write_manifest()
+        })();
+        if result.is_err() {
+            self.file_metadata = old_file_metadata;
+            self.metadata_generation = old_generation;
+            self.epoch = old_epoch;
+            self.segment_dir.truncate(old_directory_len);
+        }
+        result
+    }
+
     /// Get the file identity (lineage metadata) for this store.
     pub fn file_identity(&self) -> &FileIdentity {
         &self.file_identity
@@ -2428,7 +2829,13 @@ impl RvfStore {
             writer_lock: Some(writer_lock),
             vectors: VectorData::new(self.options.dimension),
             deletion_bitmap: DeletionBitmap::new(),
-            metadata: MetadataStore::new(),
+            metadata: self.metadata.clone(),
+            file_metadata: self.file_metadata.clone(),
+            metadata_generation: self.metadata_generation,
+            embedding_compatibility: self.embedding_compatibility,
+            metadata_filter_scanned_records: AtomicU64::new(0),
+            metadata_filter_scanned_bytes: AtomicU64::new(0),
+            metadata_filter_aborts: AtomicU64::new(0),
             epoch: 0,
             segment_dir: Vec::new(),
             read_only: false,
@@ -2622,6 +3029,7 @@ impl RvfStore {
             self.file_identity = fi;
         }
 
+        self.restore_metadata()?;
         self.restore_cow_state(ancestry)?;
 
         // Load the most recently persisted HNSW index, if any. A stale or
@@ -2757,6 +3165,8 @@ impl RvfStore {
                 _ => err(ErrorCode::ParentChainBroken),
             },
         )?;
+        let parent_metadata = parent.metadata.clone();
+        let parent_file_metadata = parent.file_metadata.clone();
         if parent.file_identity.lineage_depth.checked_add(1)
             != Some(self.file_identity.lineage_depth)
         {
@@ -2827,6 +3237,25 @@ impl RvfStore {
         )?);
         self.membership_filter = Some(membership_filter);
         self.parent_path = Some(parent_path);
+        let has_local_metadata_snapshot = self
+            .segment_dir
+            .iter()
+            .any(|entry| entry.3 == SegmentType::Meta as u8);
+        if !has_local_metadata_snapshot {
+            self.metadata = parent_metadata;
+            self.file_metadata = parent_file_metadata;
+        }
+        let membership = self
+            .membership_filter
+            .as_ref()
+            .ok_or_else(|| err(ErrorCode::MembershipInvalid))?;
+        for (vector_id, _) in self.metadata.records() {
+            let local_live = self.vectors.get(vector_id).is_some()
+                && !self.deletion_bitmap.is_deleted(vector_id);
+            if !local_live && !membership.contains(vector_id) {
+                return Err(err(ErrorCode::InvalidMetadata));
+            }
+        }
         Ok(())
     }
 
@@ -2968,6 +3397,242 @@ impl RvfStore {
             .map_err(|_| err(ErrorCode::FsyncFailed))?;
         Ok(())
     }
+
+    fn write_metadata_snapshot(&mut self) -> Result<(), RvfError> {
+        let generation = self
+            .metadata_generation
+            .checked_add(1)
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+        let mut schema_by_id: BTreeMap<u16, MetadataType> = BTreeMap::new();
+        let mut nullable = HashSet::new();
+        for (_, fields) in self.metadata.records() {
+            for (field_id, value) in fields {
+                if matches!(value, MetadataValue::Null) {
+                    nullable.insert(field_id);
+                    continue;
+                }
+                let Some(value_type) = runtime_metadata_type(&value) else {
+                    continue;
+                };
+                if schema_by_id
+                    .insert(field_id, value_type)
+                    .is_some_and(|previous| previous != value_type)
+                {
+                    return Err(err(ErrorCode::InvalidManifest));
+                }
+            }
+        }
+        // The legacy field-id API has no schema declaration. A null-only
+        // field is conservatively declared nullable UTF-8.
+        for &field_id in &nullable {
+            schema_by_id.entry(field_id).or_insert(MetadataType::String);
+        }
+        let schema = schema_by_id
+            .into_iter()
+            .map(|(field_id, value_type)| MetadataSchemaEntry {
+                field_id,
+                value_type,
+                nullable: nullable.contains(&field_id),
+                name: format!("field.{field_id}"),
+            })
+            .collect();
+        let file_metadata = self
+            .file_metadata
+            .iter()
+            .map(|(key, value)| WireFileMetadata {
+                key: key.clone(),
+                value: runtime_to_wire(value),
+            })
+            .collect();
+        let records = self
+            .metadata
+            .records()
+            .map(|(vector_id, fields)| WireMetadataRecord {
+                vector_id,
+                operation: WireMetadataRecordOp::Upsert(
+                    fields
+                        .into_iter()
+                        .map(|(field_id, value)| (field_id, runtime_to_wire(&value)))
+                        .collect(),
+                ),
+            })
+            .collect();
+        let payload = MetadataSegment {
+            generation,
+            base_generation: None,
+            full_snapshot: true,
+            schema,
+            file_metadata,
+            records,
+        }
+        .encode()
+        .map_err(|_| err(ErrorCode::InvalidManifest))?;
+
+        let writer = self
+            .seg_writer
+            .as_mut()
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+        let (segment_id, offset) = {
+            let mut buffered = BufWriter::new(&self.file);
+            buffered
+                .seek(SeekFrom::End(0))
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            let result = writer
+                .write_meta_seg(&mut buffered, &payload)
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            buffered.flush().map_err(|_| err(ErrorCode::FsyncFailed))?;
+            result
+        };
+        self.segment_dir.push((
+            segment_id,
+            offset,
+            payload.len() as u64,
+            SegmentType::Meta as u8,
+        ));
+        self.metadata_generation = generation;
+        Ok(())
+    }
+
+    fn restore_metadata(&mut self) -> Result<(), RvfError> {
+        let mut segments = Vec::new();
+        let mut decoded_bytes = 0usize;
+        for &(_, offset, _, segment_type) in &self.segment_dir {
+            if segment_type != SegmentType::Meta as u8 {
+                continue;
+            }
+            let payload = {
+                let mut reader = BufReader::new(&self.file);
+                read_path::read_segment_payload(&mut reader, offset)
+                    .map_err(|_| err(ErrorCode::InvalidChecksum))?
+                    .1
+            };
+            decoded_bytes = decoded_bytes
+                .checked_add(payload.len())
+                .ok_or_else(|| err(ErrorCode::MetadataReplayLimitExceeded))?;
+            if decoded_bytes > rvf_types::metadata::MAX_META_DECODED_BYTES {
+                return Err(err(ErrorCode::MetadataReplayLimitExceeded));
+            }
+            segments.push(
+                MetadataSegment::decode(&payload).map_err(|_| err(ErrorCode::InvalidMetadata))?,
+            );
+        }
+        if segments.is_empty() {
+            return Ok(());
+        }
+        let mut by_generation = BTreeMap::new();
+        for segment in segments {
+            let generation = segment.generation;
+            if by_generation.insert(generation, segment).is_some() {
+                return Err(err(ErrorCode::MetadataAncestryInvalid));
+            }
+        }
+        let latest = *by_generation
+            .keys()
+            .next_back()
+            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+        let mut chain = Vec::new();
+        let mut generation = latest;
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(generation) || chain.len() >= rvf_types::metadata::MAX_META_DELTAS {
+                return Err(err(ErrorCode::MetadataReplayLimitExceeded));
+            }
+            let segment = by_generation
+                .get(&generation)
+                .ok_or_else(|| err(ErrorCode::MetadataAncestryInvalid))?;
+            chain.push(segment);
+            match segment.base_generation {
+                Some(base) => generation = base,
+                None if segment.full_snapshot => break,
+                None => return Err(err(ErrorCode::MetadataAncestryInvalid)),
+            }
+        }
+        chain.reverse();
+        let mut metadata = MetadataStore::new();
+        let mut file_metadata = BTreeMap::new();
+        for segment in chain {
+            if segment.full_snapshot {
+                metadata = MetadataStore::new();
+                file_metadata.clear();
+            }
+            for record in &segment.file_metadata {
+                match wire_to_runtime(&record.value)? {
+                    MetadataValue::DeleteField => {
+                        file_metadata.remove(&record.key);
+                    }
+                    value => {
+                        file_metadata.insert(record.key.clone(), value);
+                    }
+                }
+            }
+            for record in &segment.records {
+                match &record.operation {
+                    WireMetadataRecordOp::DeleteRecord => metadata.remove_ids(&[record.vector_id]),
+                    WireMetadataRecordOp::Upsert(fields) => {
+                        let fields = fields
+                            .iter()
+                            .map(|(id, value)| Ok((*id, wire_to_runtime(value)?)))
+                            .collect::<Result<Vec<_>, RvfError>>()?;
+                        metadata.insert(record.vector_id, fields);
+                    }
+                }
+            }
+        }
+        let is_cow = self
+            .segment_dir
+            .iter()
+            .any(|entry| entry.3 == SegmentType::CowMap as u8);
+        for (vector_id, _) in metadata.records() {
+            if (!is_cow && self.vectors.get(vector_id).is_none())
+                || self.deletion_bitmap.is_deleted(vector_id)
+            {
+                return Err(err(ErrorCode::InvalidMetadata));
+            }
+        }
+        self.metadata = metadata;
+        self.file_metadata = file_metadata;
+        self.metadata_generation = latest;
+        Ok(())
+    }
+}
+
+fn runtime_metadata_type(value: &MetadataValue) -> Option<MetadataType> {
+    match value {
+        MetadataValue::String(_) => Some(MetadataType::String),
+        MetadataValue::Bytes(_) => Some(MetadataType::Bytes),
+        MetadataValue::I64(_) => Some(MetadataType::I64),
+        MetadataValue::U64(_) => Some(MetadataType::U64),
+        MetadataValue::F64(_) => Some(MetadataType::F64),
+        MetadataValue::Bool(_) => Some(MetadataType::Bool),
+        MetadataValue::Null | MetadataValue::DeleteField => None,
+    }
+}
+
+fn runtime_to_wire(value: &MetadataValue) -> WireMetadataValue {
+    match value {
+        MetadataValue::Null => WireMetadataValue::Null,
+        MetadataValue::String(value) => WireMetadataValue::String(value.clone()),
+        MetadataValue::Bytes(value) => WireMetadataValue::Bytes(value.clone()),
+        MetadataValue::I64(value) => WireMetadataValue::I64(*value),
+        MetadataValue::U64(value) => WireMetadataValue::U64(*value),
+        MetadataValue::F64(value) => WireMetadataValue::F64(*value),
+        MetadataValue::Bool(value) => WireMetadataValue::Bool(*value),
+        MetadataValue::DeleteField => WireMetadataValue::DeleteField,
+    }
+}
+
+fn wire_to_runtime(value: &WireMetadataValue) -> Result<MetadataValue, RvfError> {
+    Ok(match value {
+        WireMetadataValue::Null => MetadataValue::Null,
+        WireMetadataValue::String(value) => MetadataValue::String(value.clone()),
+        WireMetadataValue::Bytes(value) => MetadataValue::Bytes(value.clone()),
+        WireMetadataValue::I64(value) => MetadataValue::I64(*value),
+        WireMetadataValue::U64(value) => MetadataValue::U64(*value),
+        WireMetadataValue::F64(value) if value.is_finite() => MetadataValue::F64(*value),
+        WireMetadataValue::F64(_) => return Err(err(ErrorCode::InvalidManifest)),
+        WireMetadataValue::Bool(value) => MetadataValue::Bool(*value),
+        WireMetadataValue::DeleteField => MetadataValue::DeleteField,
+    })
 }
 
 /// Compute the distance between query `a` and stored vector `b`.
@@ -4128,5 +4793,528 @@ mod tests {
         assert!(results.iter().all(|r| r.id != 3 || r.distance > 1.0));
 
         store.close().unwrap();
+    }
+
+    #[test]
+    fn metadata_and_embedding_identity_survive_reopen() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("durable_metadata.rvf");
+        let mut store = RvfStore::create(
+            &path,
+            RvfOptions {
+                dimension: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let vectors = [vec![1.0, 0.0], vec![0.0, 1.0]];
+        let refs: Vec<&[f32]> = vectors.iter().map(Vec::as_slice).collect();
+        let metadata = vec![
+            MetadataEntry {
+                field_id: 1,
+                value: MetadataValue::String("first".into()),
+            },
+            MetadataEntry {
+                field_id: 2,
+                value: MetadataValue::Null,
+            },
+            MetadataEntry {
+                field_id: 1,
+                value: MetadataValue::String("second".into()),
+            },
+            MetadataEntry {
+                field_id: 2,
+                value: MetadataValue::Bool(true),
+            },
+        ];
+        store
+            .ingest_batch(&refs, &[10, 20], Some(&metadata))
+            .unwrap();
+        store
+            .set_file_metadata(
+                "application.owner".into(),
+                MetadataValue::String("team-a".into()),
+            )
+            .unwrap();
+        store
+            .set_system_file_metadata(
+                "rvf.embedding.identity".into(),
+                MetadataValue::Bytes(br#"{"model_id":"fixture"}"#.to_vec()),
+            )
+            .unwrap();
+        store
+            .set_system_file_metadata(
+                "rvf.embedding.space_id".into(),
+                MetadataValue::String("space-a".into()),
+            )
+            .unwrap();
+        drop(store);
+
+        let mut reopened = RvfStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.get_metadata(10).unwrap(),
+            vec![
+                MetadataEntry {
+                    field_id: 1,
+                    value: MetadataValue::String("first".into())
+                },
+                MetadataEntry {
+                    field_id: 2,
+                    value: MetadataValue::Null
+                },
+            ]
+        );
+        assert_eq!(
+            reopened.get_file_metadata("application.owner"),
+            Some(&MetadataValue::String("team-a".into()))
+        );
+        assert_eq!(
+            reopened.verify_embedding_space("space-b"),
+            EmbeddingCompatibility::VectorReadOnly
+        );
+        assert_eq!(reopened.read_all_vectors().len(), 2);
+        assert!(matches!(
+            reopened.ingest_batch(&[&[0.5f32, 0.5]], &[30], None),
+            Err(RvfError::Code(ErrorCode::ReadOnly))
+        ));
+    }
+
+    #[test]
+    fn metadata_is_removed_with_vector_delete_and_stays_removed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("metadata_delete.rvf");
+        let mut store = RvfStore::create(
+            &path,
+            RvfOptions {
+                dimension: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store
+            .ingest_batch(
+                &[&[1.0, 0.0]],
+                &[7],
+                Some(&[MetadataEntry {
+                    field_id: 3,
+                    value: MetadataValue::U64(42),
+                }]),
+            )
+            .unwrap();
+        store.delete(&[7]).unwrap();
+        assert!(store.get_metadata(7).is_none());
+        drop(store);
+        let reopened = RvfStore::open_readonly(&path).unwrap();
+        assert!(reopened.get_metadata(7).is_none());
+    }
+
+    #[test]
+    fn metadata_filter_budget_and_cancellation_fail_closed_with_stats() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("metadata_budget.rvf");
+        let mut store = RvfStore::create(
+            &path,
+            RvfOptions {
+                dimension: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store
+            .ingest_batch(
+                &[&[1.0, 0.0], &[0.0, 1.0]],
+                &[1, 2],
+                Some(&[
+                    MetadataEntry {
+                        field_id: 1,
+                        value: MetadataValue::Bool(true),
+                    },
+                    MetadataEntry {
+                        field_id: 1,
+                        value: MetadataValue::Bool(true),
+                    },
+                ]),
+            )
+            .unwrap();
+        let mut options = QueryOptions {
+            filter: Some(FilterExpr::Eq(1, FilterValue::Bool(true))),
+            metadata_filter_max_records: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            store.query(&[1.0, 0.0], 2, &options),
+            Err(RvfError::Code(ErrorCode::FilterBudgetExceeded))
+        ));
+        assert_eq!(store.metadata_filter_stats().aborted_scans, 1);
+
+        let cancelled = std::sync::Arc::new(AtomicBool::new(true));
+        options.metadata_filter_max_records = 10;
+        options.metadata_filter_cancel = Some(cancelled);
+        assert!(matches!(
+            store.query(&[1.0, 0.0], 2, &options),
+            Err(RvfError::Code(ErrorCode::FilterBudgetExceeded))
+        ));
+        assert_eq!(store.metadata_filter_stats().aborted_scans, 2);
+    }
+
+    #[test]
+    fn cow_metadata_delete_does_not_resurrect_after_reopen() {
+        let dir = TempDir::new().unwrap();
+        let parent_path = dir.path().join("parent.rvf");
+        let child_path = dir.path().join("child.rvf");
+        let mut parent = RvfStore::create(
+            &parent_path,
+            RvfOptions {
+                dimension: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        parent
+            .ingest_batch(
+                &[&[1.0, 0.0]],
+                &[9],
+                Some(&[MetadataEntry {
+                    field_id: 1,
+                    value: MetadataValue::String("inherited".into()),
+                }]),
+            )
+            .unwrap();
+        let mut child = parent.branch(&child_path).unwrap();
+        assert!(child.get_metadata(9).is_some());
+        child.delete(&[9]).unwrap();
+        assert!(child.get_metadata(9).is_none());
+        drop(child);
+
+        let reopened = RvfStore::open_readonly(&child_path).unwrap();
+        assert!(reopened.get_metadata(9).is_none());
+    }
+
+    #[test]
+    fn record_metadata_ingest_supports_unequal_fields_and_tombstones() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("record_metadata.rvf");
+        let mut store = RvfStore::create(
+            &path,
+            RvfOptions {
+                dimension: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store
+            .ingest_batch_with_metadata(
+                &[&[1.0, 0.0], &[0.0, 1.0]],
+                &[10, 20],
+                &[
+                    VectorMetadata {
+                        vector_id: 10,
+                        fields: vec![
+                            MetadataEntry {
+                                field_id: 1,
+                                value: MetadataValue::String("ten".into()),
+                            },
+                            MetadataEntry {
+                                field_id: 2,
+                                value: MetadataValue::Bool(true),
+                            },
+                        ],
+                        delete_record: false,
+                    },
+                    VectorMetadata {
+                        vector_id: 20,
+                        fields: vec![MetadataEntry {
+                            field_id: 1,
+                            value: MetadataValue::String("twenty".into()),
+                        }],
+                        delete_record: false,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(store.get_metadata(10).unwrap().len(), 2);
+        assert_eq!(store.get_metadata(20).unwrap().len(), 1);
+
+        store
+            .ingest_batch_with_metadata(
+                &[&[1.0, 0.0]],
+                &[10],
+                &[VectorMetadata {
+                    vector_id: 10,
+                    fields: vec![MetadataEntry {
+                        field_id: 2,
+                        value: MetadataValue::DeleteField,
+                    }],
+                    delete_record: false,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_metadata(10).unwrap(),
+            vec![MetadataEntry {
+                field_id: 1,
+                value: MetadataValue::String("ten".into()),
+            }]
+        );
+
+        store
+            .ingest_batch_with_metadata(
+                &[&[0.0, 1.0]],
+                &[20],
+                &[VectorMetadata {
+                    vector_id: 20,
+                    fields: vec![],
+                    delete_record: true,
+                }],
+            )
+            .unwrap();
+        assert!(store.get_metadata(20).is_none());
+        drop(store);
+        let reopened = RvfStore::open_readonly(&path).unwrap();
+        assert_eq!(reopened.get_metadata(10).unwrap().len(), 1);
+        assert!(reopened.get_metadata(20).is_none());
+    }
+
+    #[test]
+    fn record_metadata_rejection_is_atomic() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("record_metadata_atomic.rvf");
+        let mut store = RvfStore::create(
+            &path,
+            RvfOptions {
+                dimension: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let epoch = store.status().current_epoch;
+        let result = store.ingest_batch_with_metadata(
+            &[&[1.0, 0.0]],
+            &[30],
+            &[VectorMetadata {
+                vector_id: 999,
+                fields: vec![MetadataEntry {
+                    field_id: 1,
+                    value: MetadataValue::String("unknown".into()),
+                }],
+                delete_record: false,
+            }],
+        );
+        assert!(matches!(
+            result,
+            Err(RvfError::Code(ErrorCode::InvalidMetadata))
+        ));
+        assert!(store.read_all_vectors().is_empty());
+        assert_eq!(store.status().current_epoch, epoch);
+
+        let duplicate_fields = store.ingest_batch_with_metadata(
+            &[&[1.0, 0.0]],
+            &[30],
+            &[VectorMetadata {
+                vector_id: 30,
+                fields: vec![
+                    MetadataEntry {
+                        field_id: 1,
+                        value: MetadataValue::U64(1),
+                    },
+                    MetadataEntry {
+                        field_id: 1,
+                        value: MetadataValue::U64(2),
+                    },
+                ],
+                delete_record: false,
+            }],
+        );
+        assert!(matches!(
+            duplicate_fields,
+            Err(RvfError::Code(ErrorCode::InvalidMetadata))
+        ));
+        assert!(store.read_all_vectors().is_empty());
+        drop(store);
+        assert!(RvfStore::open_readonly(&path)
+            .unwrap()
+            .read_all_vectors()
+            .is_empty());
+    }
+
+    /// Criterion 2 (gap): bytes, signed-integer, and finite-float per-vector
+    /// values round-trip through a full store close/reopen. The existing
+    /// round-trip coverage exercised strings, nulls, and booleans only.
+    #[test]
+    fn bytes_i64_f64_values_round_trip_through_reopen() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("scalar_value_roundtrip.rvf");
+        let mut store = RvfStore::create(
+            &path,
+            RvfOptions {
+                dimension: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let fields = vec![
+            MetadataEntry {
+                field_id: 1,
+                value: MetadataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            },
+            MetadataEntry {
+                field_id: 2,
+                value: MetadataValue::I64(-1_234_567_890),
+            },
+            MetadataEntry {
+                field_id: 3,
+                value: MetadataValue::F64(core::f64::consts::PI),
+            },
+        ];
+        store
+            .ingest_batch_with_metadata(
+                &[&[1.0, 0.0]],
+                &[42],
+                &[VectorMetadata {
+                    vector_id: 42,
+                    fields: fields.clone(),
+                    delete_record: false,
+                }],
+            )
+            .unwrap();
+        assert_eq!(store.get_metadata(42).unwrap(), fields);
+        drop(store);
+
+        let reopened = RvfStore::open_readonly(&path).unwrap();
+        assert_eq!(
+            reopened.get_metadata(42).unwrap(),
+            fields,
+            "bytes, i64, and finite f64 values must survive close/reopen byte-for-byte"
+        );
+    }
+
+    /// Criterion 7 (gap): a single atomic batch that both tombstones and
+    /// upserts metadata for the same vector is rejected as a whole, and the
+    /// store is left exactly as it was (no vector, no metadata, no epoch bump).
+    #[test]
+    fn same_batch_vector_delete_and_metadata_upsert_fails_atomically() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("batch_delete_upsert_atomic.rvf");
+        let mut store = RvfStore::create(
+            &path,
+            RvfOptions {
+                dimension: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let epoch = store.status().current_epoch;
+        let result = store.ingest_batch_with_metadata(
+            &[&[1.0, 0.0]],
+            &[5],
+            &[
+                // Tombstone the record for vector 5 ...
+                VectorMetadata {
+                    vector_id: 5,
+                    fields: vec![],
+                    delete_record: true,
+                },
+                // ... while also upserting metadata for the same vector 5 in
+                // the same batch. The two operations contradict, so the whole
+                // batch must be refused rather than partially applied.
+                VectorMetadata {
+                    vector_id: 5,
+                    fields: vec![MetadataEntry {
+                        field_id: 1,
+                        value: MetadataValue::U64(1),
+                    }],
+                    delete_record: false,
+                },
+            ],
+        );
+        assert!(matches!(
+            result,
+            Err(RvfError::Code(ErrorCode::InvalidMetadata))
+        ));
+        assert!(store.read_all_vectors().is_empty());
+        assert!(store.get_metadata(5).is_none());
+        assert_eq!(store.status().current_epoch, epoch);
+        drop(store);
+        let reopened = RvfStore::open_readonly(&path).unwrap();
+        assert!(reopened.read_all_vectors().is_empty());
+        assert!(reopened.get_metadata(5).is_none());
+    }
+
+    /// Criterion 5: metadata-bearing search hits return the committed values,
+    /// opt-in and matching `get_metadata`, both before and after reopen. With
+    /// the flag off (the default) hits carry no metadata.
+    #[test]
+    fn include_metadata_returns_committed_values_on_hits() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("include_metadata.rvf");
+        let mut store = RvfStore::create(
+            &path,
+            RvfOptions {
+                dimension: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store
+            .ingest_batch_with_metadata(
+                &[&[1.0, 0.0], &[0.0, 1.0]],
+                &[10, 20],
+                &[
+                    VectorMetadata {
+                        vector_id: 10,
+                        fields: vec![MetadataEntry {
+                            field_id: 1,
+                            value: MetadataValue::String("ten".into()),
+                        }],
+                        delete_record: false,
+                    },
+                    // A present but empty record: hits must report Some(vec![]).
+                    VectorMetadata {
+                        vector_id: 20,
+                        fields: vec![],
+                        delete_record: false,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let query = [1.0f32, 0.0];
+        // Default query: no metadata attached, zero cost.
+        let plain = store.query(&query, 2, &QueryOptions::default()).unwrap();
+        assert!(plain.iter().all(|hit| hit.metadata.is_none()));
+
+        let with_meta = QueryOptions {
+            include_metadata: true,
+            ..Default::default()
+        };
+        let assert_hits = |store: &RvfStore| {
+            let hits = store.query(&query, 2, &with_meta).unwrap();
+            assert_eq!(hits.len(), 2);
+            for hit in &hits {
+                assert_eq!(
+                    hit.metadata,
+                    Some(store.get_metadata(hit.id).unwrap_or_default()),
+                    "hit metadata must match the committed get_metadata view"
+                );
+            }
+            let ten = hits.iter().find(|h| h.id == 10).unwrap();
+            assert_eq!(
+                ten.metadata,
+                Some(vec![MetadataEntry {
+                    field_id: 1,
+                    value: MetadataValue::String("ten".into()),
+                }])
+            );
+            let twenty = hits.iter().find(|h| h.id == 20).unwrap();
+            assert_eq!(
+                twenty.metadata,
+                Some(vec![]),
+                "an empty-but-present record surfaces as Some(vec![])"
+            );
+        };
+        assert_hits(&store);
+        drop(store);
+        let reopened = RvfStore::open_readonly(&path).unwrap();
+        assert_hits(&reopened);
     }
 }

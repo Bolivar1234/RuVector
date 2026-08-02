@@ -37,6 +37,8 @@ pub use tokenizer::{EncodedInput, SpecialIds, WordPieceTokenizer};
 #[cfg(feature = "cpu-fallback")]
 pub use cpu_embedder::CpuEmbedder;
 
+use ruvector_core::EmbeddingSpaceIdentity;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 #[cfg(feature = "hailo")]
 use std::sync::Mutex;
@@ -59,6 +61,7 @@ pub struct HailoEmbedder {
     dimensions: usize,
     /// Human-readable name for logging — e.g. `"hailo:all-MiniLM-L6-v2"`.
     name: String,
+    identity: EmbeddingSpaceIdentity,
     /// PCIe BDF of the underlying device once opened, e.g. `0001:01:00.0`.
     device_id: String,
     /// Held-open vdevice handle. Iter-95: kept across the embedder's
@@ -139,6 +142,19 @@ impl HailoEmbedder {
     ///   special_tokens.json   # CLS/SEP/PAD ids
     /// ```
     pub fn open(model_dir: &Path) -> Result<Self> {
+        let _ = model_dir;
+        Err(HailoError::EmbeddingProvenance(
+            "HailoEmbedder::open cannot infer immutable artifact identity; use open_with_identity"
+                .into(),
+        ))
+    }
+
+    /// Open only when the caller supplies complete identity and the artifact
+    /// hashes agree with the files selected by the backend.
+    pub fn open_with_identity(model_dir: &Path, identity: EmbeddingSpaceIdentity) -> Result<Self> {
+        identity
+            .validate()
+            .map_err(|e| HailoError::EmbeddingProvenance(e.to_string()))?;
         // Iter 137: combinatorial feature gating. Build matrix:
         //   * neither feature      → FeatureDisabled (default x86 dev)
         //   * hailo only           → device-only (HAT host, no Python deps)
@@ -262,8 +278,57 @@ impl HailoEmbedder {
         #[cfg(not(feature = "cpu-fallback"))]
         let dimensions = crate::inference::MINI_LM_DIM;
 
+        if identity.output_dimension as usize != dimensions {
+            return Err(HailoError::EmbeddingProvenance(format!(
+                "identity dimension {} does not match loaded model dimension {dimensions}",
+                identity.output_dimension
+            )));
+        }
+
+        let digest_file = |path: &Path| -> Result<String> {
+            let bytes = std::fs::read(path).map_err(|_| HailoError::BadModelDir {
+                path: model_dir.display().to_string(),
+                what: "artifact required by EmbeddingSpaceIdentity",
+            })?;
+            Ok(format!("{:x}", Sha256::digest(bytes)))
+        };
+        let model_artifact = ["model.safetensors", "model.hef"]
+            .iter()
+            .map(|name| model_dir.join(name))
+            .find(|path| path.exists());
+        let model_graph = ["model.hef", "model.safetensors"]
+            .iter()
+            .map(|name| model_dir.join(name))
+            .find(|path| path.exists());
+        let tokenizer = ["tokenizer.json", "vocab.txt"]
+            .iter()
+            .map(|name| model_dir.join(name))
+            .find(|path| path.exists());
+        if let Some(path) = model_artifact {
+            if digest_file(&path)? != identity.model_artifact_sha256 {
+                return Err(HailoError::EmbeddingProvenance(
+                    "model artifact SHA-256 mismatch".into(),
+                ));
+            }
+        }
+        if let Some(path) = model_graph {
+            if digest_file(&path)? != identity.model_graph_sha256 {
+                return Err(HailoError::EmbeddingProvenance(
+                    "model graph SHA-256 mismatch".into(),
+                ));
+            }
+        }
+        if let Some(path) = tokenizer {
+            if digest_file(&path)? != identity.tokenizer_sha256 {
+                return Err(HailoError::EmbeddingProvenance(
+                    "tokenizer SHA-256 mismatch".into(),
+                ));
+            }
+        }
+
         Ok(Self {
             dimensions,
+            identity,
             name: format!(
                 "hailo:{}",
                 model_dir
@@ -445,9 +510,25 @@ unsafe impl Sync for HailoEmbedder {}
 /// ruvector-core consumer pattern) can now hold a `HailoEmbedder`
 /// without rewriting around the inherent-method API.
 impl ruvector_core::embeddings::EmbeddingProvider for HailoEmbedder {
-    fn embed(&self, text: &str) -> ruvector_core::Result<Vec<f32>> {
+    fn embed_for(
+        &self,
+        role: ruvector_core::EmbeddingRole,
+        text: &str,
+    ) -> ruvector_core::Result<Vec<f32>> {
+        if self.identity.role_policy == ruvector_core::EmbeddingRolePolicy::Asymmetric {
+            return Err(ruvector_core::RuvectorError::EmbeddingRoleUnsupported(
+                format!(
+                    "Hailo backend has no verified {:?} role transform for this identity",
+                    role
+                ),
+            ));
+        }
         HailoEmbedder::embed(self, text)
             .map_err(|e| ruvector_core::RuvectorError::ModelInferenceError(e.to_string()))
+    }
+
+    fn embedding_space(&self) -> &ruvector_core::EmbeddingSpaceIdentity {
+        &self.identity
     }
 
     fn dimensions(&self) -> usize {
@@ -483,7 +564,8 @@ mod tests {
                 | HailoError::NotYetImplemented(_)
                 | HailoError::BadModelDir { .. }
                 | HailoError::NoDevice(_)
-                | HailoError::Tokenizer(_),
+                | HailoError::Tokenizer(_)
+                | HailoError::EmbeddingProvenance(_),
             ) => {}
             Err(other) => panic!("unexpected open() error: {:?}", other),
         }

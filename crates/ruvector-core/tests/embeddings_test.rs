@@ -1,9 +1,35 @@
 //! Integration tests for embedding providers
 
-use ruvector_core::embeddings::{ApiEmbedding, EmbeddingProvider, HashEmbedding};
+use ruvector_core::embeddings::{
+    ApiEmbedding, EmbeddingDistanceMetric, EmbeddingProvider, EmbeddingRolePolicy,
+    EmbeddingSpaceIdentity, HashEmbedding, OutputDtype, PoolingStrategy, PoolingStrategyName,
+    PrefixPolicy,
+};
 use ruvector_core::{types::DbOptions, AgenticDB};
 use std::sync::Arc;
 use tempfile::tempdir;
+
+fn remote_identity(model: &str, dimension: u32) -> EmbeddingSpaceIdentity {
+    EmbeddingSpaceIdentity {
+        schema_version: 1,
+        provider: "test-remote".into(),
+        model_id: model.into(),
+        model_artifact_sha256: "11".repeat(32),
+        model_graph_sha256: "22".repeat(32),
+        tokenizer_sha256: "33".repeat(32),
+        prompt_template_sha256: "44".repeat(32),
+        pooling_strategy: PoolingStrategy::Named(PoolingStrategyName::Mean),
+        normalize: true,
+        truncation_tokens: 8192,
+        output_dimension: dimension,
+        output_dtype: OutputDtype::F32,
+        runtime_revision: "test-api@1".into(),
+        distance_metric: EmbeddingDistanceMetric::Cosine,
+        role_policy: EmbeddingRolePolicy::Symmetric,
+        prefix_policy: PrefixPolicy::None,
+        prefix_policy_version: 1,
+    }
+}
 
 #[test]
 fn test_hash_embedding_provider() {
@@ -124,22 +150,43 @@ fn test_dimension_mismatch_validation() {
 #[test]
 fn test_api_embedding_provider_construction() {
     // Test OpenAI provider construction
-    let openai_small = ApiEmbedding::openai("sk-test", "text-embedding-3-small");
+    let openai_small = ApiEmbedding::openai(
+        "sk-test",
+        "text-embedding-3-small",
+        remote_identity("text-embedding-3-small", 1536),
+    )
+    .unwrap();
     assert_eq!(openai_small.dimensions(), 1536);
     assert_eq!(openai_small.name(), "ApiEmbedding");
 
-    let openai_large = ApiEmbedding::openai("sk-test", "text-embedding-3-large");
+    let openai_large = ApiEmbedding::openai(
+        "sk-test",
+        "text-embedding-3-large",
+        remote_identity("text-embedding-3-large", 3072),
+    )
+    .unwrap();
     assert_eq!(openai_large.dimensions(), 3072);
 
     // Test Cohere provider construction
-    let cohere = ApiEmbedding::cohere("co-test", "embed-english-v3.0");
+    let cohere = ApiEmbedding::cohere(
+        "co-test",
+        "embed-english-v3.0",
+        remote_identity("embed-english-v3.0", 1024),
+    )
+    .unwrap();
     assert_eq!(cohere.dimensions(), 1024);
 
     // Test Voyage provider construction
-    let voyage = ApiEmbedding::voyage("vo-test", "voyage-2");
+    let voyage =
+        ApiEmbedding::voyage("vo-test", "voyage-2", remote_identity("voyage-2", 1024)).unwrap();
     assert_eq!(voyage.dimensions(), 1024);
 
-    let voyage_large = ApiEmbedding::voyage("vo-test", "voyage-large-2");
+    let voyage_large = ApiEmbedding::voyage(
+        "vo-test",
+        "voyage-large-2",
+        remote_identity("voyage-large-2", 1536),
+    )
+    .unwrap();
     assert_eq!(voyage_large.dimensions(), 1536);
 }
 
@@ -149,7 +196,12 @@ fn test_api_embedding_openai() {
     let api_key = std::env::var("OPENAI_API_KEY")
         .expect("OPENAI_API_KEY environment variable required for this test");
 
-    let provider = ApiEmbedding::openai(&api_key, "text-embedding-3-small");
+    let provider = ApiEmbedding::openai(
+        &api_key,
+        "text-embedding-3-small",
+        remote_identity("text-embedding-3-small", 1536),
+    )
+    .unwrap();
 
     let embedding = provider.embed("hello world").unwrap();
     assert_eq!(embedding.len(), 1536);
@@ -170,7 +222,14 @@ fn test_agenticdb_with_openai_embeddings() {
     options.storage_path = dir.path().join("test.db").to_string_lossy().to_string();
     options.dimensions = 1536; // OpenAI text-embedding-3-small dimensions
 
-    let provider = Arc::new(ApiEmbedding::openai(&api_key, "text-embedding-3-small"));
+    let provider = Arc::new(
+        ApiEmbedding::openai(
+            &api_key,
+            "text-embedding-3-small",
+            remote_identity("text-embedding-3-small", 1536),
+        )
+        .unwrap(),
+    );
     let db = AgenticDB::with_embedding_provider(options, provider).unwrap();
 
     assert_eq!(db.embedding_provider_name(), "ApiEmbedding");
