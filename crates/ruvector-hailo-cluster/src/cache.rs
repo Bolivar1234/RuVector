@@ -476,16 +476,23 @@ mod tests {
 
     #[test]
     fn ttl_insert_refreshes_timestamp() {
-        // Margins are deliberately wide: macOS thread::sleep overshoots by
-        // several ms, and the original 20ms TTL with a 5ms margin failed
-        // deterministically there. Without the refresh, total elapsed
-        // (~120ms+) exceeds the 100ms TTL; with it, age is ~70ms.
-        let c = EmbeddingCache::with_ttl(4, Some(Duration::from_millis(100)));
+        // Timing-robust by construction: seconds-scale TTL (sleep overshoot
+        // on a loaded machine is tens of ms, not hundreds), and the hit is
+        // only asserted if we reach get() within the TTL of the refresh —
+        // on a pathologically stalled machine the test skips rather than
+        // reporting a false failure. Without the refresh, total elapsed
+        // (~2.5s) exceeds the 2s TTL, so a hit still proves insert()
+        // resets the entry's timestamp.
+        let ttl = Duration::from_secs(2);
+        let c = EmbeddingCache::with_ttl(4, Some(ttl));
         c.insert("fp", "z", vec![5.0]);
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(1000));
         c.insert("fp", "z", vec![5.0]);
-        std::thread::sleep(Duration::from_millis(70));
-        assert_eq!(c.get("fp", "z"), Some(vec![5.0]));
+        let refreshed_at = std::time::Instant::now();
+        std::thread::sleep(Duration::from_millis(1500));
+        if refreshed_at.elapsed() < ttl {
+            assert_eq!(c.get("fp", "z"), Some(vec![5.0]));
+        }
     }
 
     #[test]
