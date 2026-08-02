@@ -97,6 +97,11 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
           path: candidate
           persist-credentials: false
+      - name: Install pinned trusted gate dependencies
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --no-input \
+            -r trusted/scripts/research-gate/requirements.txt
       - name: Verify branch head and scan before execution
         env:
           CANDIDATE_REF: ${{ inputs.candidate_ref }}
@@ -110,8 +115,15 @@ jobs:
           test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
           test "$(git -C base rev-parse HEAD)" = "$BASE_SHA"
           test "$(git -C trusted ls-remote origin refs/heads/main | cut -f1)" = "$BASE_SHA"
+          # Both checkouts are depth-1, so the candidate clone has no object for
+          # the base commit and 'git diff base head' fails with "bad object".
+          # Copy the base commit in from the sibling checkout: no network, no
+          # credentials, and no full-history clone of a large repository.
+          git -C candidate fetch --no-tags --depth 1 "$GITHUB_WORKSPACE/base" HEAD
+          test "$(git -C candidate rev-parse FETCH_HEAD)" = "$BASE_SHA"
+          mkdir -p base-gate
           python3 trusted/scripts/research-gate/preflight_scan.py \
-            --base base --candidate candidate --output changed-files.txt
+            --base base --candidate candidate --output base-gate/changed-files.txt
           python3 trusted/scripts/research-gate/research_gate.py \
             validate-manifest "candidate/$MANIFEST_PATH" --expect-sha "$CANDIDATE_SHA"
       - name: Enforce green base or exact protected override
@@ -123,14 +135,17 @@ jobs:
           OVERRIDE_RUN_ID: ${{ inputs.override_run_id }}
         run: |
           set -euo pipefail
-          gh api -H "Accept: application/vnd.github+json" \
+          # --paginate is required: this repository routinely has more than one
+          # page of check runs per commit, and base_health.py fails closed if the
+          # entries it sees do not add up to the reported total_count.
+          gh api --paginate -H "Accept: application/vnd.github+json" \
             "repos/$GH_REPO/commits/$BASE_SHA/check-runs?per_page=100" > check-runs.json
-          gh api "repos/$GH_REPO/commits/$BASE_SHA/status?per_page=100" > statuses.json
+          gh api --paginate "repos/$GH_REPO/commits/$BASE_SHA/status?per_page=100" > statuses.json
           python3 trusted/scripts/research-gate/base_health.py \
             --check-runs check-runs.json --statuses statuses.json \
             --output failed-base-checks.json
           failed_count="$(jq length failed-base-checks.json)"
-          mkdir base-gate
+          mkdir -p base-gate
           if [[ "$failed_count" = 0 ]]; then
             test -z "$OVERRIDE_RUN_ID"
             jq -n --arg base "$BASE_SHA" --arg head "$CANDIDATE_SHA" \
@@ -138,7 +153,7 @@ jobs:
               > base-gate/base-gate.json
           else
             [[ "$OVERRIDE_RUN_ID" =~ ^[0-9]+$ ]]
-            test "$(gh run view "$OVERRIDE_RUN_ID" --repo "$GH_REPO" --json name,conclusion --jq '[.name,.conclusion] | join(\":\")')" = "research-gate-override:success"
+            test "$(gh run view "$OVERRIDE_RUN_ID" --repo "$GH_REPO" --json name,conclusion --jq '[.name,.conclusion] | join(":")')" = "research-gate-override:success"
             gh run download "$OVERRIDE_RUN_ID" --repo "$GH_REPO" \
               --name "research-gate-override-$CANDIDATE_SHA" --dir override-download
             override_path="$(find override-download -name override.json -type f)"
@@ -185,6 +200,11 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
           path: candidate
           persist-credentials: false
+      - name: Install pinned trusted gate dependencies
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --no-input \
+            -r trusted/scripts/research-gate/requirements.txt
       - name: Require pinned disposable sandbox image
         env:
           SANDBOX_IMAGE: ${{ vars.RESEARCH_SANDBOX_IMAGE }}
@@ -260,7 +280,10 @@ jobs:
           python3 trusted/scripts/research-gate/research_gate.py evaluate \
             evidence/research-manifest.json evidence/raw-results.json \
             --output evidence/evaluation.json
-          test -f evidence/report.json
+          python3 trusted/scripts/research-gate/research_gate.py validate-report \
+            evidence/report.json \
+            --manifest evidence/research-manifest.json \
+            --evaluation evidence/evaluation.json
           evaluator_version="$(
             python3 -c 'import json; print(json.load(open("evidence/research-manifest.json"))["evaluator_version"])'
           )"
@@ -303,6 +326,11 @@ jobs:
         with:
           name: research-evidence-${{ inputs.candidate_sha }}
           path: evidence
+      - name: Install pinned trusted gate dependencies
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --no-input \
+            -r trusted/scripts/research-gate/requirements.txt
       - name: Build trusted attestation subject
         env:
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}

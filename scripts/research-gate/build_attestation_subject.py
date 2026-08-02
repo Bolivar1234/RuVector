@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
+import schema_validate
 from research_gate import FULL_SHA_RE, GateError, load_json, sha256_file, validate_base_gate
 
 
@@ -49,6 +50,7 @@ def main() -> int:
         "artifact_index_sha256": sha256_file(args.artifact_index),
         "required_checks": checks,
     }
+    schema_validate.validate_document(envelope, schema_validate.ATTESTATION_SUBJECT_SCHEMA)
     Path(args.output).write_text(json.dumps(envelope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0
 

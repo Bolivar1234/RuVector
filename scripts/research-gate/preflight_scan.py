@@ -19,7 +19,27 @@ PACKAGE_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"\s*$')
 
 
 def git(cwd: Path, *args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+    result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True)
+    if result.returncode != 0:
+        raise SystemExit(
+            f"git {' '.join(args)} failed in {cwd} (exit {result.returncode}): "
+            f"{result.stderr.strip() or 'no stderr'}"
+        )
+    return result.stdout.strip()
+
+
+def require_commit(repo: Path, sha: str, label: str) -> None:
+    """Both checkouts are shallow, so prove the diff endpoints exist before diffing."""
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=repo, capture_output=True
+    )
+    if probe.returncode != 0:
+        raise SystemExit(
+            f"{label} commit {sha} is not present in {repo}. The checkout is shallow, so "
+            "'git diff base head' cannot resolve it. Fetch the base commit into the candidate "
+            "clone (the workflow does this from the sibling base checkout) or check out with "
+            "fetch-depth: 0 before running the preflight scan."
+        )
 
 
 def package_names(root: Path) -> set[str]:
@@ -45,7 +65,11 @@ def main() -> int:
     candidate = Path(args.candidate).resolve()
     base_sha = git(base, "rev-parse", "HEAD")
     head_sha = git(candidate, "rev-parse", "HEAD")
-    changed = git(candidate, "diff", "--name-only", "--diff-filter=ACMRTUXB", base_sha, head_sha).splitlines()
+    require_commit(candidate, base_sha, "base")
+    require_commit(candidate, head_sha, "candidate")
+    # Deletions are in scope: removing a lockfile is as much a dependency change
+    # as editing one, and a candidate must not be able to hide it from the scan.
+    changed = git(candidate, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base_sha, head_sha).splitlines()
     if not changed:
         raise SystemExit("candidate has no changes against trusted base")
 

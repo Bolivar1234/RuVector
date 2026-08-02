@@ -1,0 +1,7 @@
+# Trusted ADR-282 research-gate dependencies.
+#
+# The gate runs only in trusted default-branch jobs, never inside the candidate
+# containment boundary, and it never imports candidate modules. The pin is exact
+# so an upstream release cannot silently change what the gate accepts; bumping it
+# is a reviewed change to a CODEOWNERS-protected path.
+jsonschema==4.23.0

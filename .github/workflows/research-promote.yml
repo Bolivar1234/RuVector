@@ -27,6 +27,11 @@ jobs:
           ref: main
           path: trusted
           persist-credentials: false
+      - name: Install pinned trusted gate dependencies
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --no-input \
+            -r trusted/scripts/research-gate/requirements.txt
       - name: Download only the attested evidence artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,6 +79,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           CANDIDATE_REF: ${{ steps.verified.outputs.candidate_ref }}
           CANDIDATE_SHA: ${{ steps.verified.outputs.candidate_sha }}
+          WORKFLOW_RUN_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           set -euo pipefail
           existing="$(
@@ -91,7 +97,7 @@ jobs:
             echo "Automated research candidate validated under ADR-282."
             echo
             echo "- Attested commit: \`$CANDIDATE_SHA\`"
-            echo "- Workflow run: ${{ github.event.workflow_run.html_url }}"
+            echo "- Workflow run: $WORKFLOW_RUN_URL"
             echo "- Claim: $claim"
             echo
             echo "The immutable manifest, raw results, evaluation, report, and artifact index are attached to the attested workflow run."

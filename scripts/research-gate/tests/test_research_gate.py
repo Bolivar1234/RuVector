@@ -19,9 +19,11 @@ from research_gate import (  # noqa: E402
     validate_base_gate,
     validate_manifest,
     validate_override,
+    validate_report,
 )
-from base_health import failed_base_checks  # noqa: E402
+from base_health import BaseHealthError, failed_base_checks, load_pages  # noqa: E402
 from build_override import build_override  # noqa: E402
+import schema_validate  # noqa: E402
 
 HEX = "a" * 64
 COMMIT = "b" * 40
@@ -169,6 +171,40 @@ def results(manifest_value, treatment=0.73, control=0.70, budget_delta=1000):
     }
 
 
+def report(manifest_value, evaluation):
+    return {
+        "schema_version": 1,
+        "candidate_commit": manifest_value["commit"],
+        "manifest_revision": manifest_value["revision"],
+        "manifest_sha256": evaluation["manifest_sha256"],
+        "results_sha256": evaluation["results_sha256"],
+        "claim": manifest_value["claim"],
+        "primary_metric": evaluation["primary_metric"],
+        "outcome": evaluation["outcome"],
+        "headline": {
+            "paired_effect_mean": evaluation["paired_effect_mean"],
+            "paired_effect_standard_deviation": evaluation["paired_effect_standard_deviation"],
+            "confidence_interval_95": list(evaluation["confidence_interval_95"]),
+            "minimum_meaningful_effect": evaluation["minimum_meaningful_effect"],
+            "worst_seed_effect": evaluation["worst_seed_effect"],
+            "seed_count": evaluation["seed_count"],
+            "maximum_primary_budget_delta": evaluation["maximum_primary_budget_delta"],
+        },
+        "per_seed_effects": [evaluation["worst_seed_effect"]] * evaluation["seed_count"],
+        "evidence_sections": {
+            "measured": ["Paired recall improved by 0.03 at an equal resident-memory budget."],
+            "inferred": [],
+            "hypotheses": [],
+            "roadmap": [],
+        },
+        "limitations": ["Fixture corpus; not evidence for a production claim."],
+    }
+
+
+def check_run_page(entries, total_count):
+    return {"total_count": total_count, "check_runs": entries}
+
+
 class ResearchGateTests(unittest.TestCase):
     def test_nightly_dispatch_dedup_key_matches_candidate_run_name(self):
         repository = TEST_ROOT.parents[1]
@@ -268,11 +304,11 @@ class ResearchGateTests(unittest.TestCase):
 
     def test_base_health_and_authorized_red_gate_are_deterministic(self):
         failed = failed_base_checks(
-            {"check_runs": [
+            check_run_page([
                 {"id": 1, "name": "ci", "status": "completed", "conclusion": "failure", "completed_at": "2026-01-01"},
                 {"id": 2, "name": "docs", "status": "completed", "conclusion": "success", "completed_at": "2026-01-01"},
-            ]},
-            {"statuses": [{"context": "legacy", "state": "error"}]},
+            ], 2),
+            {"total_count": 1, "statuses": [{"context": "legacy", "state": "error"}]},
         )
         self.assertEqual(failed, ["base/check:ci:failure", "base/status:legacy:error"])
         gate = {
@@ -324,8 +360,14 @@ class ResearchGateTests(unittest.TestCase):
             artifact.write_text("{}\n", encoding="utf-8")
             index = {
                 "schema_version": 1,
+                "candidate_commit": COMMIT,
+                "candidate_ref": "research/nightly/fixture",
+                "workflow_revision": "c" * 40,
+                "evaluator_version": "research-gate-v1@sha256:" + HEX,
+                "created_at": "2026-07-29T00:00:00Z",
                 "retention_class": "candidate",
                 "retention_days": 365,
+                "immutable_storage_required": True,
                 "artifacts": [{
                     "path": "raw.json",
                     "sha256": __import__("hashlib").sha256(b"{}\n").hexdigest(),
@@ -336,6 +378,132 @@ class ResearchGateTests(unittest.TestCase):
             artifact.write_text('{"tampered":true}\n', encoding="utf-8")
             with self.assertRaisesRegex(GateError, "size changed|hash changed"):
                 validate_artifact_index(index, root)
+
+
+class SchemaEnforcementTests(unittest.TestCase):
+    """The schemas in schemas/ must be load-bearing, not documentation."""
+
+    def test_every_schema_is_valid_and_resolves_offline(self):
+        names = schema_validate.known_schemas()
+        self.assertIn("research-manifest-v1.json", names)
+        self.assertIn("research-report-v1.json", names)
+        for name in names:
+            # Building a validator compiles the schema and resolves every $ref
+            # against the offline registry; a network-only $ref would raise here.
+            schema_validate._validator(name)
+
+    def test_manifest_violating_schema_only_rule_is_rejected(self):
+        # selection_rule is required by the schema and by no hand-rolled check,
+        # so this fails only if schema validation actually runs.
+        missing_rule = manifest()
+        del missing_rule["selection"]["selection_rule"]
+        with self.assertRaisesRegex(GateError, "selection_rule"):
+            validate_manifest(missing_rule)
+
+        unknown_field = manifest()
+        unknown_field["headline_number"] = 0.42
+        with self.assertRaisesRegex(GateError, "research-manifest-v1.json"):
+            validate_manifest(unknown_field)
+
+        wrong_type = manifest()
+        wrong_type["confirmation_seeds"] = ["101", "102", "103", "104", "105"]
+        with self.assertRaisesRegex(GateError, "research-manifest-v1.json"):
+            validate_manifest(wrong_type)
+
+    def test_results_violating_schema_are_rejected_before_evaluation(self):
+        value = manifest()
+        raw = results(value)
+        raw["notes"] = "undeclared field smuggled alongside the attested results"
+        with self.assertRaisesRegex(GateError, "research-results-v1.json"):
+            evaluate(value, raw)
+
+    def test_embedding_identity_schema_rejects_unknown_dtype(self):
+        broken = identity()
+        broken["output_dtype"] = "f8"
+        with self.assertRaisesRegex(GateError, "embedding-space-identity-v1.json"):
+            validate_manifest(manifest(broken))
+
+
+class ReportConsistencyTests(unittest.TestCase):
+    def test_report_headline_must_match_the_trusted_evaluation(self):
+        value = manifest()
+        evaluation = evaluate(value, results(value))
+        validate_report(report(value, evaluation), value, evaluation)
+
+        overstated = report(value, evaluation)
+        overstated["headline"]["paired_effect_mean"] = 0.30
+        with self.assertRaisesRegex(GateError, "headline.paired_effect_mean"):
+            validate_report(overstated, value, evaluation)
+
+        relabelled = report(value, evaluation)
+        relabelled["outcome"] = "fail"
+        with self.assertRaisesRegex(GateError, "report claims outcome"):
+            validate_report(relabelled, value, evaluation)
+
+        wrong_results = report(value, evaluation)
+        wrong_results["results_sha256"] = "f" * 64
+        with self.assertRaisesRegex(GateError, "not derived from the evaluated raw results"):
+            validate_report(wrong_results, value, evaluation)
+
+    def test_report_missing_required_sections_is_rejected(self):
+        value = manifest()
+        evaluation = evaluate(value, results(value))
+        no_limitations = report(value, evaluation)
+        no_limitations["limitations"] = []
+        with self.assertRaisesRegex(GateError, "research-report-v1.json"):
+            validate_report(no_limitations, value, evaluation)
+
+
+class BaseHealthPaginationTests(unittest.TestCase):
+    def test_multiple_pages_are_concatenated(self):
+        pages = [
+            check_run_page([
+                {"id": 1, "name": "ci", "status": "completed", "conclusion": "success", "completed_at": "2026-01-01"},
+            ], 2),
+            check_run_page([
+                {"id": 2, "name": "clippy", "status": "completed", "conclusion": "failure", "completed_at": "2026-01-01"},
+            ], 2),
+        ]
+        failed = failed_base_checks(pages, [{"total_count": 0, "statuses": []}])
+        self.assertEqual(failed, ["base/check:clippy:failure"])
+
+    def test_truncated_response_fails_closed_instead_of_certifying_green(self):
+        # A red check run sitting on an unfetched second page must never be
+        # silently dropped: without --paginate the base would look green.
+        truncated = [check_run_page([
+            {"id": 1, "name": "ci", "status": "completed", "conclusion": "success", "completed_at": "2026-01-01"},
+        ], 137)]
+        with self.assertRaisesRegex(BaseHealthError, "returned 1 of 137 entries"):
+            failed_base_checks(truncated, [{"total_count": 0, "statuses": []}])
+
+    def test_inconsistent_total_count_across_pages_fails_closed(self):
+        pages = [check_run_page([{"id": 1, "name": "ci", "status": "completed",
+                                  "conclusion": "success", "completed_at": "2026-01-01"}], 1),
+                 check_run_page([{"id": 2, "name": "docs", "status": "completed",
+                                  "conclusion": "success", "completed_at": "2026-01-01"}], 2)]
+        with self.assertRaisesRegex(BaseHealthError, "total_count changed across pages"):
+            failed_base_checks(pages, [{"total_count": 0, "statuses": []}])
+
+    def test_missing_total_count_fails_closed(self):
+        with self.assertRaisesRegex(BaseHealthError, "no integer total_count"):
+            failed_base_checks([{"check_runs": []}], [{"total_count": 0, "statuses": []}])
+
+    def test_reads_both_concatenated_and_slurped_gh_paginate_output(self):
+        page_one = json.dumps(check_run_page([{"id": 1, "name": "ci"}], 2))
+        page_two = json.dumps(check_run_page([{"id": 2, "name": "docs"}], 2))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            concatenated = root / "concatenated.json"
+            concatenated.write_text(f"{page_one}\n{page_two}\n", encoding="utf-8")
+            slurped = root / "slurped.json"
+            slurped.write_text(f"[{page_one},{page_two}]\n", encoding="utf-8")
+            self.assertEqual(load_pages(concatenated), load_pages(slurped))
+            self.assertEqual(len(load_pages(concatenated)), 2)
+
+            malformed = root / "malformed.json"
+            malformed.write_text('{"check_runs": [}', encoding="utf-8")
+            with self.assertRaisesRegex(BaseHealthError, "malformed JSON"):
+                load_pages(malformed)
 
 
 if __name__ == "__main__":

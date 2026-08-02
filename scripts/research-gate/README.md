@@ -1,21 +1,50 @@
 # ADR-282 research gate
 
-This directory is the trusted, dependency-free implementation of the
-pre-pull-request gate. Candidate code is evaluated in a separate contained
-process; these scripts validate its data and never import candidate modules.
+This directory is the trusted implementation of the pre-pull-request gate.
+Candidate code is evaluated in a separate contained process; these scripts
+validate its data and never import candidate modules. The only third-party
+dependency is the pinned `jsonschema` in `requirements.txt`, installed by the
+trusted jobs before any gate script runs.
 
 ```bash
+python3 -m pip install -r scripts/research-gate/requirements.txt
 python3 scripts/research-gate/research_gate.py validate-manifest \
   research-manifest.json --expect-sha "$CANDIDATE_SHA"
 python3 scripts/research-gate/research_gate.py evaluate \
   research-manifest.json raw-results.json --output evaluation.json
+python3 scripts/research-gate/research_gate.py validate-report \
+  report.json --manifest research-manifest.json --evaluation evaluation.json
 python3 -m unittest discover -s scripts/research-gate/tests -v
 ```
+
+Every document the gate reads or writes is validated against its schema in
+`schemas/` before any semantic check runs. Schemas are loaded from disk and
+registered under their own `$id`, so `$ref` resolution is fully offline and a
+candidate cannot point validation at a network-hosted schema. The hand-rolled
+checks that follow enforce the cross-field invariants a schema cannot express.
 
 The evaluator requires paired confirmation runs over the exact preregistered
 seed list. It enforces one primary resource budget, full memory accounting,
 deterministic selection counts, real-data/production-topology declarations,
 and a canonical ADR-281 embedding-space identity.
+
+A candidate's `report.json` is hashed into the attested artifact index, so it
+is validated rather than merely required to exist. `validate-report` checks it
+against `schemas/research-report-v1.json` and then rebinds every headline value
+to the trusted evaluation of the hashed raw results (ADR-282 acceptance
+criterion 13). Report headline values must be the evaluator's values, not a
+re-rounded restatement of them; round only in prose.
+
+Base health is read with `gh api --paginate`. This repository routinely has
+more than one page of check runs per commit, and `base_health.py` cross-checks
+the entries it sees against the reported `total_count`: a truncated or
+inconsistent response fails closed instead of certifying a red base as green.
+
+The preflight scan diffs two independent depth-1 checkouts, so the workflow
+first copies the base commit into the candidate clone from the sibling `base`
+checkout — no network, no credentials, and no full-history clone. Deletions are
+in scope for the scan, because removing a lockfile is as much a dependency
+change as editing one.
 
 The candidate workflow has read-only repository permission and no secrets.
 Generated code runs in a networkless, resource-limited, unprivileged

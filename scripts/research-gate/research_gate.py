@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Trusted validation and evaluation for ADR-282 research candidates.
 
-This module intentionally uses only the Python standard library so the trusted
-gate can run without executing dependency lifecycle scripts from a candidate.
+Apart from the pinned ``jsonschema`` validator installed from
+``scripts/research-gate/requirements.txt``, this module uses only the Python
+standard library, so the trusted gate runs without executing dependency
+lifecycle scripts from a candidate. Every document the gate reads or writes is
+checked against its schema in ``schemas/`` first; the hand-rolled checks below
+then enforce the cross-field invariants a schema cannot express.
 """
 
 from __future__ import annotations
@@ -12,13 +16,15 @@ import datetime as dt
 import hashlib
 import json
 import math
-import os
 import re
 import statistics
 import sys
 import unicodedata
 from pathlib import Path
 from typing import Any
+
+import schema_validate
+from schema_validate import SchemaValidationError
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -144,11 +150,20 @@ def _require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
+def _schema(document: Any, schema_name: str) -> None:
+    """Fail closed against the declared JSON Schema before any semantic check."""
+    try:
+        schema_validate.validate_document(document, schema_name)
+    except SchemaValidationError as error:
+        raise GateError(str(error)) from error
+
+
 def _sha(value: Any, name: str) -> None:
     _require(isinstance(value, str) and bool(SHA256_RE.fullmatch(value)), f"{name} must be lowercase SHA-256")
 
 
 def validate_embedding_identity(identity: dict[str, Any]) -> None:
+    _schema(identity, schema_validate.EMBEDDING_IDENTITY_SCHEMA)
     missing = IDENTITY_FIELDS - set(identity)
     _require(not missing, f"embedding identity missing fields: {sorted(missing)}")
     _require(set(identity) == IDENTITY_FIELDS,
@@ -227,6 +242,7 @@ def _validate_memory(manifest: dict[str, Any]) -> None:
 
 
 def validate_manifest(manifest: dict[str, Any], prior: dict[str, Any] | None = None) -> None:
+    _schema(manifest, schema_validate.MANIFEST_SCHEMA)
     _require(manifest.get("schema_version") == 1, "manifest schema_version must be 1")
     _require(isinstance(manifest.get("commit"), str) and bool(FULL_SHA_RE.fullmatch(manifest["commit"])),
              "commit must be a full lowercase 40-character SHA")
@@ -316,6 +332,7 @@ def _paired_interval(differences: list[float]) -> tuple[float, float, float, flo
 
 def evaluate(manifest: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
     validate_manifest(manifest)
+    _schema(results, schema_validate.RESULTS_SCHEMA)
     _require(manifest.get("phase") == "confirmation", "only confirmation manifests are promotable")
     _require(results.get("schema_version") == 1, "results schema_version must be 1")
     _require(results.get("manifest_revision") == manifest["revision"], "result revision mismatch")
@@ -396,6 +413,7 @@ def evaluate(manifest: dict[str, Any], results: dict[str, Any]) -> dict[str, Any
 def validate_override(value: dict[str, Any], base_sha: str, head_sha: str,
                       failed_checks: list[str], now: dt.datetime | None = None) -> None:
     now = now or dt.datetime.now(dt.timezone.utc)
+    _schema(value, schema_validate.OVERRIDE_SCHEMA)
     _require(value.get("schema_version") == 1, "override schema_version must be 1")
     _require(value.get("scope") == "red-base-only", "override scope must be red-base-only")
     _require(value.get("approval_source") == "github-environment:research-gate-override",
@@ -417,6 +435,7 @@ def validate_override(value: dict[str, Any], base_sha: str, head_sha: str,
 
 
 def validate_base_gate(value: dict[str, Any], base_sha: str, head_sha: str) -> None:
+    _schema(value, schema_validate.BASE_GATE_SCHEMA)
     _require(value.get("schema_version") == 1, "base gate schema_version must be 1")
     _require(value.get("base_sha") == base_sha and value.get("head_sha") == head_sha,
              "base gate is not scoped to exact base/head SHAs")
@@ -433,7 +452,54 @@ def validate_base_gate(value: dict[str, Any], base_sha: str, head_sha: str) -> N
         _sha(value.get("override_sha256"), "base gate override_sha256")
 
 
+def _same_number(reported: Any, evaluated: float, name: str) -> None:
+    _require(isinstance(reported, (int, float)) and not isinstance(reported, bool),
+             f"report {name} must be a number")
+    _require(math.isclose(float(reported), evaluated, rel_tol=1e-9, abs_tol=1e-12),
+             f"report {name} ({reported}) does not match the trusted evaluation ({evaluated})")
+
+
+def validate_report(report: dict[str, Any], manifest: dict[str, Any],
+                    evaluation: dict[str, Any]) -> None:
+    """Bind a candidate-authored report to the trusted evaluation of hashed raw results.
+
+    ADR-282 acceptance criterion 13: headline values are verified against the
+    hashed raw artifacts rather than accepted as transcribed.
+    """
+    _schema(report, schema_validate.REPORT_SCHEMA)
+    _require(report["candidate_commit"] == manifest["commit"], "report commit mismatch")
+    _require(report["manifest_revision"] == manifest["revision"], "report manifest revision mismatch")
+    _require(report["claim"] == manifest["claim"], "report claim differs from the preregistered claim")
+    _require(report["manifest_sha256"] == evaluation["manifest_sha256"], "report manifest hash mismatch")
+    _require(report["results_sha256"] == evaluation["results_sha256"],
+             "report is not derived from the evaluated raw results")
+    _require(report["primary_metric"] == evaluation["primary_metric"], "report primary metric mismatch")
+    _require(report["outcome"] == evaluation["outcome"],
+             f"report claims outcome {report['outcome']} but the evaluator found {evaluation['outcome']}")
+
+    headline = report["headline"]
+    _require(headline["seed_count"] == evaluation["seed_count"], "report seed count mismatch")
+    for field in (
+        "paired_effect_mean",
+        "paired_effect_standard_deviation",
+        "minimum_meaningful_effect",
+        "worst_seed_effect",
+        "maximum_primary_budget_delta",
+    ):
+        _same_number(headline[field], float(evaluation[field]), f"headline.{field}")
+    for index, bound in enumerate(("lower", "upper")):
+        _same_number(headline["confidence_interval_95"][index],
+                     float(evaluation["confidence_interval_95"][index]),
+                     f"headline.confidence_interval_95 {bound}")
+
+    effects = report["per_seed_effects"]
+    _require(len(effects) == evaluation["seed_count"],
+             "report must include one effect per confirmation seed")
+    _same_number(min(effects), float(evaluation["worst_seed_effect"]), "per_seed_effects minimum")
+
+
 def validate_artifact_index(index: dict[str, Any], root: str | Path) -> None:
+    _schema(index, schema_validate.ARTIFACT_INDEX_SCHEMA)
     _require(index.get("schema_version") == 1, "artifact index schema_version must be 1")
     _require(index.get("retention_class") in {"candidate", "accepted", "publication"},
              "invalid retention class")
@@ -463,6 +529,10 @@ def main() -> int:
     eval_parser.add_argument("manifest")
     eval_parser.add_argument("results")
     eval_parser.add_argument("--output", required=True)
+    report_parser = sub.add_parser("validate-report")
+    report_parser.add_argument("report")
+    report_parser.add_argument("--manifest", required=True)
+    report_parser.add_argument("--evaluation", required=True)
     index_parser = sub.add_parser("validate-index")
     index_parser.add_argument("index")
     index_parser.add_argument("--root", required=True)
@@ -489,6 +559,8 @@ def main() -> int:
             summary = evaluate(load_json(args.manifest), load_json(args.results))
             Path(args.output).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             _require(summary["outcome"] == "pass", f"confirmation outcome is {summary['outcome']}")
+        elif args.command == "validate-report":
+            validate_report(load_json(args.report), load_json(args.manifest), load_json(args.evaluation))
         elif args.command == "validate-index":
             validate_artifact_index(load_json(args.index), args.root)
         elif args.command == "embedding-space-id":

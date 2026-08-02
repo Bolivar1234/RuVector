@@ -50,6 +50,11 @@ jobs:
           ref: main
           path: trusted
           persist-credentials: false
+      - name: Install pinned trusted gate dependencies
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --no-input \
+            -r trusted/scripts/research-gate/requirements.txt
       - name: Validate exact immutable scope
         env:
           BASE_SHA: ${{ inputs.base_sha }}
@@ -91,11 +96,23 @@ jobs:
           RATIONALE: ${{ inputs.rationale }}
           EXPIRES_AT: ${{ inputs.expires_at }}
           RESEARCH_GATE_CODEOWNERS: ${{ vars.RESEARCH_GATE_CODEOWNERS }}
+          DISPATCH_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
           set -euo pipefail
           approver="$(
             jq -r '[.[] | select(.state == "approved" and any(.environments[]; .name == "research-gate-override"))][0].user.login' approvals.json
           )"
+          # Two people, not one. GitHub's "Prevent self-review" setting is the
+          # primary control; this is the workflow-side check that fails loudly if
+          # the environment is ever reconfigured without it.
+          for principal in "$DISPATCH_ACTOR" "$TRIGGERING_ACTOR"; do
+            if [[ -n "$principal" && "${approver,,}" = "${principal,,}" ]]; then
+              echo "research-gate-override: approver '$approver' also started this run as '$principal'." >&2
+              echo "ADR-282 requires a second person to authorize a red base; refusing to issue an override." >&2
+              exit 1
+            fi
+          done
           permission="$(
             gh api "repos/$GH_REPO/collaborators/$approver/permission" --jq .permission
           )"
