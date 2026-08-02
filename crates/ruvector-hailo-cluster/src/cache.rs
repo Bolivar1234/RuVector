@@ -476,11 +476,15 @@ mod tests {
 
     #[test]
     fn ttl_insert_refreshes_timestamp() {
-        let c = EmbeddingCache::with_ttl(4, Some(Duration::from_millis(20)));
+        // Margins are deliberately wide: macOS thread::sleep overshoots by
+        // several ms, and the original 20ms TTL with a 5ms margin failed
+        // deterministically there. Without the refresh, total elapsed
+        // (~120ms+) exceeds the 100ms TTL; with it, age is ~70ms.
+        let c = EmbeddingCache::with_ttl(4, Some(Duration::from_millis(100)));
         c.insert("fp", "z", vec![5.0]);
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(50));
         c.insert("fp", "z", vec![5.0]);
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(70));
         assert_eq!(c.get("fp", "z"), Some(vec![5.0]));
     }
 

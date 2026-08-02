@@ -1162,9 +1162,13 @@ mod tests {
     #[test]
     fn cache_hits_skip_transport_after_first_call() {
         let transport = Arc::new(FakeTransport::always_ok(vec![0.1, 0.2, 0.3]));
+        // Capacity 32 → per-shard capacity 2 (32/16 shards), so the two
+        // distinct texts below cannot evict each other even if their keys
+        // hash to the same shard. At capacity 16 the per-shard cap is 1
+        // and this test becomes sensitive to the cache-key hash layout.
         let c = test_cluster(workers(2), transport.clone(), 3, "fp:cache")
             .expect("init")
-            .with_cache(16);
+            .with_cache(32);
 
         // First call → miss → transport hit (count = 1)
         let v1 = c.embed_one_blocking("warm me up").expect("first embed");
@@ -1189,7 +1193,7 @@ mod tests {
         assert_eq!(s.hits, 1);
         assert_eq!(s.misses, 2);
         assert_eq!(s.evictions, 0);
-        assert_eq!(s.capacity, 16);
+        assert_eq!(s.capacity, 32);
     }
 
     /// Test transport whose health() output varies per-worker based on a
