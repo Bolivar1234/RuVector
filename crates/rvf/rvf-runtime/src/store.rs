@@ -71,6 +71,9 @@ struct MetadataChainState {
     /// whole chain, so writers hold this under the same decoded-byte ceiling
     /// readers enforce (ADR-280 §5).
     chain_bytes: usize,
+    /// Set when the chain on disk cannot be safely extended by a delta, so the
+    /// next generation must re-anchor it with a full snapshot.
+    needs_snapshot: bool,
 }
 
 impl MetadataChainState {
@@ -155,6 +158,8 @@ pub struct RvfStore {
     /// Generations dropped by open because the chain could not be replayed
     /// past them (see [`Self::metadata_recovery`]).
     dropped_metadata_generations: u64,
+    /// Records the truncated replay resurrected and open therefore discarded.
+    dropped_metadata_records: u64,
     embedding_compatibility: EmbeddingCompatibility,
     metadata_filter_scanned_records: AtomicU64,
     metadata_filter_scanned_bytes: AtomicU64,
@@ -249,6 +254,7 @@ impl RvfStore {
             committed_metadata: MetadataStore::new(),
             committed_file_metadata: BTreeMap::new(),
             dropped_metadata_generations: 0,
+            dropped_metadata_records: 0,
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -274,6 +280,16 @@ impl RvfStore {
     }
 
     /// Open an existing RVF store for read-write access.
+    ///
+    /// Opening succeeds even when the committed metadata chain is damaged: the
+    /// longest replayable prefix is served rather than failing the open
+    /// (ADR-280 §5). That means a successful open does **not** by itself mean
+    /// all committed metadata is present. Callers that care -- anything
+    /// user-facing, and anything that reports on artifact health -- should
+    /// check [`Self::metadata_recovery`] and surface a warning when it reports
+    /// dropped generations or records. The next metadata write re-anchors the
+    /// chain on the recovered state, and `compact()` reclaims the unreachable
+    /// bytes.
     pub fn open(path: &Path) -> Result<Self, RvfError> {
         if !path.exists() {
             return Err(err(ErrorCode::ManifestNotFound));
@@ -313,6 +329,7 @@ impl RvfStore {
             committed_metadata: MetadataStore::new(),
             committed_file_metadata: BTreeMap::new(),
             dropped_metadata_generations: 0,
+            dropped_metadata_records: 0,
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -338,6 +355,9 @@ impl RvfStore {
     }
 
     /// Open an existing RVF store for read-only access (no lock required).
+    ///
+    /// Damaged metadata is recovered rather than fatal; see [`Self::open`] and
+    /// check [`Self::metadata_recovery`].
     pub fn open_readonly(path: &Path) -> Result<Self, RvfError> {
         let mut ancestry = HashSet::new();
         Self::open_readonly_with_ancestry(path, &mut ancestry)
@@ -385,6 +405,7 @@ impl RvfStore {
             committed_metadata: MetadataStore::new(),
             committed_file_metadata: BTreeMap::new(),
             dropped_metadata_generations: 0,
+            dropped_metadata_records: 0,
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -1790,6 +1811,7 @@ impl RvfStore {
                 generation: compacted_generation,
                 snapshot_generation: compacted_generation,
                 chain_bytes: compacted_metadata_bytes,
+                needs_snapshot: false,
             }
         } else {
             MetadataChainState::default()
@@ -2652,6 +2674,7 @@ impl RvfStore {
         MetadataRecovery {
             generation: self.metadata_chain.generation,
             dropped_generations: self.dropped_metadata_generations,
+            dropped_records: self.dropped_metadata_records,
         }
     }
 
@@ -3018,6 +3041,7 @@ impl RvfStore {
             committed_metadata: MetadataStore::new(),
             committed_file_metadata: BTreeMap::new(),
             dropped_metadata_generations: 0,
+            dropped_metadata_records: 0,
             embedding_compatibility: self.embedding_compatibility,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -3441,13 +3465,27 @@ impl RvfStore {
             .membership_filter
             .as_ref()
             .ok_or_else(|| err(ErrorCode::MembershipInvalid))?;
-        for (vector_id, _) in self.metadata.records() {
+        // Same rule as the root-store check in `restore_metadata`: an intact
+        // chain that references an invisible identifier is a real
+        // inconsistency, but a truncated one may simply have dropped the
+        // generation that removed the record.
+        let truncated = self.dropped_metadata_generations > 0;
+        let mut resurrected: Vec<u64> = Vec::new();
+        for vector_id in self.metadata.ids() {
             let local_live = self.vectors.get(vector_id).is_some()
                 && !self.deletion_bitmap.is_deleted(vector_id);
             if !local_live && !membership.contains(vector_id) {
-                return Err(err(ErrorCode::InvalidMetadata));
+                if !truncated {
+                    return Err(err(ErrorCode::InvalidMetadata));
+                }
+                resurrected.push(vector_id);
             }
         }
+        self.metadata.remove_ids(&resurrected);
+        self.dropped_metadata_records = self
+            .dropped_metadata_records
+            .saturating_add(resurrected.len() as u64);
+        self.committed_metadata = self.metadata.clone();
         Ok(())
     }
 
@@ -3740,6 +3778,7 @@ impl RvfStore {
             .checked_add(1)
             .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
         let mut full_snapshot = self.metadata_chain.generation == 0
+            || self.metadata_chain.needs_snapshot
             || self.metadata_chain.deltas() >= META_SNAPSHOT_INTERVAL;
         let mut payload =
             self.encode_metadata_generation(generation, (!full_snapshot).then_some(()))?;
@@ -3781,6 +3820,7 @@ impl RvfStore {
             SegmentType::Meta as u8,
         ));
         self.metadata_chain.generation = generation;
+        self.metadata_chain.needs_snapshot = false;
         if full_snapshot {
             self.metadata_chain.snapshot_generation = generation;
             self.metadata_chain.chain_bytes = payload.len();
@@ -3842,7 +3882,7 @@ impl RvfStore {
         // newest one, and everything older than it is superseded history.
         // Generations that cannot be read or decoded are collected as gaps.
         let mut decoded_bytes = 0usize;
-        let mut newest_first: Vec<(usize, MetadataSegment)> = Vec::new();
+        let mut newest_first: Vec<(u64, usize, MetadataSegment)> = Vec::new();
         let mut visited: HashSet<u64> = HashSet::new();
         let mut damaged = 0u64;
         let mut found_snapshot = false;
@@ -3878,7 +3918,7 @@ impl RvfStore {
                 continue;
             }
             found_snapshot = segment.full_snapshot;
-            newest_first.push((payload.len(), segment));
+            newest_first.push((offset, payload.len(), segment));
             if found_snapshot {
                 break;
             }
@@ -3892,13 +3932,14 @@ impl RvfStore {
         // that is missing or does not name its predecessor as its base.
         newest_first.reverse();
         let mut chain = newest_first.into_iter();
-        let (snapshot_bytes, snapshot) = chain
+        let (snapshot_offset, snapshot_bytes, snapshot) = chain
             .next()
             .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
         let snapshot_generation = snapshot.generation;
         let mut chain_bytes = snapshot_bytes;
+        let mut applied_offsets: HashSet<u64> = HashSet::from([snapshot_offset]);
         let mut applied = vec![snapshot];
-        for (bytes, segment) in chain {
+        for (offset, bytes, segment) in chain {
             let expected = applied
                 .last()
                 .and_then(|previous: &MetadataSegment| previous.generation.checked_add(1));
@@ -3909,6 +3950,7 @@ impl RvfStore {
                 break;
             }
             chain_bytes = chain_bytes.saturating_add(bytes);
+            applied_offsets.insert(offset);
             applied.push(segment);
         }
         let latest = applied
@@ -3950,23 +3992,52 @@ impl RvfStore {
             .segment_dir
             .iter()
             .any(|entry| entry.3 == SegmentType::CowMap as u8);
+        // Deletion state comes from the newest manifest but metadata now comes
+        // from a possibly older prefix, so a dropped generation that carried a
+        // deletion resurrects its record. On an intact chain that mismatch
+        // means the artifact really is inconsistent and is fatal; on a
+        // truncated one it is a known consequence of the damage, so the
+        // resurrected records are discarded and counted instead.
+        let truncated = damaged > 0;
+        let mut resurrected: Vec<u64> = Vec::new();
         for vector_id in metadata.ids() {
             if (!is_cow && self.vectors.get(vector_id).is_none())
                 || self.deletion_bitmap.is_deleted(vector_id)
             {
-                return Err(err(ErrorCode::InvalidMetadata));
+                if !truncated {
+                    return Err(err(ErrorCode::InvalidMetadata));
+                }
+                resurrected.push(vector_id);
             }
         }
+        metadata.remove_ids(&resurrected);
+
         self.metadata = metadata;
         self.file_metadata = file_metadata;
         self.metadata_chain = MetadataChainState {
             generation: latest,
             snapshot_generation,
             chain_bytes,
+            // A truncated replay leaves generations on disk that the chain no
+            // longer reaches, and may have discarded resurrected records that
+            // the applied prefix still contains. Re-anchoring the next write as
+            // a full snapshot makes the file converge on the served state
+            // instead of extending a chain that disagrees with it.
+            needs_snapshot: truncated,
         };
         self.dropped_metadata_generations = damaged;
-        // The chain on disk is exactly what was replayed, so it is also the
-        // base the next generation must be encoded against.
+        self.dropped_metadata_records = resurrected.len() as u64;
+        if truncated {
+            // Drop the unreachable generations from the segment directory so
+            // the next committed manifest stops referencing them. Their bytes
+            // stay in the file until compaction reclaims them.
+            self.segment_dir.retain(|&(_, offset, _, segment_type)| {
+                segment_type != SegmentType::Meta as u8 || applied_offsets.contains(&offset)
+            });
+        }
+        // The served state is what the next generation is encoded against. It
+        // can differ from the applied prefix when records were discarded above,
+        // which is safe only because that next generation is a full snapshot.
         self.committed_metadata = self.metadata.clone();
         self.committed_file_metadata = self.file_metadata.clone();
         Ok(())

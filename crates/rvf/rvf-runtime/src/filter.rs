@@ -103,18 +103,6 @@ impl MetadataStore {
         })
     }
 
-    pub(crate) fn records(&self) -> impl Iterator<Item = (u64, Vec<(u16, MetadataValue)>)> + '_ {
-        self.entries.iter().map(|(&id, fields)| {
-            (
-                id,
-                fields
-                    .iter()
-                    .map(|(&fid, value)| (fid, value.clone()))
-                    .collect(),
-            )
-        })
-    }
-
     /// Fields of one record in ascending `field_id` order, borrowed so callers
     /// that only compare values do not clone the record.
     pub(crate) fn fields(

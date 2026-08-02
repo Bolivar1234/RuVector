@@ -376,6 +376,159 @@ fn corrupt_mid_chain_delta_recovers_the_longest_valid_prefix() {
             "record {i} came from a dropped generation"
         );
     }
+    drop(reopened);
+
+    // Recovery must converge: writes after it have to reach the committed
+    // chain, or the artifact silently discards every later mutation.
+    let mut store = RvfStore::open(&path).unwrap();
+    store
+        .ingest_batch_with_metadata(&[&[99.0, 1.0]], &[99], &[record(99, "after-recovery")])
+        .unwrap();
+    store.close().unwrap();
+
+    let reopened = RvfStore::open_readonly(&path).unwrap();
+    assert_eq!(
+        reopened.get_metadata(99).unwrap(),
+        vec![record_entry("after-recovery")],
+        "a write after recovery must survive reopen"
+    );
+    for i in 0..CORRUPTED as u64 {
+        assert_eq!(
+            reopened.get_metadata(i).unwrap(),
+            expected_record(i),
+            "the recovered state must survive alongside the new write"
+        );
+    }
+    assert_eq!(
+        reopened.metadata_recovery().dropped_generations,
+        0,
+        "the repaired chain must no longer report damage"
+    );
+    drop(reopened);
+
+    // A second write must land too, so convergence is not a one-shot effect.
+    let mut store = RvfStore::open(&path).unwrap();
+    store
+        .ingest_batch_with_metadata(&[&[98.0, 1.0]], &[98], &[record(98, "second-write")])
+        .unwrap();
+    store.close().unwrap();
+
+    let reopened = RvfStore::open_readonly(&path).unwrap();
+    assert_eq!(
+        reopened.get_metadata(98).unwrap(),
+        vec![record_entry("second-write")]
+    );
+    assert_eq!(
+        reopened.get_metadata(99).unwrap(),
+        vec![record_entry("after-recovery")]
+    );
+}
+
+/// Recovery must also survive compaction: compact rewrites the file around the
+/// truncated state, and writes after that must still land.
+#[test]
+fn recovery_then_compact_then_write_stays_coherent() {
+    const COMMITS: u64 = 6;
+    const CORRUPTED: usize = 3;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("recovery_compact.rvf");
+    commit_metadata_history(&path, COMMITS);
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let (start, len) = meta_segments(&bytes)[CORRUPTED];
+    bytes[start + len / 2] ^= 0xFF;
+    std::fs::write(&path, &bytes).unwrap();
+
+    let mut store = RvfStore::open(&path).unwrap();
+    assert!(store.metadata_recovery().dropped_generations > 0);
+    store.compact().unwrap();
+    store
+        .ingest_batch_with_metadata(&[&[42.0, 1.0]], &[42], &[record(42, "post-compact")])
+        .unwrap();
+    store.close().unwrap();
+
+    let reopened = RvfStore::open_readonly(&path).unwrap();
+    assert_eq!(
+        reopened.get_metadata(42).unwrap(),
+        vec![record_entry("post-compact")],
+        "a write after recovery and compaction must survive reopen"
+    );
+    for i in 0..CORRUPTED as u64 {
+        assert_eq!(
+            reopened.get_metadata(i).unwrap(),
+            expected_record(i),
+            "compaction must preserve the recovered state"
+        );
+    }
+    assert_eq!(reopened.metadata_recovery().dropped_generations, 0);
+}
+
+/// A dropped generation may have carried a deletion, so replaying only the
+/// prefix resurrects records whose vectors the newest manifest still lists as
+/// deleted. That contradiction is a consequence of the damage, not evidence of
+/// an inconsistent artifact: the resurrected records are dropped and counted,
+/// not treated as a fatal error.
+#[test]
+fn truncated_recovery_drops_resurrected_records_instead_of_failing() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("recovery_with_delete.rvf");
+
+    let mut store = RvfStore::create(&path, make_options(2)).unwrap();
+    store
+        .ingest_batch_with_metadata(
+            &[&[1.0, 1.0], &[2.0, 1.0], &[3.0, 1.0], &[4.0, 1.0]],
+            &[1, 2, 3, 4],
+            &[
+                record(1, "value-1"),
+                record(2, "value-2"),
+                record(3, "value-3"),
+                record(4, "value-4"),
+            ],
+        )
+        .unwrap();
+    // Generation 2 removes vector 3 and its record together.
+    store.delete(&[3]).unwrap();
+    store.close().unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let segments = meta_segments(&bytes);
+    assert_eq!(segments.len(), 2);
+    let (start, len) = segments[1];
+    bytes[start + len / 2] ^= 0xFF;
+    std::fs::write(&path, &bytes).unwrap();
+
+    let reopened = RvfStore::open_readonly(&path).unwrap_or_else(|e| {
+        panic!("a dropped generation carrying a deletion must not brick the artifact: {e:?}")
+    });
+
+    let recovery = reopened.metadata_recovery();
+    assert!(recovery.dropped_generations > 0);
+    assert_eq!(
+        recovery.dropped_records, 1,
+        "the record resurrected by the truncated replay must be reported"
+    );
+
+    // The surviving records are readable and the deleted vector stays deleted.
+    for i in [1u64, 2, 4] {
+        assert_eq!(
+            reopened.get_metadata(i).unwrap(),
+            expected_record(i),
+            "record {i} must remain readable"
+        );
+    }
+    assert!(
+        reopened.get_metadata(3).is_none(),
+        "a record whose vector is deleted must not be resurrected"
+    );
+    assert_eq!(
+        reopened
+            .query(&[1.0, 1.0], 4, &Default::default())
+            .unwrap()
+            .len(),
+        3,
+        "the vectors themselves must stay readable"
+    );
 }
 
 /// A record held in memory for an identifier the store does not yet hold is

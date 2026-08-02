@@ -316,4 +316,8 @@ pub struct MetadataRecovery {
     /// Generations that could not be replayed and were dropped. Non-zero means
     /// the artifact is damaged and later generations were discarded.
     pub dropped_generations: u64,
+    /// Records the truncated replay resurrected -- their vectors are deleted or
+    /// absent in the committed vector state, because a dropped generation
+    /// carried the deletion. They are excluded from the served metadata.
+    pub dropped_records: u64,
 }
