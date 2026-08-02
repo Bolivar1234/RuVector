@@ -307,3 +307,13 @@ pub struct MetadataFilterStats {
     pub scanned_bytes: u64,
     pub aborted_scans: u64,
 }
+
+/// Outcome of replaying the committed `META_SEG` chain at open (ADR-280 §5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MetadataRecovery {
+    /// Newest metadata generation the served snapshot reflects.
+    pub generation: u64,
+    /// Generations that could not be replayed and were dropped. Non-zero means
+    /// the artifact is damaged and later generations were discarded.
+    pub dropped_generations: u64,
+}

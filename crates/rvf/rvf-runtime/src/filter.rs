@@ -134,6 +134,11 @@ impl MetadataStore {
         self.entries.is_empty()
     }
 
+    /// Drop every record whose vector identifier fails `keep`.
+    pub(crate) fn retain_ids(&mut self, keep: impl Fn(u64) -> bool) {
+        self.entries.retain(|&vector_id, _| keep(vector_id));
+    }
+
     pub(crate) fn decoded_size(&self, vector_id: u64) -> usize {
         self.entries.get(&vector_id).map_or(0, |fields| {
             fields.iter().fold(0usize, |size, (_, value)| {

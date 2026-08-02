@@ -325,6 +325,119 @@ fn delta_mixing_field_deletion_and_reuse_round_trips() {
     );
 }
 
+/// Damage to one delta must not make the whole artifact unopenable. Replay
+/// serves the longest complete prefix of the chain -- the newest snapshot plus
+/// the consecutive valid deltas after it -- and reports what it dropped.
+#[test]
+fn corrupt_mid_chain_delta_recovers_the_longest_valid_prefix() {
+    const COMMITS: u64 = 6;
+    // Generation 1 is the full snapshot; 2..=6 are deltas. Corrupting
+    // generation 4 must strip generations 4, 5 and 6.
+    const CORRUPTED: usize = 3;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("mid_chain_corruption.rvf");
+    commit_metadata_history(&path, COMMITS);
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let segments = meta_segments(&bytes);
+    assert_eq!(segments.len() as u64, COMMITS);
+    let (start, len) = segments[CORRUPTED];
+    assert!(len > 0);
+    bytes[start + len / 2] ^= 0xFF;
+    std::fs::write(&path, &bytes).unwrap();
+
+    let reopened = RvfStore::open_readonly(&path).unwrap_or_else(|e| {
+        panic!("one damaged delta must not make the artifact unopenable: {e:?}")
+    });
+
+    let recovery = reopened.metadata_recovery();
+    assert_eq!(
+        recovery.generation, CORRUPTED as u64,
+        "the served state must be the last generation before the damage"
+    );
+    assert!(
+        recovery.dropped_generations > 0,
+        "recovery must report that generations were dropped"
+    );
+
+    // Records committed before the damage survive; those committed by the
+    // dropped generations are absent, but nothing is partially applied.
+    for i in 0..CORRUPTED as u64 {
+        assert_eq!(
+            reopened.get_metadata(i).unwrap(),
+            expected_record(i),
+            "record {i} predates the damage and must survive"
+        );
+    }
+    for i in CORRUPTED as u64..COMMITS {
+        assert!(
+            reopened.get_metadata(i).is_none(),
+            "record {i} came from a dropped generation"
+        );
+    }
+}
+
+/// A record held in memory for an identifier the store does not yet hold is
+/// excluded from the committed chain. Once that identifier becomes part of the
+/// committed vector state, the next generation must persist the record: a delta
+/// is encoded against what the chain contains, not against memory.
+#[test]
+fn record_becoming_committable_is_persisted_by_the_next_generation() {
+    let dir = TempDir::new().unwrap();
+    let parent_path = dir.path().join("late_commit_parent.rvf");
+    let child_path = dir.path().join("late_commit_child.rvf");
+
+    let mut parent = RvfStore::create(&parent_path, make_options(2)).unwrap();
+    parent
+        .ingest_batch_with_metadata(&[&[1.0, 0.0]], &[1], &[record(1, "parent-one")])
+        .unwrap();
+
+    // The child inherits the parent's records in memory but holds no vectors,
+    // so record 1 is not part of its committed state yet.
+    let mut child = parent
+        .derive(&child_path, rvf_types::DerivationType::Clone, None)
+        .unwrap();
+    child
+        .ingest_batch_with_metadata(&[&[0.0, 1.0]], &[9], &[record(9, "child-nine")])
+        .unwrap();
+
+    // Vector 1 now exists in the child, making the inherited record committable.
+    child.ingest_batch(&[&[1.0, 0.0]], &[1], None).unwrap();
+
+    // The next metadata generation is a delta, and must carry record 1.
+    child
+        .ingest_batch_with_metadata(&[&[0.5, 0.5]], &[8], &[record(8, "child-eight")])
+        .unwrap();
+    child.close().unwrap();
+    parent.close().unwrap();
+
+    let reopened = RvfStore::open_readonly(&child_path).unwrap();
+    assert_eq!(
+        reopened.get_metadata(1).unwrap(),
+        vec![MetadataEntry {
+            field_id: 1,
+            value: MetadataValue::String("parent-one".into()),
+        }],
+        "a record that became committable must reach the committed chain"
+    );
+    assert_eq!(
+        reopened.get_metadata(9).unwrap(),
+        vec![record_entry("child-nine")]
+    );
+    assert_eq!(
+        reopened.get_metadata(8).unwrap(),
+        vec![record_entry("child-eight")]
+    );
+}
+
+fn record_entry(value: &str) -> MetadataEntry {
+    MetadataEntry {
+        field_id: 1,
+        value: MetadataValue::String(value.into()),
+    }
+}
+
 /// A `derive()` child starts with no vectors, so it must not persist metadata
 /// records that reference identifiers only the parent holds (ADR-280 §4: records
 /// are validated against the resulting committed vector snapshot).

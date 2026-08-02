@@ -424,6 +424,68 @@ fn delete_metadata_commit_is_atomic_under_crash_injection() {
     assert_atomic_metadata_commit("delete", &all_ids, &[], &bytes_a, &bytes_b, &probe);
 }
 
+/// A `delete` that fails must leave no trace in memory. It tombstones vectors
+/// and prunes the membership filter before writing its metadata generation, so
+/// a rollback that restored only the metadata would leave the store claiming
+/// deletions it never committed -- and the next successful commit would publish
+/// a manifest whose deleted set contradicts the committed metadata, which open
+/// rejects outright.
+///
+/// The failure is injected through the encoder: a COW child inherits its
+/// parent's records in memory and commits them as one full snapshot on its
+/// first metadata write, and a snapshot that declares one field id with two
+/// different value types is not encodable. The parent itself never hits this,
+/// because each of its generations touches only one of the records.
+#[test]
+fn failed_delete_leaves_no_uncommitted_tombstones() {
+    let dir = TempDir::new().unwrap();
+    let parent_path = dir.path().join("failed_delete_parent.rvf");
+    let child_path = dir.path().join("failed_delete_child.rvf");
+    let dim: u16 = 2;
+
+    let mut parent = RvfStore::create(&parent_path, make_options(dim)).unwrap();
+    for (id, value) in [
+        (1u64, MetadataValue::U64(1)),
+        (2, MetadataValue::String("two".into())),
+        (3, MetadataValue::U64(3)),
+    ] {
+        parent
+            .ingest_batch_with_metadata(
+                &[&[id as f32, 1.0]],
+                &[id],
+                &[VectorMetadata {
+                    vector_id: id,
+                    fields: vec![MetadataEntry { field_id: 1, value }],
+                    delete_record: false,
+                }],
+            )
+            .unwrap();
+    }
+
+    let mut child = parent.branch(&child_path).unwrap();
+    // Deleting vector 3 leaves records 1 (u64) and 2 (string) to be written as
+    // the child's first full snapshot, which cannot be encoded.
+    let failure = child.delete(&[3]).expect_err("delete must fail to commit");
+
+    // A later commit that writes no metadata generation still publishes a
+    // manifest; it must not record the rolled-back deletion.
+    child
+        .ingest_batch(&[&[4.0, 1.0]], &[4], None)
+        .unwrap_or_else(|e| panic!("[{failure:?}] a later ingest must still commit: {e:?}"));
+    child.close().unwrap();
+    parent.close().unwrap();
+
+    let reopened = RvfStore::open_readonly(&child_path).unwrap_or_else(|e| {
+        panic!("[{failure:?}] a rolled-back delete must not brick the artifact: {e:?}")
+    });
+    for id in [1u64, 2, 3] {
+        assert!(
+            reopened.get_metadata(id).is_some(),
+            "record {id} must survive a delete that never committed"
+        );
+    }
+}
+
 /// Criterion 6 (file-metadata path): `set_file_metadata` commits a metadata
 /// generation carrying only file-level state, and must expose exactly the prior
 /// or the new value after a crash at any boundary.

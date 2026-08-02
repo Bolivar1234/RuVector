@@ -59,6 +59,27 @@ const MAX_MEMBERSHIP_FILTER_BYTES: u64 = 64 * 1024 * 1024;
 /// headroom for the torn-generation fallback in `restore_metadata`.
 const META_SNAPSHOT_INTERVAL: u64 = 32;
 
+/// Position of the committed metadata chain, rolled back as a unit when a
+/// mutation fails after appending its `META_SEG`.
+#[derive(Clone, Copy, Default)]
+struct MetadataChainState {
+    /// Newest committed generation; 0 when nothing is committed.
+    generation: u64,
+    /// Generation of the newest full snapshot in the chain.
+    snapshot_generation: u64,
+    /// Encoded bytes from that snapshot through `generation`. Open replays the
+    /// whole chain, so writers hold this under the same decoded-byte ceiling
+    /// readers enforce (ADR-280 §5).
+    chain_bytes: usize,
+}
+
+impl MetadataChainState {
+    /// Delta generations written since the last full snapshot.
+    fn deltas(&self) -> u64 {
+        self.generation.saturating_sub(self.snapshot_generation)
+    }
+}
+
 enum IngestMetadata<'a> {
     None,
     Legacy(&'a [MetadataEntry]),
@@ -122,10 +143,18 @@ pub struct RvfStore {
     deletion_bitmap: DeletionBitmap,
     metadata: MetadataStore,
     file_metadata: BTreeMap<String, MetadataValue>,
-    metadata_generation: u64,
-    /// Generation of the newest full metadata snapshot. `metadata_generation`
-    /// minus this is the current delta-chain length (ADR-280 §5).
-    metadata_snapshot_generation: u64,
+    metadata_chain: MetadataChainState,
+    /// The metadata the committed `META_SEG` chain actually contains, which is
+    /// the base every new generation is encoded against. It is not the same as
+    /// `metadata`: records for identifiers the store does not yet hold are kept
+    /// in memory but excluded from the chain, and must be emitted in full once
+    /// those identifiers become committed. Advanced only after a mutation
+    /// publishes its manifest.
+    committed_metadata: MetadataStore,
+    committed_file_metadata: BTreeMap<String, MetadataValue>,
+    /// Generations dropped by open because the chain could not be replayed
+    /// past them (see [`Self::metadata_recovery`]).
+    dropped_metadata_generations: u64,
     embedding_compatibility: EmbeddingCompatibility,
     metadata_filter_scanned_records: AtomicU64,
     metadata_filter_scanned_bytes: AtomicU64,
@@ -216,8 +245,10 @@ impl RvfStore {
             deletion_bitmap: DeletionBitmap::new(),
             metadata: MetadataStore::new(),
             file_metadata: BTreeMap::new(),
-            metadata_generation: 0,
-            metadata_snapshot_generation: 0,
+            metadata_chain: MetadataChainState::default(),
+            committed_metadata: MetadataStore::new(),
+            committed_file_metadata: BTreeMap::new(),
+            dropped_metadata_generations: 0,
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -278,8 +309,10 @@ impl RvfStore {
             deletion_bitmap: DeletionBitmap::new(),
             metadata: MetadataStore::new(),
             file_metadata: BTreeMap::new(),
-            metadata_generation: 0,
-            metadata_snapshot_generation: 0,
+            metadata_chain: MetadataChainState::default(),
+            committed_metadata: MetadataStore::new(),
+            committed_file_metadata: BTreeMap::new(),
+            dropped_metadata_generations: 0,
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -348,8 +381,10 @@ impl RvfStore {
             deletion_bitmap: DeletionBitmap::new(),
             metadata: MetadataStore::new(),
             file_metadata: BTreeMap::new(),
-            metadata_generation: 0,
-            metadata_snapshot_generation: 0,
+            metadata_chain: MetadataChainState::default(),
+            committed_metadata: MetadataStore::new(),
+            committed_file_metadata: BTreeMap::new(),
+            dropped_metadata_generations: 0,
             embedding_compatibility: EmbeddingCompatibility::Unchecked,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -458,9 +493,7 @@ impl RvfStore {
 
         let old_vectors = self.vectors.clone();
         let old_metadata = self.metadata.clone();
-        let old_file_metadata = self.file_metadata.clone();
-        let old_generation = self.metadata_generation;
-        let old_snapshot_generation = self.metadata_snapshot_generation;
+        let old_chain = self.metadata_chain;
         let old_directory = self.segment_dir.clone();
         let old_epoch = self.epoch;
         let old_witness_hash = self.last_witness_hash;
@@ -478,14 +511,20 @@ impl RvfStore {
             buf_writer
                 .seek(SeekFrom::End(0))
                 .map_err(|_| err(ErrorCode::FsyncFailed))?;
-            writer
+            let written = writer
                 .write_vec_seg(
                     &mut buf_writer,
                     &valid_vectors,
                     &valid_ids,
                     self.options.dimension,
                 )
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         let bytes_per_vec = (self.options.dimension as usize) * 4;
@@ -535,10 +574,9 @@ impl RvfStore {
 
         if has_metadata {
             self.metadata = candidate_metadata;
-            if let Err(error) = self.write_metadata_generation(&old_metadata, &old_file_metadata) {
+            if let Err(error) = self.write_metadata_generation() {
                 self.metadata = old_metadata;
-                self.metadata_generation = old_generation;
-                self.metadata_snapshot_generation = old_snapshot_generation;
+                self.metadata_chain = old_chain;
                 self.vectors = old_vectors;
                 self.segment_dir = old_directory;
                 *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -550,8 +588,7 @@ impl RvfStore {
         if self.file.sync_all().is_err() {
             self.vectors = old_vectors;
             self.metadata = old_metadata;
-            self.metadata_generation = old_generation;
-            self.metadata_snapshot_generation = old_snapshot_generation;
+            self.metadata_chain = old_chain;
             self.segment_dir = old_directory;
             *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
             *self.rabitq.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -566,8 +603,7 @@ impl RvfStore {
             if let Err(error) = self.append_witness(witness_types::COMPUTATION, action.as_bytes()) {
                 self.vectors = old_vectors;
                 self.metadata = old_metadata;
-                self.metadata_generation = old_generation;
-                self.metadata_snapshot_generation = old_snapshot_generation;
+                self.metadata_chain = old_chain;
                 self.segment_dir = old_directory;
                 self.epoch = old_epoch;
                 self.last_witness_hash = old_witness_hash;
@@ -580,14 +616,17 @@ impl RvfStore {
         if let Err(error) = self.write_manifest() {
             self.vectors = old_vectors;
             self.metadata = old_metadata;
-            self.metadata_generation = old_generation;
-            self.metadata_snapshot_generation = old_snapshot_generation;
+            self.metadata_chain = old_chain;
             self.segment_dir = old_directory;
             self.epoch = old_epoch;
             self.last_witness_hash = old_witness_hash;
             *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
             *self.rabitq.lock().unwrap_or_else(|e| e.into_inner()) = None;
             return Err(error);
+        }
+
+        if has_metadata {
+            self.commit_metadata_state();
         }
 
         Ok(IngestResult {
@@ -1397,9 +1436,15 @@ impl RvfStore {
             buf_writer
                 .seek(SeekFrom::End(0))
                 .map_err(|_| err(ErrorCode::FsyncFailed))?;
-            writer
+            let written = writer
                 .write_journal_seg(&mut buf_writer, ids, epoch)
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         let journal_payload_len = (16 + ids.len() * 12) as u64;
@@ -1413,6 +1458,18 @@ impl RvfStore {
         self.file
             .sync_all()
             .map_err(|_| err(ErrorCode::FsyncFailed))?;
+
+        // Everything below mutates visible state, so snapshot it first: a
+        // failed delete that leaves tombstones behind in memory would let a
+        // later commit publish a manifest whose deleted_ids contradict the
+        // newest META_SEG, which open rejects outright.
+        let old_metadata = self.metadata.clone();
+        let old_chain = self.metadata_chain;
+        let old_directory_len = self.segment_dir.len();
+        let old_deletion_bitmap = self.deletion_bitmap.clone();
+        let old_membership_filter = self.membership_filter.clone();
+        let old_epoch = self.epoch;
+        let old_witness_hash = self.last_witness_hash;
 
         let mut deleted = 0u64;
         for &id in ids {
@@ -1435,38 +1492,34 @@ impl RvfStore {
                 mf.remove(id);
             }
         }
-        let old_metadata = self.metadata.clone();
-        let old_file_metadata = self.file_metadata.clone();
-        let old_generation = self.metadata_generation;
-        let old_snapshot_generation = self.metadata_snapshot_generation;
-        let old_directory_len = self.segment_dir.len();
         self.metadata.remove_ids(ids);
-        // Data before pointer: the metadata payload must be durable before the
-        // manifest that publishes it (ADR-280 §4, steps 2-3).
-        let metadata_result = self
-            .write_metadata_generation(&old_metadata, &old_file_metadata)
-            .and_then(|()| {
-                self.file
-                    .sync_all()
-                    .map_err(|_| err(ErrorCode::FsyncFailed))
-            });
-        if let Err(error) = metadata_result {
+
+        let result = (|| {
+            // Data before pointer: the metadata payload must be durable before
+            // the manifest that publishes it (ADR-280 §4, steps 2-3).
+            self.write_metadata_generation()?;
+            self.file
+                .sync_all()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            self.epoch = epoch;
+            if self.options.witness.witness_delete {
+                let action = format!("delete:count={},epoch={}", deleted, self.epoch);
+                self.append_witness(witness_types::DATA_PROVENANCE, action.as_bytes())?;
+            }
+            self.write_manifest()
+        })();
+
+        if let Err(error) = result {
             self.metadata = old_metadata;
-            self.metadata_generation = old_generation;
-            self.metadata_snapshot_generation = old_snapshot_generation;
+            self.metadata_chain = old_chain;
             self.segment_dir.truncate(old_directory_len);
+            self.deletion_bitmap = old_deletion_bitmap;
+            self.membership_filter = old_membership_filter;
+            self.epoch = old_epoch;
+            self.last_witness_hash = old_witness_hash;
             return Err(error);
         }
-
-        self.epoch = epoch;
-
-        // Append a witness entry recording this delete operation.
-        if self.options.witness.witness_delete {
-            let action = format!("delete:count={},epoch={}", deleted, self.epoch);
-            self.append_witness(witness_types::DATA_PROVENANCE, action.as_bytes())?;
-        }
-
-        self.write_manifest()?;
+        self.commit_metadata_state();
 
         Ok(DeleteResult {
             deleted,
@@ -1576,8 +1629,10 @@ impl RvfStore {
         let mut new_segment_dir = Vec::new();
         let mut seg_writer = SegmentWriter::new(1);
         let keeps_metadata = !self.metadata.is_empty() || !self.file_metadata.is_empty();
+        let mut compacted_metadata_bytes = 0usize;
         let compacted_generation = self
-            .metadata_generation
+            .metadata_chain
+            .generation
             .checked_add(1)
             .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
         {
@@ -1671,6 +1726,7 @@ impl RvfStore {
                 let (seg_id, offset) = seg_writer
                     .write_meta_seg(&mut temp_writer, &payload)
                     .map_err(|_| err(ErrorCode::FsyncFailed))?;
+                compacted_metadata_bytes = payload.len();
                 new_segment_dir.push((
                     seg_id,
                     offset,
@@ -1729,13 +1785,16 @@ impl RvfStore {
             .open(&self.path)
             .map_err(|_| err(ErrorCode::InvalidManifest))?;
 
-        if keeps_metadata {
-            self.metadata_generation = compacted_generation;
-            self.metadata_snapshot_generation = compacted_generation;
+        self.metadata_chain = if keeps_metadata {
+            MetadataChainState {
+                generation: compacted_generation,
+                snapshot_generation: compacted_generation,
+                chain_bytes: compacted_metadata_bytes,
+            }
         } else {
-            self.metadata_generation = 0;
-            self.metadata_snapshot_generation = 0;
-        }
+            MetadataChainState::default()
+        };
+        self.commit_metadata_state();
         self.segment_dir = new_segment_dir;
         self.seg_writer = Some(seg_writer);
         self.last_compaction_time = now_secs();
@@ -1817,9 +1876,15 @@ impl RvfStore {
             buf_writer
                 .seek(SeekFrom::End(0))
                 .map_err(|_| err(ErrorCode::FsyncFailed))?;
-            writer
+            let written = writer
                 .write_index_seg(&mut buf_writer, &payload)
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         // Newer INDEX_SEGs supersede older ones: keep only the latest
@@ -1896,9 +1961,15 @@ impl RvfStore {
             buf_writer
                 .seek(SeekFrom::End(0))
                 .map_err(|_| err(ErrorCode::FsyncFailed))?;
-            writer
+            let written = writer
                 .write_kernel_seg(&mut buf_writer, &header_bytes, kernel_image, cmdline_bytes)
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         let cmdline_len = cmdline_bytes.map_or(0, |c| c.len());
@@ -1989,14 +2060,20 @@ impl RvfStore {
             // header_bytes separately, but we need to include binding in
             // the "image" portion to keep the wire format correct.
             // So we pass the full payload minus the header as "image".
-            writer
+            let written = writer
                 .write_kernel_seg(
                     &mut buf_writer,
                     &header_bytes,
                     &payload[128..], // binding + cmdline + image
                     None,            // cmdline already included above
                 )
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         let total_payload_len = payload.len() as u64;
@@ -2119,9 +2196,15 @@ impl RvfStore {
             buf_writer
                 .seek(SeekFrom::End(0))
                 .map_err(|_| err(ErrorCode::FsyncFailed))?;
-            writer
+            let written = writer
                 .write_ebpf_seg(&mut buf_writer, &header_bytes, program_bytecode, btf_data)
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         let btf_len = btf_data.map_or(0, |b| b.len());
@@ -2219,9 +2302,15 @@ impl RvfStore {
             buf_writer
                 .seek(SeekFrom::End(0))
                 .map_err(|_| err(ErrorCode::FsyncFailed))?;
-            writer
+            let written = writer
                 .write_dashboard_seg(&mut buf_writer, &header_bytes, bundle_data)
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         let payload_len = (64 + bundle_data.len()) as u64;
@@ -2328,9 +2417,15 @@ impl RvfStore {
             buf_writer
                 .seek(SeekFrom::End(0))
                 .map_err(|_| err(ErrorCode::FsyncFailed))?;
-            writer
+            let written = writer
                 .write_wasm_seg(&mut buf_writer, &header_bytes, wasm_bytecode)
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         let payload_len = (64 + wasm_bytecode.len()) as u64;
@@ -2548,6 +2643,18 @@ impl RvfStore {
         self.embedding_compatibility
     }
 
+    /// What open was able to replay from the committed `META_SEG` chain.
+    ///
+    /// `dropped_generations` is non-zero when damage forced replay to stop
+    /// short of the newest generation on disk; the metadata served is then the
+    /// state as of `generation`, and `compact()` rewrites the file around it.
+    pub fn metadata_recovery(&self) -> MetadataRecovery {
+        MetadataRecovery {
+            generation: self.metadata_chain.generation,
+            dropped_generations: self.dropped_metadata_generations,
+        }
+    }
+
     /// Cumulative observability counters for bounded linear metadata scans.
     pub fn metadata_filter_stats(&self) -> MetadataFilterStats {
         MetadataFilterStats {
@@ -2672,15 +2779,13 @@ impl RvfStore {
         {
             return Err(err(ErrorCode::ReadOnly));
         }
-        let old_metadata = self.metadata.clone();
         let old_file_metadata = self.file_metadata.clone();
-        let old_generation = self.metadata_generation;
-        let old_snapshot_generation = self.metadata_snapshot_generation;
+        let old_chain = self.metadata_chain;
         let old_epoch = self.epoch;
         let old_directory_len = self.segment_dir.len();
         self.file_metadata.insert(key, value);
         let result = (|| {
-            self.write_metadata_generation(&old_metadata, &old_file_metadata)?;
+            self.write_metadata_generation()?;
             // Data before pointer: the metadata payload must be durable before
             // the manifest that publishes it (ADR-280 §4, steps 2-3).
             self.file
@@ -2694,10 +2799,11 @@ impl RvfStore {
         })();
         if result.is_err() {
             self.file_metadata = old_file_metadata;
-            self.metadata_generation = old_generation;
-            self.metadata_snapshot_generation = old_snapshot_generation;
+            self.metadata_chain = old_chain;
             self.epoch = old_epoch;
             self.segment_dir.truncate(old_directory_len);
+        } else {
+            self.commit_metadata_state();
         }
         result
     }
@@ -2908,8 +3014,10 @@ impl RvfStore {
             // The child file carries its own `META_SEG` generation sequence and
             // starts empty, so its first commit is a full snapshot rather than
             // a delta against a base generation only the parent file holds.
-            metadata_generation: 0,
-            metadata_snapshot_generation: 0,
+            metadata_chain: MetadataChainState::default(),
+            committed_metadata: MetadataStore::new(),
+            committed_file_metadata: BTreeMap::new(),
+            dropped_metadata_generations: 0,
             embedding_compatibility: self.embedding_compatibility,
             metadata_filter_scanned_records: AtomicU64::new(0),
             metadata_filter_scanned_bytes: AtomicU64::new(0),
@@ -3003,7 +3111,7 @@ impl RvfStore {
             buf_writer
                 .seek(SeekFrom::End(0))
                 .map_err(|_| err(ErrorCode::FsyncFailed))?;
-            writer
+            let written = writer
                 .write_witness_seg(
                     &mut buf_writer,
                     witness_type,
@@ -3011,7 +3119,13 @@ impl RvfStore {
                     action,
                     &self.last_witness_hash,
                 )
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         // Compute the payload length for the segment directory.
@@ -3443,7 +3557,7 @@ impl RvfStore {
             buf_writer
                 .seek(SeekFrom::End(0))
                 .map_err(|_| err(ErrorCode::FsyncFailed))?;
-            writer
+            let written = writer
                 .write_manifest_seg_with_identity(
                     &mut buf_writer,
                     self.epoch,
@@ -3455,7 +3569,13 @@ impl RvfStore {
                     &deleted_ids,
                     fi,
                 )
-                .map_err(|_| err(ErrorCode::FsyncFailed))?
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            // A dropped `BufWriter` swallows flush errors, so an acknowledged
+            // write could be lost before the fsync that follows. Surface them.
+            buf_writer
+                .flush()
+                .map_err(|_| err(ErrorCode::FsyncFailed))?;
+            written
         };
 
         let mut manifest_payload_len =
@@ -3507,10 +3627,13 @@ impl RvfStore {
     fn encode_metadata_generation(
         &self,
         generation: u64,
-        base: Option<(&MetadataStore, &BTreeMap<String, MetadataValue>)>,
+        delta: Option<()>,
     ) -> Result<Vec<u8>, RvfError> {
-        let (base_metadata, base_file_metadata) = match base {
-            Some((metadata, file_metadata)) => (Some(metadata), Some(file_metadata)),
+        let (base_metadata, base_file_metadata) = match delta {
+            Some(()) => (
+                Some(&self.committed_metadata),
+                Some(&self.committed_file_metadata),
+            ),
             None => (None, None),
         };
 
@@ -3587,8 +3710,8 @@ impl RvfStore {
         let schema = build_metadata_schema(&records)?;
         MetadataSegment {
             generation,
-            base_generation: base.is_some().then(|| generation.saturating_sub(1)),
-            full_snapshot: base.is_none(),
+            base_generation: delta.is_some().then(|| generation.saturating_sub(1)),
+            full_snapshot: delta.is_none(),
             schema,
             file_metadata,
             records,
@@ -3599,28 +3722,42 @@ impl RvfStore {
 
     /// Append the next authoritative `META_SEG` generation.
     ///
-    /// `base` is the metadata state the previous generation committed, which
-    /// every caller already holds because it snapshots it for rollback. A full
-    /// snapshot is written for the first generation and again before the delta
-    /// chain reaches the ADR-280 §5 replay ceiling, so reopening never replays
-    /// more than [`META_SNAPSHOT_INTERVAL`] deltas.
-    fn write_metadata_generation(
-        &mut self,
-        base: &MetadataStore,
-        base_file_metadata: &BTreeMap<String, MetadataValue>,
-    ) -> Result<(), RvfError> {
+    /// The generation is encoded against `committed_metadata` -- what the
+    /// published chain actually contains -- so a record held only in memory
+    /// (because its identifier was not yet part of the committed vector state)
+    /// is emitted in full the first time it becomes committable, rather than
+    /// comparing equal to an in-memory base and being silently dropped.
+    ///
+    /// A full snapshot is written for the first generation, again before the
+    /// delta chain reaches [`META_SNAPSHOT_INTERVAL`], and again whenever the
+    /// chain would otherwise grow past the decoded-byte ceiling that open
+    /// enforces -- a delta must never be able to commit a chain that cannot be
+    /// replayed (ADR-280 §5).
+    fn write_metadata_generation(&mut self) -> Result<(), RvfError> {
         let generation = self
-            .metadata_generation
+            .metadata_chain
+            .generation
             .checked_add(1)
             .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
-        let write_full_snapshot = self.metadata_generation == 0
-            || self.metadata_snapshot_generation > self.metadata_generation
-            || self.metadata_generation - self.metadata_snapshot_generation
-                >= META_SNAPSHOT_INTERVAL;
-        let payload = self.encode_metadata_generation(
-            generation,
-            (!write_full_snapshot).then_some((base, base_file_metadata)),
-        )?;
+        let mut full_snapshot = self.metadata_chain.generation == 0
+            || self.metadata_chain.deltas() >= META_SNAPSHOT_INTERVAL;
+        let mut payload =
+            self.encode_metadata_generation(generation, (!full_snapshot).then_some(()))?;
+        if !full_snapshot
+            && self
+                .metadata_chain
+                .chain_bytes
+                .saturating_add(payload.len())
+                > rvf_types::metadata::MAX_META_DECODED_BYTES
+        {
+            full_snapshot = true;
+            payload = self.encode_metadata_generation(generation, None)?;
+        }
+        // A full snapshot larger than the ceiling could never be reopened, so
+        // the commit fails rather than producing an unopenable artifact.
+        if payload.len() > rvf_types::metadata::MAX_META_DECODED_BYTES {
+            return Err(err(ErrorCode::MetadataReplayLimitExceeded));
+        }
 
         let writer = self
             .seg_writer
@@ -3643,11 +3780,34 @@ impl RvfStore {
             payload.len() as u64,
             SegmentType::Meta as u8,
         ));
-        self.metadata_generation = generation;
-        if write_full_snapshot {
-            self.metadata_snapshot_generation = generation;
+        self.metadata_chain.generation = generation;
+        if full_snapshot {
+            self.metadata_chain.snapshot_generation = generation;
+            self.metadata_chain.chain_bytes = payload.len();
+        } else {
+            self.metadata_chain.chain_bytes = self
+                .metadata_chain
+                .chain_bytes
+                .saturating_add(payload.len());
         }
         Ok(())
+    }
+
+    /// Adopt the in-memory metadata as the published chain contents.
+    ///
+    /// Called only once a mutation's manifest is durable: until then the
+    /// appended `META_SEG` is orphaned and the previous chain is still
+    /// authoritative, so the delta base must not move.
+    fn commit_metadata_state(&mut self) {
+        self.committed_metadata = self.committed_metadata_view();
+        self.committed_file_metadata = self.file_metadata.clone();
+    }
+
+    /// The subset of `metadata` a `META_SEG` written now would contain.
+    fn committed_metadata_view(&self) -> MetadataStore {
+        let mut view = self.metadata.clone();
+        view.retain_ids(|vector_id| self.metadata_id_is_committed(vector_id));
+        view
     }
 
     /// Restore the authoritative metadata snapshot (ADR-280 §1, §5).
@@ -3659,12 +3819,14 @@ impl RvfStore {
     /// snapshot and its delta chain rather than the number of commits ever
     /// made.
     ///
-    /// Corruption is tolerated exactly where it cannot change the answer: a
-    /// torn newest generation (a crash between appending the payload and
-    /// publishing the manifest that names it) falls back to the previous one,
-    /// and an unreadable superseded generation is skipped. A generation the
-    /// authoritative chain actually needs is never skipped -- the chain either
-    /// resolves completely or the artifact reports an error.
+    /// Corruption never bricks the artifact. Because every generation is
+    /// applied on top of the one before it, a chain damaged anywhere still has
+    /// a well-defined committed state: the newest snapshot plus the
+    /// consecutive valid deltas that follow it. Replay therefore serves that
+    /// longest complete prefix and reports what it had to drop through
+    /// [`Self::metadata_recovery`], rather than refusing to open because one
+    /// byte of one delta went bad. Only a chain with no readable snapshot at
+    /// all is an error, since then nothing committed can be reconstructed.
     fn restore_metadata(&mut self) -> Result<(), RvfError> {
         let meta_offsets: Vec<u64> = self
             .segment_dir
@@ -3676,14 +3838,17 @@ impl RvfStore {
             return Ok(());
         }
 
+        // Walk newest-first and stop at the first full snapshot: that is the
+        // newest one, and everything older than it is superseded history.
+        // Generations that cannot be read or decoded are collected as gaps.
         let mut decoded_bytes = 0usize;
-        let mut chain: Vec<MetadataSegment> = Vec::new();
+        let mut newest_first: Vec<(usize, MetadataSegment)> = Vec::new();
         let mut visited: HashSet<u64> = HashSet::new();
-        let mut required_base: Option<u64> = None;
-        let mut complete = false;
+        let mut damaged = 0u64;
+        let mut found_snapshot = false;
 
         for &offset in meta_offsets.iter().rev() {
-            if chain.len() >= rvf_types::metadata::MAX_META_DELTAS {
+            if newest_first.len() > rvf_types::metadata::MAX_META_DELTAS {
                 return Err(err(ErrorCode::MetadataReplayLimitExceeded));
             }
             let payload = {
@@ -3692,7 +3857,10 @@ impl RvfStore {
                     .ok()
                     .map(|(_, payload)| payload)
             };
-            let Some(payload) = payload else { continue };
+            let Some(payload) = payload else {
+                damaged += 1;
+                continue;
+            };
             decoded_bytes = decoded_bytes
                 .checked_add(payload.len())
                 .ok_or_else(|| err(ErrorCode::MetadataReplayLimitExceeded))?;
@@ -3700,48 +3868,57 @@ impl RvfStore {
                 return Err(err(ErrorCode::MetadataReplayLimitExceeded));
             }
             let Ok(segment) = MetadataSegment::decode(&payload) else {
+                damaged += 1;
                 continue;
             };
-            // Older generations that the authoritative chain does not name are
-            // superseded and contribute nothing.
-            if required_base.is_some_and(|base| base != segment.generation) {
+            // A repeated generation is manifest corruption; the newer copy is
+            // the one already recorded, so ignore the older duplicate.
+            if !visited.insert(segment.generation) {
+                damaged += 1;
                 continue;
             }
-            if !visited.insert(segment.generation) {
-                return Err(err(ErrorCode::MetadataAncestryInvalid));
-            }
-            let base_generation = segment.base_generation;
-            let full_snapshot = segment.full_snapshot;
-            chain.push(segment);
-            match base_generation {
-                Some(base) => required_base = Some(base),
-                None if full_snapshot => {
-                    complete = true;
-                    break;
-                }
-                None => return Err(err(ErrorCode::MetadataAncestryInvalid)),
+            found_snapshot = segment.full_snapshot;
+            newest_first.push((payload.len(), segment));
+            if found_snapshot {
+                break;
             }
         }
-        if chain.is_empty() {
-            // Every generation is unreadable, so no committed snapshot can be
-            // reconstructed and the artifact must not silently serve none.
+        if !found_snapshot {
+            // Without a readable snapshot there is no base to apply deltas to.
             return Err(err(ErrorCode::InvalidMetadata));
         }
-        if !complete {
-            return Err(err(ErrorCode::MetadataAncestryInvalid));
-        }
-        let latest = chain
-            .first()
-            .map(|segment| segment.generation)
+
+        // Apply forward from the snapshot, stopping at the first generation
+        // that is missing or does not name its predecessor as its base.
+        newest_first.reverse();
+        let mut chain = newest_first.into_iter();
+        let (snapshot_bytes, snapshot) = chain
+            .next()
             .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
-        let snapshot_generation = chain
+        let snapshot_generation = snapshot.generation;
+        let mut chain_bytes = snapshot_bytes;
+        let mut applied = vec![snapshot];
+        for (bytes, segment) in chain {
+            let expected = applied
+                .last()
+                .and_then(|previous: &MetadataSegment| previous.generation.checked_add(1));
+            if Some(segment.generation) != expected
+                || segment.base_generation != applied.last().map(|p| p.generation)
+            {
+                damaged += 1;
+                break;
+            }
+            chain_bytes = chain_bytes.saturating_add(bytes);
+            applied.push(segment);
+        }
+        let latest = applied
             .last()
             .map(|segment| segment.generation)
-            .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
-        chain.reverse();
+            .unwrap_or(snapshot_generation);
+
         let mut metadata = MetadataStore::new();
         let mut file_metadata = BTreeMap::new();
-        for segment in &chain {
+        for segment in &applied {
             if segment.full_snapshot {
                 metadata = MetadataStore::new();
                 file_metadata.clear();
@@ -3782,8 +3959,16 @@ impl RvfStore {
         }
         self.metadata = metadata;
         self.file_metadata = file_metadata;
-        self.metadata_generation = latest;
-        self.metadata_snapshot_generation = snapshot_generation;
+        self.metadata_chain = MetadataChainState {
+            generation: latest,
+            snapshot_generation,
+            chain_bytes,
+        };
+        self.dropped_metadata_generations = damaged;
+        // The chain on disk is exactly what was replayed, so it is also the
+        // base the next generation must be encoded against.
+        self.committed_metadata = self.metadata.clone();
+        self.committed_file_metadata = self.file_metadata.clone();
         Ok(())
     }
 }
