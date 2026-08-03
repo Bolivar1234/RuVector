@@ -469,8 +469,7 @@ fn cow_child_search_hits_reflect_overrides_and_tombstones() {
         );
         let two = hits.iter().find(|h| h.id == 2).unwrap();
         assert_eq!(
-            two.metadata,
-            None,
+            two.metadata, None,
             "a tombstoned record must surface as no metadata on the hit"
         );
     };
