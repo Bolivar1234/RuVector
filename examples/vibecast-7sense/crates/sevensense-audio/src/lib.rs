@@ -50,6 +50,7 @@
 
 pub mod application;
 pub mod domain;
+pub mod features;
 pub mod infrastructure;
 pub mod spectrogram;
 
@@ -58,6 +59,10 @@ pub use application::error::{AudioError, AudioResult};
 pub use application::services::AudioIngestionService;
 pub use domain::entities::{CallSegment, Recording, SignalQuality};
 pub use domain::repository::RecordingRepository;
+pub use features::{
+    AcousticFeatures, FeatureConfig, FeatureExtractor, FeatureSummary, ModulationFeatures,
+    SpectralFrame,
+};
 pub use spectrogram::{MelSpectrogram, SpectrogramConfig};
 
 /// Standard target sample rate for all processing (32 kHz).

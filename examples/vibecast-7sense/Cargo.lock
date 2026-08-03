@@ -3094,6 +3094,7 @@ dependencies = [
  "realfft",
  "rubato",
  "serde",
+ "serde_json",
  "sevensense-core",
  "symphonia",
  "tempfile",
