@@ -264,7 +264,7 @@ The workflow uses GitHub Environments for additional security:
 
 ### Rust Cache
 ```yaml
-uses: Swatinem/rust-cache@v2
+uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
 with:
   prefix-key: 'v1-rust'
   shared-key: 'validate|build-crates|wasm'
@@ -279,7 +279,7 @@ with:
 
 ### Node.js Cache
 ```yaml
-uses: actions/setup-node@v4
+uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
 with:
   cache: 'npm'
   cache-dependency-path: npm/package-lock.json
@@ -500,7 +500,7 @@ Add webhook to workflow:
 ```yaml
 - name: Notify Slack
   if: failure()
-  uses: slackapi/slack-github-action@v1
+  uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3
   with:
     webhook-url: ${{ secrets.SLACK_WEBHOOK }}
     payload: |
