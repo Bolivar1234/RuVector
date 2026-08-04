@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 5 (loop fire #4). Compatibility matrix v1 written (compatibility-matrix.json, ADR-291): runtime profiles wasm/os-isolation+wasm supported, microvm/rvm-native planned; packaging modes; selection order. Third agent `reader-scaffold` spawned for crates/rvforge-reader (Tauri v2, standalone workspace, static UI, stubbed inspect pending rvf-forge-core FFI). CLI agent reached dist/ build; crate agent at 12 modules + workspace-registered.
+- **Iteration**: 6 (loop fire #5). CI failure diagnosed+fixed: npm install resolved parent workspace, EBADPLATFORM on router-darwin-arm64; now --workspaces=false (verified clean-install 73 tests green locally). forge-core agent still testing (tests/pipeline.rs present, doc-test passes); reader-scaffold has full tree (src+ui+tests+build.rs).
 - **In flight**:
   - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
