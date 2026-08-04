@@ -9,6 +9,8 @@ on:
       - 'npm/packages/forge/**'
       - 'npm/packages/rvforge/**'
       - 'crates/rvf-forge-core/**'
+      - 'crates/rvforge-registry/**'
+      - 'crates/rvforge-reader/**'
       - '.github/workflows/rvforge-ci.yml'
   pull_request:
     branches:
@@ -17,6 +19,8 @@ on:
       - 'npm/packages/forge/**'
       - 'npm/packages/rvforge/**'
       - 'crates/rvf-forge-core/**'
+      - 'crates/rvforge-registry/**'
+      - 'crates/rvforge-reader/**'
       - '.github/workflows/rvforge-ci.yml'
   workflow_dispatch:
 
@@ -103,15 +107,62 @@ jobs:
         with:
           workspaces: '. -> target'
 
-      - name: Test
+      - name: Test rvf-forge-core
         if: steps.crate.outputs.present == 'true'
         run: cargo test -p rvf-forge-core
 
-      - name: Clippy
+      - name: Clippy rvf-forge-core
         if: steps.crate.outputs.present == 'true'
         run: cargo clippy -p rvf-forge-core -- -D warnings
 
-      - name: Format check
+      - name: Format check rvf-forge-core
         if: steps.crate.outputs.present == 'true'
         shell: bash
         run: cargo fmt -p rvf-forge-core -- --check
+
+      - name: Test rvforge-registry
+        if: steps.crate.outputs.present == 'true'
+        shell: bash
+        run: |
+          if [ -f crates/rvforge-registry/Cargo.toml ]; then
+            cargo test -p rvforge-registry
+            cargo clippy -p rvforge-registry -- -D warnings
+            cargo fmt -p rvforge-registry -- --check
+          fi
+
+  reader:
+    name: rvforge-reader (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check crate exists
+        id: reader
+        shell: bash
+        run: |
+          if [ -f crates/rvforge-reader/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.reader.outputs.present == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.reader.outputs.present == 'true'
+        with:
+          workspaces: 'crates/rvforge-reader -> crates/rvforge-reader/target'
+
+      # Standalone workspace: run inside the crate dir, not via -p from root
+      - name: Test rvforge-reader
+        if: steps.reader.outputs.present == 'true'
+        shell: bash
+        working-directory: crates/rvforge-reader
+        run: |
+          cargo test
+          cargo check
