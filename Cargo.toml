@@ -102,6 +102,7 @@ members = [
     "crates/cognitum-gate-kernel",
     "crates/cognitum-gate-tilezero",
     "crates/mcp-gate",
+    "crates/rvf-forge-core",
     "crates/mcp-brain",
     "crates/mcp-brain-server",
     "crates/ruvllm",

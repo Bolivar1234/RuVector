@@ -11455,6 +11455,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvf-forge-core"
+version = "2.3.0"
+dependencies = [
+ "ed25519-dalek",
+ "rvf-crypto",
+ "rvf-types",
+ "rvf-wire",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rvf-index"
 version = "0.2.0"
 
@@ -11505,6 +11519,10 @@ dependencies = [
 [[package]]
 name = "rvf-types"
 version = "0.2.1"
+dependencies = [
+ "ed25519-dalek",
+ "rand_core 0.6.4",
+]
 
 [[package]]
 name = "rvf-wire"
