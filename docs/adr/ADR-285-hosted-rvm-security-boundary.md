@@ -1,7 +1,8 @@
 # ADR-285: Hosted RVM Security Boundary
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — isolation-claim discipline implemented: compatibility-matrix.json encodes per-profile isolationClaim (os-sandbox+wasm never labeled bare-metal); Reader renders claims from the matrix. OS-level sandbox mechanisms themselves are cross-repo rvm-host scope.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-280, ADR-283, ADR-284, ADR-286
 - **Tags**: rvm, security, isolation, sandbox, desktop, wasm, claims

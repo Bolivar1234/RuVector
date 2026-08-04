@@ -1,7 +1,8 @@
 # ADR-288: Immutable Base RVF and Encrypted State Delta Lifecycle
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — partial implementation: Reader state capsules are encrypted (ChaCha20-Poly1305), per-install keyed, base-RVF lineage-bound with mismatch rejection; base immutability by construction. CompressedCheckpoint/WitnessDelta reconstruction and branch/merge/migrate are cross-repo rvm-state scope.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-283, ADR-284, ADR-285, ADR-286, ADR-287, ADR-289
 - **Tags**: rvf, state, deltas, checkpoints, lineage, encryption, updates, witness

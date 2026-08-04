@@ -2,6 +2,7 @@
 
 - **Status**: Proposed
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — entirely rvm-runtime scope (cross-repo, ruvnet/rvm): streaming validation replacing the 1MB limit, component model, quotas. This repo carries only the contract expectations (compatibility matrix wasm profile).
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-283, ADR-284, ADR-285, ADR-286, ADR-288, ADR-289
 - **Tags**: rvm, wasm, component-model, wit, sandboxing, determinism, quotas, witness

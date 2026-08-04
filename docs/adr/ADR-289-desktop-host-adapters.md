@@ -1,7 +1,8 @@
 # ADR-289: Desktop Host Adapters, Lifecycle CLI, and Embedding Surfaces
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — desktop surface implemented: Tauri Reader with FR004 runtime-selection ladder, verify/capability/runtime screens, Agent Dock. rvm-launch/rvm-ffi/rvm-node crates are cross-repo in ruvnet/rvm.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-283, ADR-284, ADR-285, ADR-286, ADR-287, ADR-288
 - **Tags**: rvm, host-adapters, ffi, tauri, node, cli, runtime-selection, isolation

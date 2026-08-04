@@ -2,6 +2,7 @@
 
 - **Status**: Proposed
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — output formats declared planned in compatibility-matrix.json rvmOutputs; generation blocked on rvm-boot integration — cross-repo.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-283, ADR-284, ADR-285, ADR-286, ADR-287, ADR-288, ADR-289, ADR-290, ADR-291, ADR-292
 - **Tags**: forge, rvm, appliance, boot, qemu, packaging, outputs, measured-boot

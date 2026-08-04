@@ -2,6 +2,7 @@
 
 - **Status**: Proposed
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — partial groundwork: CLI signing-key hygiene landed (no key material in logs, world-readable keys refused), witness receipts + provenance on every build/verify/publish. Hosted build service, HSM/KMS signing, and worker lifecycle remain unimplemented.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-283, ADR-284, ADR-285, ADR-286, ADR-287, ADR-288, ADR-289, ADR-291, ADR-292, ADR-293
 - **Tags**: forge, rvf, build-service, signing, notarization, provenance, isolation, security

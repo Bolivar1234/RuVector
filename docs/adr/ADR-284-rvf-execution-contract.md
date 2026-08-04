@@ -1,7 +1,8 @@
 # ADR-284: RVF Execution Contract for RVM Backends
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — contract side implemented on feat/rvf-forge: rvf-forge-core enforces verify-before-load, per-segment verification, unsigned-executable rejection, witness-per-verification (103 tests); Reader consumes it via path dep (113 tests). Runtime backends (rvm hosted/bare-metal/WASM execution) are cross-repo in ruvnet/rvm.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-280, ADR-283, ADR-285, ADR-286
 - **Tags**: rvf, rvm, execution, wasm, verification, witness, portability

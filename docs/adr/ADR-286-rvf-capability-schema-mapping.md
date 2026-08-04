@@ -1,7 +1,8 @@
 # ADR-286: RVF Capability Schema Mapping into `rvm-cap`
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — schema side implemented: default-deny CapabilityManifest in CLI pack + registry objects + Reader capability card (vague-scope rejection, manual-review triggers). rvm-cap table mapping is cross-repo in ruvnet/rvm.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-280, ADR-283, ADR-284, ADR-285
 - **Tags**: rvf, rvm, capabilities, security, default-deny, witness, policy
