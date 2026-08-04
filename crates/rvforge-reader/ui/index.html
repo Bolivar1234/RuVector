@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RVForge Reader</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="chrome">
+      <h1>RVForge Reader</h1>
+      <nav class="steps" aria-label="Progress">
+        <button class="step" data-goto="open" aria-current="true">1 · Open</button>
+        <button class="step" data-goto="capability" disabled>2 · Capabilities</button>
+        <button class="step" data-goto="runtime" disabled>3 · Runtime</button>
+      </nav>
+    </header>
+
+    <main>
+      <!-- Screen 1: open and verify -->
+      <section id="screen-open" class="screen active" aria-labelledby="open-title">
+        <h2 id="open-title">Open a package</h2>
+        <p class="lede">
+          Nothing is loaded or executed by opening a package. The reader reads
+          identity and signature status first.
+        </p>
+
+        <div class="row">
+          <button id="pick" class="primary">Choose .rvf file…</button>
+          <input id="path" type="text" spellcheck="false"
+                 placeholder="…or type a path to an .rvf file" />
+          <button id="inspect">Inspect</button>
+        </div>
+
+        <div id="open-result" class="panel" hidden>
+          <dl class="facts">
+            <dt>File</dt><dd id="f-name">—</dd>
+            <dt>Size</dt><dd id="f-size">—</dd>
+            <dt>Identity</dt><dd id="f-identity">—</dd>
+            <dt>Publisher</dt><dd id="f-publisher">—</dd>
+            <dt>Signature</dt><dd id="f-signature">—</dd>
+            <dt>Verification</dt><dd id="f-verification">—</dd>
+          </dl>
+          <ul id="f-notes" class="notes"></ul>
+          <div class="row end">
+            <button id="to-capability" class="primary">Review capabilities</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Screen 2: the P6 capability contract -->
+      <section id="screen-capability" class="screen" aria-labelledby="cap-title">
+        <h2 id="cap-title">Capability contract</h2>
+        <p class="lede">
+          This is the exact contract for <span id="cap-subject" class="mono">—</span>.
+          Anything not listed under “requests” is denied.
+        </p>
+
+        <div class="contract">
+          <div class="card requests">
+            <h3>This agent requests</h3>
+            <ul id="cap-requests"><li class="empty">Nothing is granted.</li></ul>
+          </div>
+          <div class="card denials">
+            <h3>This agent cannot</h3>
+            <ul id="cap-cannot"></ul>
+          </div>
+        </div>
+
+        <ul id="cap-notes" class="notes"></ul>
+
+        <div class="row end">
+          <button id="cancel-install">Cancel</button>
+          <button id="customize">Customize permissions</button>
+          <button id="install" class="primary">Install</button>
+        </div>
+      </section>
+
+      <!-- Screen 3: runtime status and emergency controls -->
+      <section id="screen-runtime" class="screen" aria-labelledby="rt-title">
+        <h2 id="rt-title">Runtime</h2>
+        <p class="lede">
+          The reader picks the strongest compatible runtime. The order comes
+          from the signed compatibility matrix and cannot be changed here.
+        </p>
+
+        <dl class="facts">
+          <dt>Selected runtime</dt><dd id="rt-profile">—</dd>
+          <dt>Isolation class</dt><dd id="rt-isolation">—</dd>
+          <dt>Mechanisms engaged</dt><dd id="rt-mechanisms">—</dd>
+          <dt>Selection order</dt><dd id="rt-order" class="mono">—</dd>
+          <dt>Order source</dt><dd id="rt-policy">—</dd>
+          <dt>Witness status</dt><dd id="rt-witness">—</dd>
+        </dl>
+
+        <h3>Why this runtime</h3>
+        <table class="eval">
+          <thead><tr><th>Profile</th><th>Eligible</th><th>Reason</th></tr></thead>
+          <tbody id="rt-eval"></tbody>
+        </table>
+
+        <h3>Emergency controls</h3>
+        <p class="hint">
+          Disabled until an agent is actually running under
+          <code>rvm-ffi</code> (ADR-289 §4).
+        </p>
+        <div class="row controls">
+          <button disabled>Pause</button>
+          <button disabled>Terminate</button>
+          <button disabled>Disconnect network</button>
+          <button disabled>Revoke capabilities</button>
+          <button disabled>Rollback state</button>
+        </div>
+      </section>
+    </main>
+
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <footer class="chrome">
+      <span id="stub-banner" class="banner">
+        Scaffold build — inspection and verification are stubs. No package is executed.
+      </span>
+    </footer>
+
+    <script src="main.js"></script>
+  </body>
+</html>
