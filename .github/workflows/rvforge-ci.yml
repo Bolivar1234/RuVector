@@ -56,7 +56,10 @@ jobs:
         if: steps.pkg.outputs.dir != ''
         shell: bash
         working-directory: ${{ steps.pkg.outputs.dir }}
-        run: npm install
+        # --workspaces=false: the package sits inside the npm/ workspace root;
+        # a plain install resolves the whole workspace and fails EBADPLATFORM
+        # on platform-pinned sibling packages (e.g. router-darwin-arm64).
+        run: npm install --workspaces=false
 
       - name: Typecheck + build
         if: steps.pkg.outputs.dir != ''
