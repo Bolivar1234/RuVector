@@ -135,6 +135,51 @@ impl ObjectStore {
         fs::read(&path).map_err(|e| RegistryError::io(&path, &e))
     }
 
+    /// Every object id present in the store, in no particular order.
+    ///
+    /// An auditor has to be able to enumerate what is on disk: the log names
+    /// only what was published, so an object written out of band is invisible
+    /// to every other reader on this type.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Io`] on read failure, [`RegistryError::InvalidObject`]
+    /// if a file sits at a path that is not a content address.
+    pub fn ids(&self) -> Result<Vec<String>> {
+        if !self.root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut ids = Vec::new();
+        for shard in read_dir_sorted(&self.root)? {
+            if !shard.is_dir() {
+                continue;
+            }
+            for file in read_dir_sorted(&shard)? {
+                let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let Some(hex) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                let id = format!("{}{hex}", crate::objects::DIGEST_PREFIX);
+                let shard_name = shard
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                digest_hex("object file name", &id)?;
+                if hex[..2] != *shard_name {
+                    return Err(RegistryError::invalid(format!(
+                        "{} is filed under shard {shard_name:?}, but its digest starts {:?}",
+                        file.display(),
+                        &hex[..2]
+                    )));
+                }
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
     fn read_at<T: RegistryObject>(&self, path: &Path, id: &str) -> Result<T> {
         let bytes = fs::read(path).map_err(|e| RegistryError::io(path, &e))?;
         let object: T = serde_json::from_slice(&bytes).map_err(|e| {
@@ -154,6 +199,16 @@ impl ObjectStore {
         }
         Ok(object)
     }
+}
+
+/// Directory entries in name order, so enumeration is reproducible.
+fn read_dir_sorted(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| RegistryError::io(dir, &e))? {
+        paths.push(entry.map_err(|e| RegistryError::io(dir, &e))?.path());
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 /// Existing signatures first, then any new ones not already present.
@@ -265,6 +320,41 @@ mod tests {
         assert_eq!(second.signatures.len(), 2);
         let stored: CapabilityManifest = store.get(&second.manifest_id).unwrap();
         assert_eq!(stored.signatures.len(), 2);
+    }
+
+    #[test]
+    fn ids_enumerates_what_was_put_and_nothing_else() {
+        let (_dir, store) = store();
+        assert!(store.ids().unwrap().is_empty());
+
+        let manifest = store.put(testkit::capability_manifest()).unwrap();
+        let mut other = testkit::capability_manifest();
+        other.denials.push("network".into());
+        let other = store.put(other).unwrap();
+
+        let mut ids = store.ids().unwrap();
+        ids.sort();
+        let mut want = vec![manifest.manifest_id, other.manifest_id];
+        want.sort();
+        assert_eq!(ids, want);
+    }
+
+    #[test]
+    fn ids_rejects_an_object_filed_under_the_wrong_shard() {
+        let (dir, store) = store();
+        let put = store.put(testkit::capability_manifest()).unwrap();
+        let hex = digest_hex("id", &put.manifest_id).unwrap();
+        let misfiled = dir.path().join("objects/sha256/ff");
+        fs::create_dir_all(&misfiled).unwrap();
+        fs::rename(
+            store.path_for(&put.manifest_id).unwrap(),
+            misfiled.join(format!("{hex}.json")),
+        )
+        .unwrap();
+        assert_eq!(
+            store.ids().unwrap_err().code(),
+            crate::RegistryErrorCode::InvalidObject
+        );
     }
 
     #[test]

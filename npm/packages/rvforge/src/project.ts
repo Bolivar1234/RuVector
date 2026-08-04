@@ -204,6 +204,12 @@ export function defaultProject(overrides: Partial<RvforgeProject> = {}): Rvforge
  * rotated without the publisher becoming a different publisher — and what lets
  * `publish` reject a release signed by a key that identity has never
  * registered.
+ *
+ * This is **not** the `publisherId` a release names. That is the content
+ * address of the `PublisherRecord`, per the model's identity rule, and it
+ * changes with the record's key set. This value is the key the record's
+ * pointer file is filed under, which is how `publish` finds the record again
+ * after a rotation.
  */
 export const publisherIdFor = (publisher: ProjectPublisher): string =>
   `sha256:${sha256String(

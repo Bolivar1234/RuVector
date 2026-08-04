@@ -233,10 +233,13 @@ export {
   PUBLISHER_FILENAME,
   RELEASES_FILENAME,
   TREE_HEAD_FILE,
+  WITNESS_DIRNAME,
   appendLogEntry,
   appendRelease,
+  appendWitnessReceipt,
   digestOf,
   getObject,
+  inclusionProof,
   initRegistry,
   objectId,
   objectPath,
@@ -246,8 +249,12 @@ export {
   readLog,
   readReleaseIndex,
   readTreeHead,
+  readWitnessChain,
+  verifyInclusionProof,
   verifyLog,
+  witnessIndexPath,
   type CapabilityManifest,
+  type InclusionProof,
   type ObjectSignature,
   type PublisherRecord,
   type Release,
@@ -256,6 +263,15 @@ export {
   type TransparencyLogEntry,
   type TreeHead,
 } from './registry';
+
+export {
+  inclusionPath,
+  leafHash,
+  nodeHash,
+  root as merkleRoot,
+  verifyInclusion,
+  type Hash,
+} from './merkle';
 
 export {
   assertNoFailures,

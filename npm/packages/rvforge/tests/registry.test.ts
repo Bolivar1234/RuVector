@@ -16,6 +16,7 @@ import {
   appendRelease,
   digestOf,
   getObject,
+  inclusionProof,
   initRegistry,
   objectId,
   objectPath,
@@ -23,6 +24,7 @@ import {
   readLog,
   readReleaseIndex,
   readTreeHead,
+  verifyInclusionProof,
   verifyLog,
   type Release,
 } from '../src/registry';
@@ -129,7 +131,6 @@ describe('release lineage', () => {
         releaseId: first.releaseId,
         version: '1.0.0',
         predecessor: null,
-        rvfIdentity: first.rvfIdentity,
         publishedAt: first.publishedAt,
       },
     ]);
@@ -170,20 +171,47 @@ describe('transparency log', () => {
   const entry = (object: string, timestamp: string) =>
     appendLogEntry(root, { object, objectType: 'release', timestamp });
 
-  it('numbers entries from zero and folds each head into the next', async () => {
+  it('numbers entries from zero and advances the tree head', async () => {
     const first = await entry(`sha256:${'a'.repeat(64)}`, '2026-08-03T00:00:00.000Z');
     const second = await entry(`sha256:${'b'.repeat(64)}`, '2026-08-04T00:00:00.000Z');
 
     expect(first.entry.index).toBe(0);
     expect(second.entry.index).toBe(1);
     expect(second.entry.treeHead).not.toBe(first.entry.treeHead);
-    expect((await readTreeHead(root))?.treeHead).toBe(second.head.treeHead);
-    expect((await readTreeHead(root))?.size).toBe(2);
+    expect((await readTreeHead(root))?.rootHash).toBe(second.head.rootHash);
+    expect((await readTreeHead(root))?.treeSize).toBe(2);
+    // Unsigned, but the slot is present: this registry holds no registry key.
+    expect((await readTreeHead(root))?.signatures).toEqual([]);
   });
 
-  it('names its algorithm, so no one expects an inclusion proof it cannot give', async () => {
-    await entry(`sha256:${'a'.repeat(64)}`, '2026-08-03T00:00:00.000Z');
-    expect((await readTreeHead(root))?.algorithm).toBe('sha256-hash-chain');
+  it('proves inclusion of every entry against the head', async () => {
+    for (const c of ['a', 'b', 'c', 'd', 'e']) {
+      await entry(`sha256:${c.repeat(64)}`, '2026-08-03T00:00:00.000Z');
+    }
+    const entries = await readLog(root);
+    const head = (await readTreeHead(root))?.rootHash as string;
+
+    for (const logged of entries) {
+      const proof = inclusionProof(entries, logged.object);
+      expect(proof).not.toBeNull();
+      expect(proof?.treeSize).toBe(5);
+      expect(verifyInclusionProof(proof as NonNullable<typeof proof>, head)).toBe(true);
+    }
+  });
+
+  it('refuses a proof for the wrong position or an unlogged object', async () => {
+    for (const c of ['a', 'b', 'c']) {
+      await entry(`sha256:${c.repeat(64)}`, '2026-08-03T00:00:00.000Z');
+    }
+    const entries = await readLog(root);
+    const head = (await readTreeHead(root))?.rootHash as string;
+
+    expect(inclusionProof(entries, `sha256:${'9'.repeat(64)}`)).toBeNull();
+    const proof = inclusionProof(entries, entries[0].object) as NonNullable<
+      ReturnType<typeof inclusionProof>
+    >;
+    expect(verifyInclusionProof({ ...proof, leafIndex: 2 }, head)).toBe(false);
+    expect(verifyInclusionProof(proof, `sha256:${'0'.repeat(64)}`)).toBe(false);
   });
 
   it('verifies a log it wrote', async () => {

@@ -11,17 +11,20 @@ import {
   RELEASES_FILENAME,
   digestOf,
   getObject,
+  inclusionProof,
   objectPath,
   packagePath,
   publisherPath,
   readLog,
   readReleaseIndex,
   readTreeHead,
+  readWitnessChain,
+  verifyInclusionProof,
   verifyLog,
   type PublisherRecord,
   type Release,
 } from '../src/registry';
-import { readReceipts, verifyReceiptChain } from '../src/witness';
+import { verifyReceiptChain, type WitnessReceipt } from '../src/witness';
 import { buildRvfFixture } from './fixtures/rvf-fixture';
 import { fixtureProject } from './fixtures/project-fixture';
 
@@ -129,14 +132,30 @@ describe('publish — round trip', () => {
     const key = await loadPublisherKey(keyFile);
 
     expect(result.publisherRecord.created).toBe(true);
-    expect(result.publisherId).toBe(publisherIdFor(fixtureProject().publisher));
+    expect(result.publisherIdentity).toBe(publisherIdFor(fixtureProject().publisher));
 
     const record = await getObject<PublisherRecord>(dir, result.publisherRecord.id);
-    expect(record?.publisherId).toBe(result.publisherId);
     expect(record?.publicKeys).toEqual([
       expect.objectContaining({ keyId: key.keyId, alg: 'ed25519', revokedAt: null }),
     ]);
-    expect(await exists(publisherPath(dir, result.publisherId))).toBe(true);
+    // The pointer is filed under the stable identity; the record names its own
+    // content address, which is what the release resolves.
+    expect(await exists(publisherPath(dir, result.publisherIdentity))).toBe(true);
+    expect(result.publisherId).toBe(result.publisherRecord.id);
+    expect(record?.publisherId).toBe(result.publisherRecord.id);
+    expect(result.release.package.publisherId).toBe(result.publisherRecord.id);
+  });
+
+  it('names a publisherId that resolves to the stored record', async () => {
+    const dir = registry('publisher-resolves');
+    const result = await publish(dir);
+
+    // The rule the Rust registry enforces at publish time: a release's
+    // package.publisherId must be an object address, not a separate identity.
+    const record = await getObject<PublisherRecord>(dir, result.release.package.publisherId);
+    expect(record).not.toBeNull();
+    expect(record?.type).toBe('publisher');
+    expect(result.publisherId).not.toBe(result.publisherIdentity);
   });
 
   it('appends to the package release index', async () => {
@@ -155,7 +174,6 @@ describe('publish — round trip', () => {
         releaseId: result.release.releaseId,
         version: '1.0.0',
         predecessor: null,
-        rvfIdentity: result.release.rvfIdentity,
         publishedAt: '2026-08-03T00:00:00.000Z',
       },
     ]);
@@ -173,9 +191,14 @@ describe('publish — round trip', () => {
     expect(verifyLog(entries).ok).toBe(true);
 
     const head = await readTreeHead(dir);
-    expect(head?.size).toBe(2);
-    expect(head?.treeHead).toBe(entries[1].treeHead);
-    expect(head?.algorithm).toBe('sha256-hash-chain');
+    expect(head?.treeSize).toBe(2);
+    expect(head?.rootHash).toBe(entries[1].treeHead);
+
+    const proof = inclusionProof(entries, result.release.releaseId);
+    expect(proof).not.toBeNull();
+    expect(verifyInclusionProof(proof as NonNullable<typeof proof>, head?.rootHash as string)).toBe(
+      true,
+    );
   });
 
   it('detects a tampered log entry', async () => {
@@ -187,18 +210,42 @@ describe('publish — round trip', () => {
     expect(verifyLog(entries).problems.map((p) => p.reason)).toContain('entry-hash');
   });
 
-  it('emits a witness receipt that chains', async () => {
+  it('emits a witness receipt, stored and indexed under its subject', async () => {
     const dir = registry('receipt');
     const result = await publish(dir);
 
     expect(result.receipt.event).toBe('publish');
     expect(result.receipt.outcome).toBe('pass');
     expect(result.receipt.subject).toBe(result.release.rvfIdentity);
-    expect(result.receipt.evidence.releaseId).toBe(result.release.releaseId);
     expect(result.receipt.prevReceipt).toBeNull();
+    // Evidence is one `details` string — the shape registry-model.md gives it.
+    expect(Object.keys(result.receipt.evidence)).toEqual(['details']);
+    expect(result.receipt.evidence.details).toContain(result.release.releaseId);
 
-    expect(verifyReceiptChain(await readReceipts(dir)).ok).toBe(true);
     expect(await getObject(dir, result.receipt.receiptId)).not.toBeNull();
+    expect(await readWitnessChain(dir, result.release.rvfIdentity)).toEqual([
+      result.receipt.receiptId,
+    ]);
+  });
+
+  it('chains a second receipt for the same subject onto the first', async () => {
+    const dir = registry('receipt-chain');
+    const first = await publish(dir);
+    const second = await publish(dir, fixtureProject({ version: '1.1.0' }), {
+      publishedAt: '2026-08-04T00:00:00.000Z',
+    });
+
+    const subject = first.release.rvfIdentity;
+    expect(second.receipt.subject).toBe(subject);
+    expect(second.receipt.prevReceipt).toBe(first.receipt.receiptId);
+
+    const chain = await readWitnessChain(dir, subject);
+    expect(chain).toEqual([first.receipt.receiptId, second.receipt.receiptId]);
+
+    const receipts = await Promise.all(
+      chain.map((id) => getObject<WitnessReceipt>(dir, id) as Promise<WitnessReceipt>),
+    );
+    expect(verifyReceiptChain(receipts).ok).toBe(true);
   });
 
   it('prints the P4 summary without inventing an evaluation score', async () => {

@@ -16,20 +16,24 @@
  * itself, since a field cannot contain its own hash. That exclusion is the
  * convention `src/witness.ts` already established for `receiptId`.
  *
- * **Deviations from registry-model.md**, to be reconciled against the Rust
- * `crates/rvforge-registry` by the parity test:
+ * The transparency log is an RFC 6962 Merkle tree (see `./merkle`), so a
+ * Reader can be handed an inclusion proof for one release instead of the whole
+ * log, and `log/tree-head.json` is the head that proof reconstructs.
  *
- * - The tree head is a **hash chain**, not a Merkle tree: `treeHead(n) =
- *   sha256(treeHead(n-1) || entryHash(n))`. That is append-only and tamper-
- *   evident, but it yields no inclusion proof for an individual entry, so a
- *   Reader cannot verify inclusion without the whole log. The Rust crate owns
- *   the Merkle implementation.
- * - `packages/<publisher>/publisher.json` and `receipts.jsonl` are additions;
- *   the documented layout names neither, and the model gives no way to resolve
- *   a `publisherId` back to its record.
+ * **Additions to registry-model.md**, shared with `crates/rvforge-registry`:
+ *
+ * - `packages/<publisher>/publisher.json` is a pointer from the publisher's
+ *   *stable* identity — see `publisherIdFor` — to the content address of its
+ *   current record. The documented layout names no such file, and the model
+ *   gives no other way to find a record whose address changes whenever its key
+ *   set does.
+ * - `witness/<sha256(subject)>.jsonl` indexes each subject's receipt chain, as
+ *   the Rust registry does. The model defines the receipt and its `prevReceipt`
+ *   link but no index, and without one the previous receipt for a subject could
+ *   only be found by rescanning the object store.
  * - The tree head is unsigned. The model calls it "the current signed tree
  *   head", but signing it is the registry's act, and this registry has no
- *   registry key — only the publisher's.
+ *   registry key — only the publisher's. The field is present and empty.
  */
 
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -38,12 +42,15 @@ import { dirname, join } from 'node:path';
 
 import { ForgeError, ForgeErrorCode } from './errors';
 import { canonicalJson, canonicalJsonFile, sha256String } from './hash';
+import { inclusionPath, leafHash, root as merkleRoot, verifyInclusion, type Hash } from './merkle';
+import { createWitnessReceipt, type CreateReceiptInput, type WitnessReceipt } from './witness';
 
 export const DEFAULT_REGISTRY_DIR = join(homedir(), '.rvforge', 'registry');
 export const LOG_ENTRIES_FILE = join('log', 'entries.jsonl');
 export const TREE_HEAD_FILE = join('log', 'tree-head.json');
 export const RELEASES_FILENAME = 'releases.jsonl';
 export const PUBLISHER_FILENAME = 'publisher.json';
+export const WITNESS_DIRNAME = 'witness';
 
 export interface ObjectSignature {
   keyId: string;
@@ -117,12 +124,24 @@ export interface TransparencyLogEntry {
 export interface TreeHead {
   schemaVersion: 1;
   type: 'tree-head';
-  /** Number of entries the head commits to. */
-  size: number;
-  treeHead: string;
-  /** Named so a Reader is not misled into expecting an inclusion proof. */
-  algorithm: 'sha256-hash-chain';
-  updatedAt: string;
+  /** Number of leaves the root covers. */
+  treeSize: number;
+  /** The Merkle tree head, as `sha256:<hex>`. */
+  rootHash: string;
+  /** RFC 3339 instant of the append that produced this head. */
+  timestamp: string;
+  /** Registry signatures over {@link TreeHead.rootHash}; this registry has none. */
+  signatures: ObjectSignature[];
+}
+
+/** An inclusion proof for one log entry against a tree head. */
+export interface InclusionProof {
+  leafIndex: number;
+  treeSize: number;
+  leafHash: string;
+  /** The audit path, root-ward, each as `sha256:<hex>`. */
+  path: string[];
+  rootHash: string;
 }
 
 /** Any object the registry content-addresses. */
@@ -164,7 +183,12 @@ export const publisherPath = (registryDir: string, publisherId: string): string 
 
 /** Create the directory skeleton. Idempotent. */
 export async function initRegistry(registryDir: string): Promise<void> {
-  for (const dir of [join(registryDir, 'objects', 'sha256'), join(registryDir, 'log')]) {
+  for (const dir of [
+    join(registryDir, 'objects', 'sha256'),
+    join(registryDir, 'packages'),
+    join(registryDir, 'log'),
+    join(registryDir, WITNESS_DIRNAME),
+  ]) {
     await mkdir(dir, { recursive: true });
   }
 }
@@ -209,12 +233,17 @@ export async function getObject<T>(registryDir: string, id: string): Promise<T |
   }
 }
 
-/** One line of `releases.jsonl`: the index, not the release itself. */
+/**
+ * One line of `releases.jsonl`: the index, not the release itself.
+ *
+ * Exactly these four fields — the Rust registry reads the same file with
+ * `deny_unknown_fields`, so an extra convenience column here would make the
+ * index unreadable to the other half of the pipeline.
+ */
 export interface ReleaseIndexEntry {
   releaseId: string;
   version: string;
   predecessor: string | null;
-  rvfIdentity: string;
   publishedAt: string;
 }
 
@@ -273,7 +302,6 @@ export async function appendRelease(
     releaseId: release.releaseId,
     version: release.version,
     predecessor: release.predecessor,
-    rvfIdentity: release.rvfIdentity,
     publishedAt: release.publishedAt,
   };
   await mkdir(dir, { recursive: true });
@@ -305,11 +333,38 @@ export async function readTreeHead(registryDir: string): Promise<TreeHead | null
 }
 
 /**
+ * The Merkle leaf hash for a log entry's position and payload.
+ *
+ * `entryHash` and `treeHead` are excluded because both are derived from the
+ * leaf; including them would make the hash self-referential.
+ */
+const entryLeafHash = (entry: {
+  index: number;
+  object: string;
+  objectType: TransparencyLogEntry['objectType'];
+  timestamp: string;
+}): Hash =>
+  leafHash(
+    Buffer.from(
+      canonicalJson({
+        index: entry.index,
+        object: entry.object,
+        objectType: entry.objectType,
+        timestamp: entry.timestamp,
+      }),
+      'utf8',
+    ),
+  );
+
+const asDigest = (hash: Hash): string => `sha256:${hash.toString('hex')}`;
+const fromDigest = (digest: string): Hash => Buffer.from(digestOf(digest), 'hex');
+
+/**
  * Append one entry to the transparency log and advance the tree head.
  *
- * `entryHash` commits to the entry's position and payload; the head folds it
- * into the previous head, so removing or reordering any entry changes every
- * head after it.
+ * The head is the Merkle root over every leaf so far, so removing, reordering,
+ * or editing any entry changes it — and any single entry can still be proved
+ * against it without the rest of the log ({@link inclusionProof}).
  */
 export async function appendLogEntry(
   registryDir: string,
@@ -317,19 +372,18 @@ export async function appendLogEntry(
 ): Promise<{ entry: TransparencyLogEntry; head: TreeHead }> {
   const existing = await readLog(registryDir);
   const index = existing.length;
-  const previousHead = index === 0 ? '' : existing[index - 1].treeHead;
 
-  const entryHash = `sha256:${sha256String(
-    canonicalJson({ index, object: input.object, objectType: input.objectType, timestamp: input.timestamp }),
-  )}`;
-  const treeHead = `sha256:${sha256String(`${previousHead}${entryHash}`)}`;
+  const leaves = existing.map((e) => fromDigest(e.entryHash));
+  const leaf = entryLeafHash({ index, ...input });
+  leaves.push(leaf);
+  const rootHash = asDigest(merkleRoot(leaves));
 
   const entry: TransparencyLogEntry = {
     schemaVersion: 1,
     type: 'log-entry',
     index,
-    entryHash,
-    treeHead,
+    entryHash: asDigest(leaf),
+    treeHead: rootHash,
     object: input.object,
     objectType: input.objectType,
     timestamp: input.timestamp,
@@ -337,10 +391,10 @@ export async function appendLogEntry(
   const head: TreeHead = {
     schemaVersion: 1,
     type: 'tree-head',
-    size: index + 1,
-    treeHead,
-    algorithm: 'sha256-hash-chain',
-    updatedAt: input.timestamp,
+    treeSize: leaves.length,
+    rootHash,
+    timestamp: input.timestamp,
+    signatures: [],
   };
 
   await mkdir(join(registryDir, 'log'), { recursive: true });
@@ -349,7 +403,7 @@ export async function appendLogEntry(
   return { entry, head };
 }
 
-/** Recompute the chain and report the first entry that does not match. */
+/** Recompute every leaf and head, and report the first entry that disagrees. */
 export function verifyLog(entries: readonly TransparencyLogEntry[]): {
   ok: boolean;
   size: number;
@@ -357,23 +411,16 @@ export function verifyLog(entries: readonly TransparencyLogEntry[]): {
   problems: Array<{ index: number; reason: 'entry-hash' | 'tree-head' | 'index' }>;
 } {
   const problems: Array<{ index: number; reason: 'entry-hash' | 'tree-head' | 'index' }> = [];
-  let previousHead = '';
+  const leaves: Hash[] = [];
 
   entries.forEach((entry, position) => {
     if (entry.index !== position) problems.push({ index: position, reason: 'index' });
-    const entryHash = `sha256:${sha256String(
-      canonicalJson({
-        index: entry.index,
-        object: entry.object,
-        objectType: entry.objectType,
-        timestamp: entry.timestamp,
-      }),
-    )}`;
-    if (entryHash !== entry.entryHash) problems.push({ index: position, reason: 'entry-hash' });
-    if (`sha256:${sha256String(`${previousHead}${entryHash}`)}` !== entry.treeHead) {
+    const leaf = entryLeafHash(entry);
+    if (asDigest(leaf) !== entry.entryHash) problems.push({ index: position, reason: 'entry-hash' });
+    leaves.push(leaf);
+    if (asDigest(merkleRoot(leaves)) !== entry.treeHead) {
       problems.push({ index: position, reason: 'tree-head' });
     }
-    previousHead = entry.treeHead;
   });
 
   return {
@@ -382,4 +429,91 @@ export function verifyLog(entries: readonly TransparencyLogEntry[]): {
     treeHead: entries.length === 0 ? null : entries[entries.length - 1].treeHead,
     problems,
   };
+}
+
+/**
+ * An inclusion proof for `object` against the head the log currently produces.
+ *
+ * Returns null when the object was never logged — a release absent from the log
+ * is unpublished, and there is nothing to prove.
+ */
+export function inclusionProof(
+  entries: readonly TransparencyLogEntry[],
+  object: string,
+): InclusionProof | null {
+  const entry = entries.find((e) => e.object === object);
+  if (!entry) return null;
+
+  const leaves = entries.map(entryLeafHash);
+  const path = inclusionPath(entry.index, leaves);
+  return {
+    leafIndex: entry.index,
+    treeSize: leaves.length,
+    leafHash: asDigest(leaves[entry.index]),
+    path: path.map(asDigest),
+    rootHash: asDigest(merkleRoot(leaves)),
+  };
+}
+
+/** Recompute the root from a proof's leaf and path, against a trusted head. */
+export function verifyInclusionProof(proof: InclusionProof, expectedRoot: string): boolean {
+  if (proof.rootHash !== expectedRoot) return false;
+  try {
+    return verifyInclusion(
+      fromDigest(proof.leafHash),
+      proof.leafIndex,
+      proof.treeSize,
+      proof.path.map(fromDigest),
+      fromDigest(expectedRoot),
+    );
+  } catch {
+    // A proof that cannot be parsed is a proof that does not verify.
+    return false;
+  }
+}
+
+/**
+ * The receipt-chain index for one subject: `witness/<sha256(subject)>.jsonl`.
+ *
+ * A subject may be a content address or a `keyId`, so it is hashed rather than
+ * used directly — one naming rule, no escaping, no collision with a path
+ * separator.
+ */
+export const witnessIndexPath = (registryDir: string, subject: string): string =>
+  join(registryDir, WITNESS_DIRNAME, `${sha256String(subject)}.jsonl`);
+
+/** Receipt ids recorded for `subject`, oldest first. */
+export async function readWitnessChain(registryDir: string, subject: string): Promise<string[]> {
+  try {
+    return (await readFile(witnessIndexPath(registryDir, subject), 'utf8'))
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Store a receipt at its content address and chain it onto its subject's index.
+ *
+ * The previous receipt for the subject comes from the index rather than from a
+ * scan of the object store, which is the whole reason the index exists.
+ */
+export async function appendWitnessReceipt(
+  registryDir: string,
+  input: CreateReceiptInput,
+): Promise<WitnessReceipt> {
+  const subject = input.subject.startsWith('sha256:') ? input.subject : `sha256:${input.subject}`;
+  const chain = await readWitnessChain(registryDir, subject);
+  const receipt = createWitnessReceipt({
+    ...input,
+    prevReceipt: input.prevReceipt ?? (chain.length === 0 ? null : chain[chain.length - 1]),
+  });
+
+  await putObject(registryDir, receipt.receiptId, receipt);
+  const path = witnessIndexPath(registryDir, subject);
+  await mkdir(dirname(path), { recursive: true });
+  await appendFile(path, `${receipt.receiptId}\n`, 'utf8');
+  return receipt;
 }

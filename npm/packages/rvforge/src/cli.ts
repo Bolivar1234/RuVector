@@ -316,7 +316,7 @@ async function cmdPublish(args: ParsedArgs, reporter: Reporter): Promise<number>
       `  predecessor  ${result.predecessor ?? 'none (first release)'}`,
       `  signed by    ${result.keyId}`,
       `  objects      ${result.objects.length} written`,
-      `  log entry    #${result.logEntry.index}, tree head ${result.treeHead.treeHead}`,
+      `  log entry    #${result.logEntry.index}, tree head ${result.treeHead.rootHash}`,
       `  witness      ${result.receipt.receiptId}`,
     ],
   );

@@ -300,6 +300,95 @@ impl Registry {
             .collect()
     }
 
+    /// Every package the index directory holds, as `(publisherId, name)` pairs
+    /// in path order.
+    ///
+    /// The layout puts the publisher's 64-hex digest above the package name, so
+    /// an auditor who wants to walk every release index has no other way in:
+    /// [`Registry::releases_for`] needs both halves up front.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Io`] on read failure, [`RegistryError::InvalidObject`]
+    /// if a directory name is not a digest or not a safe package component.
+    pub fn packages(&self) -> Result<Vec<(String, String)>> {
+        let root = self.root.join(PACKAGES_DIR);
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut packages = Vec::new();
+        for publisher_dir in read_dir_sorted(&root)? {
+            if !publisher_dir.is_dir() {
+                continue;
+            }
+            let hex = dir_name(&publisher_dir)?;
+            let publisher_id = format!("{}{hex}", crate::objects::DIGEST_PREFIX);
+            digest_hex("packages/<publisher>", &publisher_id)?;
+            for package_dir in read_dir_sorted(&publisher_dir)? {
+                if !package_dir.is_dir() {
+                    continue;
+                }
+                let name = dir_name(&package_dir)?;
+                safe_component(name)?;
+                if package_dir.join(RELEASES_FILE).exists() {
+                    packages.push((publisher_id.clone(), name.to_string()));
+                }
+            }
+        }
+        Ok(packages)
+    }
+
+    /// Every subject with a witness chain, in path order.
+    ///
+    /// The index filename is `sha256(subject)`, which cannot be inverted, so
+    /// the subject is recovered from the first receipt in each chain — and the
+    /// filename is then checked against it, which is what catches a chain file
+    /// moved or renamed on disk.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Io`] on read failure, [`RegistryError::Log`] if a chain
+    /// file is empty or its name does not match the subject it holds,
+    /// otherwise as [`ObjectStore::get`].
+    pub fn witness_subjects(&self) -> Result<Vec<String>> {
+        let root = self.root.join(WITNESS_DIR);
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut subjects = Vec::new();
+        for file in read_dir_sorted(&root)? {
+            let Some(stem) = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".jsonl"))
+            else {
+                continue;
+            };
+            let text = fs::read_to_string(&file).map_err(|e| RegistryError::io(&file, &e))?;
+            let first =
+                text.lines()
+                    .find(|l| !l.trim().is_empty())
+                    .ok_or_else(|| RegistryError::Log {
+                        detail: format!("witness chain {} is empty", file.display()),
+                    })?;
+            let receipt: crate::objects::WitnessReceipt = self.store.get(first.trim())?;
+            let expected = rvf_forge_core::canonical::hex_lower(&crate::merkle::sha256(
+                receipt.subject.as_bytes(),
+            ));
+            if expected != stem {
+                return Err(RegistryError::Log {
+                    detail: format!(
+                        "witness chain {} holds subject {:?}, which hashes to {expected}",
+                        file.display(),
+                        receipt.subject
+                    ),
+                });
+            }
+            subjects.push(receipt.subject);
+        }
+        Ok(subjects)
+    }
+
     /// An inclusion proof for a logged object against the current tree head.
     ///
     /// # Errors
@@ -395,6 +484,23 @@ impl Registry {
         }
         verify_over_id(id, &sig.sig, &key.verifying_key)
     }
+}
+
+/// Directory entries in name order, so enumeration is reproducible.
+fn read_dir_sorted(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| RegistryError::io(dir, &e))? {
+        paths.push(entry.map_err(|e| RegistryError::io(dir, &e))?.path());
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// The final component of a path, as UTF-8.
+fn dir_name(path: &Path) -> Result<&str> {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| RegistryError::invalid(format!("{} is not a UTF-8 name", path.display())))
 }
 
 /// Reject anything that is not a safe single path component.

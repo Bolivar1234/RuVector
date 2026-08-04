@@ -36,6 +36,7 @@ import {
   DEFAULT_REGISTRY_DIR,
   appendLogEntry,
   appendRelease,
+  appendWitnessReceipt,
   digestOf,
   getObject,
   initRegistry,
@@ -51,7 +52,7 @@ import {
 } from './registry';
 import { resolveTargets, type BuildTarget } from './types';
 import { FORGE_PACKAGE_NAME, forgeVersion } from './version';
-import { appendReceipt, type WitnessReceipt } from './witness';
+import { type WitnessReceipt } from './witness';
 
 export interface PublishOptions {
   rvfPath: string;
@@ -68,7 +69,17 @@ export interface PublishOptions {
 export interface PublishResult {
   registryDir: string;
   pack: PackResult;
+  /**
+   * The content address of the publisher record — what `release.package`
+   * names, and the directory the package index lives under.
+   */
   publisherId: string;
+  /**
+   * The publisher's stable identity, derived from its display name and
+   * evidence. Survives key rotation, and is where the record pointer is filed;
+   * see {@link publisherIdFor}.
+   */
+  publisherIdentity: string;
   publisherRecord: { id: string; created: boolean };
   keyId: string;
   capabilityManifest: CapabilityManifest;
@@ -125,9 +136,21 @@ export async function runPublish(options: PublishOptions): Promise<PublishResult
   const key = await loadPublisherKey(keyFile);
   await initRegistry(registryDir);
 
-  const publisherId = publisherIdFor(options.project.publisher);
+  // Two different names for the publisher, and the difference matters. The
+  // *identity* is stable across key rotation and is what the pointer file is
+  // filed under; the *id* is the content address of the record that identity
+  // currently resolves to, and is what a release names — because the model's
+  // identity rule makes `publisherId` the hash of the record's own content.
+  const publisherIdentity = publisherIdFor(options.project.publisher);
   const publishedAt = pack.release.publishedAt;
-  const publisher = await resolvePublisher(registryDir, options.project, publisherId, key, publishedAt);
+  const publisher = await resolvePublisher(
+    registryDir,
+    options.project,
+    publisherIdentity,
+    key,
+    publishedAt,
+  );
+  const publisherId = publisher.id;
 
   const objects: PublishResult['objects'] = [];
   if (publisher.created) {
@@ -161,11 +184,16 @@ export async function runPublish(options: PublishOptions): Promise<PublishResult
     type: 'pack-provenance',
   });
 
-  // The draft release carries `predecessor: null`; binding it to the package
-  // head changes the content, so the id is recomputed before it is signed.
+  // The draft release carries `predecessor: null` and the publisher's stable
+  // identity, because `pack` has no registry to resolve either against.
+  // Binding both changes the content, so the id is recomputed before signing.
   const index = await readReleaseIndex(registryDir, publisherId, options.project.listing.name);
   const predecessor = index.length === 0 ? null : index[index.length - 1].releaseId;
-  const rebound = { ...pack.release, predecessor };
+  const rebound = {
+    ...pack.release,
+    package: { ...pack.release.package, publisherId },
+    predecessor,
+  };
   const release = sign({ ...rebound, releaseId: objectId(rebound) }, key, 'releaseId');
 
   if (!verifyObjectId(key.publicKey, release.releaseId, release.signatures[0].sig)) {
@@ -189,28 +217,28 @@ export async function runPublish(options: PublishOptions): Promise<PublishResult
     timestamp: publishedAt,
   });
 
-  const receipt = await appendReceipt(registryDir, {
+  // `evidence` is a single `details` string, not a bag of fields: that is the
+  // shape registry-model.md gives a receipt, and the shape the Reader parses.
+  const receipt = await appendWitnessReceipt(registryDir, {
     subject: release.rvfIdentity,
     event: 'publish',
     outcome: 'pass',
     actor: { kind: 'registry', id: `${FORGE_PACKAGE_NAME}@${forgeVersion()}` },
     evidence: {
-      releaseId: release.releaseId,
-      capabilityManifest: capabilityManifest.manifestId,
-      predecessor,
-      logIndex: entry.index,
-      treeHead: head.treeHead,
-      keyId: key.keyId,
-      securityProfile: pack.securityProfile,
+      details:
+        `release ${release.releaseId} (${release.version} of ${release.package.name}) accepted ` +
+        `at log index ${entry.index}, tree head ${head.rootHash}; manifest ` +
+        `${capabilityManifest.manifestId}, predecessor ${predecessor ?? 'none'}, ` +
+        `signed by ${key.keyId}, security profile ${pack.securityProfile}`,
     },
     timestamp: options.publishedAt,
   });
-  await putObject(registryDir, receipt.receiptId, receipt);
 
   return {
     registryDir,
     pack,
     publisherId,
+    publisherIdentity,
     publisherRecord: { id: publisher.id, created: publisher.created },
     keyId: key.keyId,
     capabilityManifest,
@@ -248,6 +276,12 @@ interface ResolvedPublisher {
 /**
  * Find the publisher record, or register it on first publish.
  *
+ * `identity` is the stable, key-independent name from {@link publisherIdFor};
+ * the returned `id` is the record's content address, which changes whenever the
+ * record does. The pointer file at `packages/<identity>/publisher.json` is what
+ * bridges the two — without it, a second publish would have no way to find the
+ * record it wrote the first time.
+ *
  * A key that the record does not already list is **refused**, not enrolled.
  * Silently accepting a new key would make the publisher identity meaningless:
  * anyone able to write a release could also introduce the key that vouches for
@@ -256,11 +290,11 @@ interface ResolvedPublisher {
 async function resolvePublisher(
   registryDir: string,
   project: RvforgeProject,
-  publisherId: string,
+  identity: string,
   key: PublisherKey,
   now: string,
 ): Promise<ResolvedPublisher> {
-  const pointerPath = publisherPath(registryDir, publisherId);
+  const pointerPath = publisherPath(registryDir, identity);
   const pointer = await readPointer(pointerPath);
 
   if (pointer) {
@@ -269,7 +303,7 @@ async function resolvePublisher(
       throw new ForgeError(
         ForgeErrorCode.REGISTRY,
         `Publisher pointer at ${pointerPath} names ${pointer}, which is not in the object store.`,
-        { publisherId, pointer },
+        { identity, pointer },
       );
     }
     const registered = record.publicKeys.find((k) => k.keyId === key.keyId && k.revokedAt === null);
@@ -278,7 +312,7 @@ async function resolvePublisher(
         ForgeErrorCode.KEY,
         `Key ${key.keyId} is not a registered, unrevoked key for publisher "${record.displayName}". ` +
           'Rotate keys through the registry rather than by publishing with a new one.',
-        { keyId: key.keyId, publisherId, registeredKeys: record.publicKeys.map((k) => k.keyId) },
+        { keyId: key.keyId, identity, registeredKeys: record.publicKeys.map((k) => k.keyId) },
       );
     }
     return { id: pointer, path: pointerPath, created: false, record };
@@ -307,14 +341,14 @@ async function resolvePublisher(
     },
     signatures: [],
   };
-  const record: PublisherRecord = { ...unidentified, publisherId };
   const id = objectId(unidentified);
+  const record: PublisherRecord = { ...unidentified, publisherId: id };
   const stored = await putObject(registryDir, id, record);
 
   await mkdir(dirname(pointerPath), { recursive: true });
   await writeFile(
     pointerPath,
-    canonicalJsonFile({ publisherId, publisherRecord: id, digest: digestOf(id) }),
+    canonicalJsonFile({ identity, publisherRecord: id, digest: digestOf(id) }),
     'utf8',
   );
   return { id, path: stored.path, created: true, record };
