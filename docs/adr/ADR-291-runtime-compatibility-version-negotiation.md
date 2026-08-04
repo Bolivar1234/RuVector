@@ -1,7 +1,8 @@
 # ADR-291: Runtime Compatibility and Version Negotiation
 
-- **Status**: Proposed
+- **Status**: Implemented
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — compatibility-matrix.json v1 + CLI enforcement (compat.ts, FORGE_E_UNSUPPORTED_TARGET with closest-match) + contract fields in canonical manifests (rvf-forge-core) landed on feat/rvf-forge.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-283, ADR-284, ADR-285, ADR-286, ADR-287, ADR-288, ADR-289, ADR-290, ADR-292, ADR-293
 - **Tags**: forge, rvm, rvf, compatibility, versioning, negotiation, packaging

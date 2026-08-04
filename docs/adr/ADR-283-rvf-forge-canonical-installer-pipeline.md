@@ -1,7 +1,8 @@
 # ADR-283: RVForge — One Canonical RVF to Signed Platform Installers
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — implementation in progress: CLI (validate/build/verify, embedded+thin, inventory, witness chains — 137 tests), rvf-forge-core (103 tests), Reader scaffold+dock (90 tests), 3-OS CI landed; hosted build service + Tauri bundling of real installers pending.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-280, ADR-284, ADR-285, ADR-286
 - **Tags**: rvf, forge, packaging, tauri, installers, signing, provenance, ci

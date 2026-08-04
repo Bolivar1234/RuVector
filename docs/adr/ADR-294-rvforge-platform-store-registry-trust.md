@@ -1,7 +1,8 @@
 # ADR-294: RVForge Platform — Agent Store, Registry, and Trust System
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — implementation in progress: crates/rvforge-registry landed (content addressing, release rules, trust-raise enforcement, non-destructive revocation, transparency log — 67 tests); publisher CLI verbs in flight; Store web UI and hosted registry pending.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-283, ADR-284, ADR-286, ADR-288, ADR-290
 - **Tags**: rvforge, marketplace, registry, trust, licensing, revocation, enterprise

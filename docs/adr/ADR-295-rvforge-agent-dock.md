@@ -1,7 +1,8 @@
 # ADR-295: RVForge Agent Dock — Persistent Security and Control Surface
 
-- **Status**: Proposed
+- **Status**: Implemented
 - **Date**: 2026-08-03
+- **Updated**: 2026-08-03 — first implementation target shipped: dock in crates/rvforge-reader (typed AgentProvidedStatus/SystemOwnedStatus boundary, 8-state machine, roster, event thresholds, pill+expanded UI; 90 tests). Other platform placements (tray/menubar/Live Activity/appliance) tracked as follow-ups.
 - **Deciders**: RuVector Architecture Team
 - **Related**: ADR-285, ADR-286, ADR-289, ADR-294
 - **Tags**: rvforge, agent-dock, ux, trust, security, control-surface
