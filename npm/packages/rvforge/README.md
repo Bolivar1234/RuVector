@@ -18,7 +18,7 @@ Requires Node.js 20 or later.
 ```bash
 npx @ruvector/rvforge init                     # scaffold forge.config.json
 npx @ruvector/rvforge validate agent.rvf       # structural check, no execution
-npx @ruvector/rvforge build agent.rvf          # local build
+npx @ruvector/rvforge build agent.rvf          # local build (--mode embedded|thin)
 npx @ruvector/rvforge submit agent.rvf --yes   # hosted build
 npx @ruvector/rvforge status BUILD_ID
 npx @ruvector/rvforge download BUILD_ID
@@ -57,16 +57,21 @@ passed.
 
 ### `build`
 
-Produces the canonical build manifest, a staged bundle, a software inventory,
-SHA256 checksums, and a provenance record:
+Produces the canonical build manifest, one staged bundle per target, a software
+inventory, SHA256 checksums, a provenance record, and a witness receipt:
 
 ```text
 forge-out/
-├── build-manifest.json   canonical, deterministic
-├── inventory.json        software inventory
-├── provenance.json       what was built, from what, by whom
-├── checksums.txt         sha256sum-compatible
-└── rvf/agent.rvf         embedded payload (or locator.json in thin mode)
+├── build-manifest.json                canonical, deterministic
+├── inventory.json                     software inventory + bundle layout
+├── provenance.json                    what was built, from what, by whom
+├── checksums.txt                      sha256sum-compatible
+├── receipts.jsonl                     witness chain, append-only
+└── bundles/
+    └── <target>/
+        ├── rvf/agent.rvf              embedded payload…
+        ├── rvf/locator.json           …or the signed locator, in thin mode
+        └── reader/reader-slot.json    where the RVF Reader goes
 ```
 
 The manifest is deterministic: keys, targets, and capability grants are sorted,
@@ -79,14 +84,91 @@ result is labelled `staged` and forge does not claim to have produced an
 installer. A failed build leaves no output directory at all, rather than a
 half-written one.
 
-### `verify`
+### Packaging modes
 
-Recomputes every digest in a provenance record and re-derives the manifest hash
-from the manifest's own bytes:
+`--mode` selects how the RVF reaches each bundle, overriding
+`packaging.mode` in the config for one build:
 
 ```bash
-forge verify forge-out                    # a whole build directory
-forge verify forge-out/rvf/agent.rvf      # one artifact
+forge build agent.rvf --mode embedded    # the bundle carries the whole RVF
+forge build agent.rvf --mode thin        # the bundle carries a signed locator
+```
+
+**Embedded** (FR001) stages the complete RVF into every target's bundle, so the
+package runs with no network access. The same bytes go into every bundle — that
+is core invariant 1, *the embedded RVF hash must be identical across every
+platform package* — and forge does not take the copy on trust: it re-hashes each
+staged copy and fails the build with `FORGE_E_VERIFY_FAILED` if any of them
+diverges, rather than shipping platform packages that disagree about what the
+agent is.
+
+**Thin** (FR002) stages a signed RVF locator instead of the payload: the
+distribution URL, the RVF identity and size, the capability-policy hash, and a
+signature *slot*. The reader resolves the locator, checks the digest it names,
+and verifies before executing. `packaging.distributionUrl` is required — a thin
+package with nowhere to fetch from is rejected at manifest generation.
+
+The reader slot in each bundle is a JSON descriptor, never an executable.
+Nothing in a staged bundle is runnable.
+
+### Compatibility enforcement
+
+Forge refuses any packaging-mode / target / runtime-profile combination absent
+from the published RVM compatibility matrix (ADR-291 §2), before the RVF is read
+and before anything is uploaded:
+
+```console
+$ forge build agent.rvf rvm
+error: mode=embedded target=rvm runtime=wasm is absent from the RVM compatibility
+       matrix — runtime profile "wasm" has no platform entry for target "rvm"
+       (os "rvm", arch x64). Closest supported combination: mode=embedded
+       target=linux-arm64 runtime=wasm.
+code:  FORGE_E_UNSUPPORTED_TARGET
+```
+
+Forge never approximates, downgrades, or substitutes a runtime to make an
+unsupported request succeed; it names the nearest supported combination and
+lets you decide. The matrix is hash-addressed, and both `provenance.json` and
+`inventory.json` record the revision that admitted the build, so a past
+admission decision can be reconstructed.
+
+`src/compatibility-matrix.json` is vendored. **The canonical copy is
+`docs/research/rvf-forge/compatibility-matrix.json`** — change it there and
+re-copy; `tests/compat.test.ts` fails when the two diverge.
+
+### Witness receipts
+
+Every build and every verification appends a receipt to `receipts.jsonl`,
+following the registry data model. A receipt's id is the SHA256 of its canonical
+JSON (excluding `receiptId` and `signatures`), and receipts hash-chain per
+subject through `prevReceipt`:
+
+```json
+{"schemaVersion":1,"type":"witness-receipt","receiptId":"sha256:…","subject":"sha256:…",
+ "event":"build","outcome":"pass","actor":{"kind":"builder","id":"@ruvector/rvforge@0.1.0"},
+ "evidence":{…},"timestamp":"2026-08-03T00:00:00.000Z","prevReceipt":null,"signatures":[]}
+```
+
+`verify` checks the chain before it appends to it: an edited receipt fails
+because its recomputed id no longer matches, and a removed or reordered one
+fails because the link no longer resolves. Either way the result is
+`FORGE_E_VERIFY_FAILED`, and forge does not append onto a chain it just refused.
+
+`signatures` is always empty on output — forge holds signing references, never
+key material, so the array is a slot for a signing worker to fill.
+
+`receipts.jsonl` is deliberately absent from `provenance.json`: it is
+append-only and grows on every verification, so recording its digest would make
+a build's own provenance fail the moment the chain was extended.
+
+### `verify`
+
+Recomputes every digest in a provenance record, re-derives the manifest hash
+from the manifest's own bytes, and checks the witness chain:
+
+```bash
+forge verify forge-out                                  # a whole build directory
+forge verify forge-out/bundles/linux-x64/rvf/agent.rvf  # one artifact
 forge verify Agent.dmg --provenance path/to/provenance.json
 ```
 
@@ -165,7 +247,11 @@ is rejected rather than silently accepted.
 ## Security
 
 - **RVF content is never executed.** Validation, packaging, and scanning are
-  inspection-only operations.
+  inspection-only operations. Embedded mode copies bytes, thin mode writes a
+  locator, and the reader slot is a descriptor rather than a binary — nothing
+  in a staged bundle is runnable.
+- **The build path makes no network calls.** A locator records where an RVF
+  will be fetched from; forge does not fetch it.
 - **Signing references only.** Forge records which key to ask for and which
   service holds it. Private key material is never read, stored, logged, or
   transmitted; signing happens on a worker with HSM or KMS access.
@@ -178,7 +264,16 @@ is rejected rather than silently accepted.
 ## Library use
 
 ```ts
-import { validateRvf, buildManifest, runVerify } from '@ruvector/rvforge';
+import {
+  assertCompatible,
+  buildManifest,
+  readReceipts,
+  runVerify,
+  validateRvf,
+  verifyReceiptChain,
+} from '@ruvector/rvforge';
+
+assertCompatible({ mode: 'embedded', targets: ['linux-x64'], runtimeProfile: 'wasm' });
 
 const result = await validateRvf('agent.rvf', { deep: true });
 const manifest = buildManifest({
@@ -188,6 +283,9 @@ const manifest = buildManifest({
   packaging: { mode: 'embedded' },
   runtime: { profile: 'wasm', rvmVersion: '0.1.0', rvmCommit: 'abc1234' },
 });
+
+await runVerify('forge-out');
+verifyReceiptChain(await readReceipts('forge-out')); // { ok: true, … }
 ```
 
 ## Development

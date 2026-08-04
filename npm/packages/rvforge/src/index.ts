@@ -96,8 +96,80 @@ export {
   type TargetEstimate,
 } from './estimate';
 
+export {
+  COMPATIBILITY_MATRIX,
+  RUNTIME_PROFILE_MATRIX_KEY,
+  TARGET_INSTALLER_FORMATS,
+  TARGET_PLATFORM,
+  assertCompatible,
+  checkCompatibility,
+  closestSupported,
+  compatibilityMatrixRevision,
+  type AssertCompatibleInput,
+  type CompatCheck,
+  type CompatRequest,
+  type CompatSuggestion,
+  type CompatibilityMatrix,
+  type MatrixPlatform,
+  type MatrixRuntimeProfile,
+  type MatrixStatus,
+} from './compat';
+
+export {
+  BUNDLES_DIR,
+  assertEmbeddedRvfIdentical,
+  assertLocator,
+  buildLocator,
+  stageBundles,
+  verifyLocator,
+  type BundleEntry,
+  type BundleLayout,
+  type LocatorCheck,
+  type ReaderSlot,
+  type RvfLocator,
+} from './package-modes';
+
+export {
+  buildInventory,
+  roleFor,
+  type InventoryBundle,
+  type InventoryComponent,
+  type InventoryEntry,
+  type InventoryInput,
+  type InventoryRole,
+  type SoftwareInventory,
+} from './inventory';
+
+export {
+  RECEIPTS_FILENAME,
+  appendReceipt,
+  asSubject,
+  createWitnessReceipt,
+  lastReceiptFor,
+  readReceipts,
+  receiptContentId,
+  receiptLine,
+  verifyReceiptChain,
+  type ChainProblem,
+  type ChainVerification,
+  type CreateReceiptInput,
+  type WitnessActorKind,
+  type WitnessEvent,
+  type WitnessOutcome,
+  type WitnessReceipt,
+  type WitnessSignature,
+} from './witness';
+
 export { validateRvf, type SegmentSummary, type ValidateOptions, type ValidateResult } from './validate';
-export { runBuild, type BuildOptions, type BuildResult } from './build';
+export {
+  CHECKSUMS_FILE,
+  INVENTORY_FILE,
+  MANIFEST_FILE,
+  PROVENANCE_FILE,
+  runBuild,
+  type BuildOptions,
+  type BuildResult,
+} from './build';
 export { planSubmit, runSubmit, type SubmitOptions, type SubmitPlan, type SubmitResult } from './submit';
 export { assertBuildId, runStatus, type StatusOptions, type StatusResult } from './status';
 export { runDownload, type DownloadOptions, type DownloadResult } from './download';

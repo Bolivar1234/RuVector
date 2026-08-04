@@ -23,6 +23,7 @@ import { planSubmit, runSubmit } from './submit';
 import { runStatus } from './status';
 import { runVerify } from './verify';
 import { validateRvf } from './validate';
+import { PACKAGING_MODES, type PackagingMode } from './types';
 import { forgeVersion } from './version';
 
 interface ParsedArgs {
@@ -202,11 +203,24 @@ async function cmdValidate(args: ParsedArgs, reporter: Reporter): Promise<number
   return 0;
 }
 
+/** Resolve `--mode`, which selects the packaging mode for one build. */
+export function resolveMode(raw: string | undefined): PackagingMode | undefined {
+  if (raw === undefined) return undefined;
+  const mode = raw.trim().toLowerCase();
+  if ((PACKAGING_MODES as readonly string[]).includes(mode)) return mode as PackagingMode;
+  throw new ForgeError(
+    ForgeErrorCode.USAGE,
+    `Unknown packaging mode "${raw}". Expected one of ${PACKAGING_MODES.join(', ')}.`,
+    { mode: raw, known: [...PACKAGING_MODES] },
+  );
+}
+
 async function cmdBuild(args: ParsedArgs, reporter: Reporter): Promise<number> {
   const config = await loadConfig(configPath(args));
   const result = await runBuild({
     config,
     ...splitBuildOperands(args.positionals),
+    ...(resolveMode(str(args, 'mode')) ? { mode: resolveMode(str(args, 'mode')) } : {}),
     outDir: str(args, 'out') ?? 'forge-out',
     force: bool(args, 'force'),
     allowUnsigned: bool(args, 'allow-unsigned'),
@@ -220,6 +234,10 @@ async function cmdBuild(args: ParsedArgs, reporter: Reporter): Promise<number> {
       manifestSha256: result.manifestSha256,
       rvfIdentity: result.manifest.rvf.sha256,
       targets: result.manifest.targets,
+      packaging: result.manifest.packaging.mode,
+      bundles: result.inventory.bundles,
+      compatibilityMatrixRevision: result.provenance.compatibilityMatrixRevision,
+      receiptId: result.receipt.receiptId,
       packaged: result.packaged,
       status: result.provenance.status,
       toolchain: result.toolchain,
@@ -231,7 +249,9 @@ async function cmdBuild(args: ParsedArgs, reporter: Reporter): Promise<number> {
       `  manifest hash  ${result.manifestSha256}`,
       `  targets        ${result.manifest.targets.join(', ')}`,
       `  packaging      ${result.manifest.packaging.mode} (${result.provenance.packaging.status})`,
+      `  bundles        ${result.inventory.bundles.length}`,
       `  files          ${result.provenance.files.length}`,
+      `  witness        ${result.receipt.receiptId}`,
       result.packaged ? '' : '  No installers were produced — this is a staged bundle, not a release.',
     ].filter(Boolean),
   );
@@ -303,6 +323,8 @@ async function cmdVerify(args: ParsedArgs, reporter: Reporter): Promise<number> 
     `  rvf identity   ${result.rvfIdentity}`,
     `  manifest hash  ${result.manifestSha256.expected}`,
     `  files checked  ${result.files.length}, all matching`,
+    `  witness chain  ${result.witnessChain.count} receipt(s), intact`,
+    ...(result.receipt ? [`  receipt        ${result.receipt.receiptId}`] : []),
     ...(result.target ? [`  target         ${result.target.path} ok`] : []),
   ]);
   return 0;

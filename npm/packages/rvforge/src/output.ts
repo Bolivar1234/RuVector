@@ -86,7 +86,7 @@ export const USAGE = `RVForge — one canonical RVF to signed platform installer
 Usage:
   forge init [--force] [--config <path>]
   forge validate <agent.rvf> [--deep] [--allow-unsigned]
-  forge build [agent.rvf] [targets...] [--out <dir>] [--force]
+  forge build [agent.rvf] [targets...] [--mode <mode>] [--out <dir>] [--force]
   forge submit [agent.rvf] [targets...] [--yes] [--cached]
   forge status <BUILD_ID>
   forge download <BUILD_ID> [--out <dir>] [--only <name>]
@@ -96,6 +96,11 @@ Targets:
   windows-x64  windows-arm64  macos-x64  macos-arm64  macos-universal
   linux-x64    linux-arm64    rvm
   Aliases: windows, macos, linux
+
+Packaging modes (--mode):
+  embedded          The bundle carries the full RVF; runs offline
+  thin              The bundle carries a signed RVF locator; fetched on install
+  shared-reader     Register .rvf with the OS (planned; rejected by the matrix)
 
 Global flags:
   --json            Machine-readable output on stdout

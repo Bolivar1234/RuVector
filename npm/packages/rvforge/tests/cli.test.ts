@@ -1,5 +1,5 @@
 import { ForgeError, ForgeErrorCode } from '../src/errors';
-import { parseArgs, splitBuildOperands } from '../src/cli';
+import { parseArgs, resolveMode, splitBuildOperands } from '../src/cli';
 
 describe('parseArgs', () => {
   it('separates the command, positionals, and flags', () => {
@@ -65,5 +65,32 @@ describe('splitBuildOperands', () => {
 
   it('reads several targets with no path', () => {
     expect(splitBuildOperands(['linux', 'macos'])).toEqual({ targets: ['linux', 'macos'] });
+  });
+});
+
+describe('resolveMode', () => {
+  it('leaves the configured mode in place when --mode is absent', () => {
+    expect(resolveMode(undefined)).toBeUndefined();
+  });
+
+  it('accepts every packaging mode, case- and space-insensitively', () => {
+    expect(resolveMode('embedded')).toBe('embedded');
+    expect(resolveMode('  Thin ')).toBe('thin');
+    expect(resolveMode('SHARED-READER')).toBe('shared-reader');
+  });
+
+  it('rejects an unknown mode as a usage error', () => {
+    try {
+      resolveMode('capsule');
+      throw new Error('expected a ForgeError');
+    } catch (err) {
+      expect((err as ForgeError).code).toBe(ForgeErrorCode.USAGE);
+      expect((err as ForgeError).message).toMatch(/embedded/);
+    }
+  });
+
+  it('parses --mode as a value flag', () => {
+    expect(parseArgs(['build', '--mode', 'thin']).flags.get('mode')).toBe('thin');
+    expect(parseArgs(['build', '--mode=embedded']).flags.get('mode')).toBe('embedded');
   });
 });

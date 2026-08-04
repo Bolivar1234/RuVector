@@ -12,6 +12,10 @@ import { buildRvfFixture } from './fixtures/rvf-fixture';
 
 jest.setTimeout(30_000);
 
+/** Where the single configured target's embedded payload is staged. */
+const PAYLOAD = 'bundles/linux-x64/rvf/agent.rvf';
+const READER_SLOT = 'bundles/linux-x64/reader/reader-slot.json';
+
 let root: string;
 let rvfPath: string;
 
@@ -60,13 +64,14 @@ describe('build output', () => {
     expect(result.provenance.signing.mode).toBe('unsigned-development');
     expect(result.provenance.files.map((f) => f.path).sort()).toEqual([
       'build-manifest.json',
+      READER_SLOT,
+      PAYLOAD,
       'inventory.json',
-      'rvf/agent.rvf',
-    ]);
+    ].sort());
 
     // Embedded mode copies the RVF byte for byte: the embedded hash is the
     // input hash (ADR-283 invariant 1).
-    const embedded = result.provenance.files.find((f) => f.path === 'rvf/agent.rvf');
+    const embedded = result.provenance.files.find((f) => f.path === PAYLOAD);
     expect(embedded?.sha256).toBe(result.manifest.rvf.sha256);
   });
 
@@ -93,19 +98,19 @@ describe('verify', () => {
     expect(result.failures).toEqual([]);
     expect(result.manifestSha256.ok).toBe(true);
     expect(result.rvfIdentity).toBe(built.manifest.rvf.sha256);
-    expect(result.files).toHaveLength(3);
+    expect(result.files).toHaveLength(4);
   });
 
   it('verifies a single artifact inside a build directory', async () => {
     const built = await build('out-verify-single');
-    const result = await runVerify(join(built.outDir, 'rvf', 'agent.rvf'));
-    expect(result.target?.path).toBe('rvf/agent.rvf');
+    const result = await runVerify(join(built.outDir, PAYLOAD));
+    expect(result.target?.path).toBe(PAYLOAD);
     expect(result.target?.ok).toBe(true);
   });
 
   it('fails when the embedded RVF is tampered with', async () => {
     const built = await build('out-verify-tampered');
-    const payload = join(built.outDir, 'rvf', 'agent.rvf');
+    const payload = join(built.outDir, PAYLOAD);
     const bytes = await readFile(payload);
     bytes[0] ^= 0xff;
     await writeFile(payload, bytes);

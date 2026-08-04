@@ -66,6 +66,10 @@ const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
 const URL_USERINFO_PATTERN = /(\b[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi;
 const LONG_OPAQUE_PATTERN = /\b(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b/g;
 
+/** Lengths of the lowercase-hex digests forge reports: file id, git rev, sha256. */
+const HEX_DIGEST_LENGTHS = new Set([32, 40, 64]);
+const HEX_ONLY = /^[0-9a-f]+$/;
+
 export const REDACTED = '[redacted]';
 
 /**
@@ -81,6 +85,13 @@ export function redact(text: string): string {
     .replace(BEARER_PATTERN, `Bearer ${REDACTED}`)
     .replace(URL_USERINFO_PATTERN, `$1${REDACTED}@`)
     .replace(LONG_OPAQUE_PATTERN, (match: string, offset: number, whole: string): string => {
+      // A lowercase-hex run of digest length is a content address — an RVF
+      // identity, a manifest hash, a source revision — not a credential.
+      // Reporting those is most of what forge's errors are *for*, and the
+      // tokens this pattern exists to catch are mixed-case base64url with
+      // `-` and `_`, never pure hex.
+      if (HEX_DIGEST_LENGTHS.has(match.length) && HEX_ONLY.test(match)) return match;
+
       // A long opaque run bordered by a path separator is a directory or file
       // name, not a credential. Redacting those would make the most common
       // error messages — "cannot open <path>" — unreadable, and forge never

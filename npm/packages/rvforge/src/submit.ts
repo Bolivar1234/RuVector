@@ -10,11 +10,12 @@
 import { resolve } from 'node:path';
 
 import { ForgeApiClient, type BuildRecord, type ForgeApiOptions } from './api';
+import { assertCompatible } from './compat';
 import { ForgeError, ForgeErrorCode } from './errors';
 import { buildManifest } from './manifest';
 import { estimateBuild, type BuildEstimate } from './estimate';
 import { validateRvf, type ValidateResult } from './validate';
-import type { BuildManifest, ForgeConfig } from './types';
+import { resolveTargets, type BuildManifest, type ForgeConfig } from './types';
 
 export interface SubmitOptions {
   config: ForgeConfig;
@@ -43,6 +44,15 @@ export interface SubmitResult extends SubmitPlan {
 export async function planSubmit(options: SubmitOptions): Promise<SubmitPlan> {
   const { config } = options;
   const rvfPath = resolve(options.rvfPath ?? config.rvf);
+
+  // Reject unsupported combinations before the RVF is read, let alone
+  // uploaded, and before a worker is allocated (ADR-291 §2).
+  assertCompatible({
+    mode: config.packaging.mode,
+    targets: resolveTargets(options.targets ?? config.targets),
+    runtimeProfile: config.runtime.profile,
+  });
+
   const validation = await validateRvf(rvfPath, { deep: true, allowUnsigned: options.allowUnsigned });
 
   const manifest = buildManifest({

@@ -2,39 +2,59 @@
  * Local build.
  *
  * Produces everything that does not require a native packaging toolchain: the
- * canonical build manifest, a staged bundle directory, a software inventory,
- * SHA256 checksums, and a provenance record. When Tauri is not installed the
- * result is explicitly labelled `staged` and no installer is claimed.
+ * canonical build manifest, one staged bundle per target, a software
+ * inventory, SHA256 checksums, a provenance record, and a witness receipt.
+ * When Tauri is not installed the result is explicitly labelled `staged` and
+ * no installer is claimed.
  *
- * Two invariants shape the implementation:
+ * Four invariants shape the implementation:
  *
- * - **Nothing executes the RVF** (ADR-283 invariant 2). Embedded mode copies
- *   bytes; thin and shared-reader modes write a locator. The file is read, not
- *   interpreted.
+ * - **The embedded RVF is identical everywhere** (invariant 1). Embedded mode
+ *   stages the same bytes into every target's bundle and then re-hashes each
+ *   copy; a divergence fails the build.
+ * - **Nothing executes the RVF** (invariant 2). Embedded mode copies bytes,
+ *   thin mode writes a locator, and the reader slot is a placeholder
+ *   descriptor rather than a binary. The file is read, not interpreted.
+ * - **Unsupported combinations fail before any work** (ADR-291 §2). The
+ *   compatibility gate runs before the RVF is even opened.
  * - **A failed build leaves no partially trusted artifact** (invariant 7).
  *   Everything is assembled in a temporary directory and moved into place in
  *   one step; a failure removes the temporary directory instead.
  */
 
 import { execFile } from 'node:child_process';
-import { copyFile, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
+import { assertCompatible, compatibilityMatrixRevision } from './compat';
 import { ForgeError, ForgeErrorCode } from './errors';
 import { canonicalJsonFile, sha256File, sha256String } from './hash';
+import { buildInventory, type SoftwareInventory } from './inventory';
 import { manifestFileContents, manifestHash, buildManifest } from './manifest';
+import {
+  assertEmbeddedRvfIdentical,
+  stageBundles,
+  type BundleLayout,
+} from './package-modes';
+import { resolveTargets } from './types';
 import { validateRvf, type ValidateResult } from './validate';
 import { FORGE_PACKAGE_NAME, forgeVersion } from './version';
+import { appendReceipt, type WitnessReceipt } from './witness';
 import type {
   BuildManifest,
-  CapabilityPolicy,
-  ForgeConfig,
+  PackagingMode,
   ProvenanceFile,
   ProvenanceRecord,
+  ForgeConfig,
 } from './types';
 
 const execFileAsync = promisify(execFile);
+
+export const MANIFEST_FILE = 'build-manifest.json';
+export const INVENTORY_FILE = 'inventory.json';
+export const PROVENANCE_FILE = 'provenance.json';
+export const CHECKSUMS_FILE = 'checksums.txt';
 
 export interface BuildOptions {
   config: ForgeConfig;
@@ -42,6 +62,8 @@ export interface BuildOptions {
   rvfPath?: string;
   /** Overrides `config.targets`. */
   targets?: readonly string[];
+  /** Overrides `config.packaging.mode` — the CLI's `--mode`. */
+  mode?: PackagingMode;
   outDir: string;
   /** Replace an existing output directory. */
   force?: boolean;
@@ -55,6 +77,9 @@ export interface BuildResult {
   manifestSha256: string;
   provenance: ProvenanceRecord;
   validation: ValidateResult;
+  inventory: SoftwareInventory;
+  layout: BundleLayout;
+  receipt: WitnessReceipt;
   /** True when a packaging toolchain produced installers. */
   packaged: boolean;
   toolchain: { tauri: string | null };
@@ -62,9 +87,18 @@ export interface BuildResult {
 }
 
 export async function runBuild(options: BuildOptions): Promise<BuildResult> {
-  const { config } = options;
+  const config = withMode(options.config, options.mode);
   const rvfPath = resolve(options.rvfPath ?? config.rvf);
   const outDir = resolve(options.outDir);
+  const matrixRevision = compatibilityMatrixRevision();
+
+  // Gate the combination before the RVF is opened: an unsupported request
+  // should cost nothing (ADR-291 §2).
+  assertCompatible({
+    mode: config.packaging.mode,
+    targets: resolveTargets(options.targets ?? config.targets),
+    runtimeProfile: config.runtime.profile,
+  });
 
   const validation = await validateRvf(rvfPath, { deep: true, allowUnsigned: options.allowUnsigned });
 
@@ -82,42 +116,59 @@ export async function runBuild(options: BuildOptions): Promise<BuildResult> {
   const stagingDir = `${outDir}.staging-${process.pid}`;
 
   try {
-    await mkdir(join(stagingDir, 'rvf'), { recursive: true });
+    await mkdir(stagingDir, { recursive: true });
+    await writeText(stagingDir, MANIFEST_FILE, manifestFileContents(manifest));
 
-    const files: string[] = [];
-    files.push(await writeText(stagingDir, 'build-manifest.json', manifestFileContents(manifest)));
-    files.push(
-      await writeText(
-        stagingDir,
-        'inventory.json',
-        canonicalJsonFile(softwareInventory(manifest, validation)),
-      ),
-    );
-    files.push(...(await stagePayload(stagingDir, rvfPath, manifest, config.capabilityPolicy)));
+    const staged = await stageBundles({ stagingDir, rvfPath, manifest });
+    await assertEmbeddedRvfIdentical(stagingDir, staged.layout);
+
+    const inventory = await buildInventory({
+      stagingDir,
+      manifest,
+      validation,
+      layout: staged.layout,
+      files: [MANIFEST_FILE, ...staged.files],
+      compatibilityMatrixRevision: matrixRevision,
+    });
+    await writeText(stagingDir, INVENTORY_FILE, canonicalJsonFile(inventory));
 
     const tauri = await detectTauri();
     const packaged = false; // Installer generation lands with the Tauri packaging layer.
-    const warnings: string[] = [...validation.warnings];
-    if (!tauri) {
-      warnings.push(
-        'Tauri was not found on PATH; forge staged the bundle and produced no installers. ' +
-          'Install the Tauri CLI, or use "forge submit" to build on hosted workers.',
-      );
-    } else {
-      warnings.push(
-        `Tauri ${tauri} is available but local installer generation is not wired up yet; the bundle is staged only.`,
-      );
-    }
+    const warnings = [...validation.warnings, toolchainWarning(tauri)];
 
-    const provenanceFiles = await hashFiles(stagingDir, files);
+    const provenanceFiles = await hashFiles(stagingDir, [
+      MANIFEST_FILE,
+      INVENTORY_FILE,
+      ...staged.files,
+    ]);
     const provenance = await buildProvenance({
       manifest,
       files: provenanceFiles,
       packaged,
       tauri,
+      matrixRevision,
     });
-    await writeText(stagingDir, 'provenance.json', canonicalJsonFile(provenance));
-    await writeText(stagingDir, 'checksums.txt', checksumsFile(provenanceFiles));
+    await writeText(stagingDir, PROVENANCE_FILE, canonicalJsonFile(provenance));
+    await writeText(stagingDir, CHECKSUMS_FILE, checksumsFile(provenanceFiles));
+
+    // The witness chain starts here. `receipts.jsonl` is deliberately absent
+    // from the provenance record: it is append-only and grows on every
+    // subsequent verify, so listing its digest would make the build's own
+    // provenance fail the moment the chain is extended.
+    const receipt = await appendReceipt(stagingDir, {
+      subject: manifest.rvf.sha256,
+      event: 'build',
+      outcome: 'pass',
+      actor: { kind: 'builder', id: `${FORGE_PACKAGE_NAME}@${forgeVersion()}` },
+      evidence: {
+        manifestSha256: provenance.manifestSha256,
+        packagingMode: manifest.packaging.mode,
+        targets: manifest.targets.join(','),
+        fileCount: provenanceFiles.length,
+        status: provenance.status,
+        compatibilityMatrixRevision: matrixRevision,
+      },
+    });
 
     await rename(stagingDir, outDir);
 
@@ -127,6 +178,9 @@ export async function runBuild(options: BuildOptions): Promise<BuildResult> {
       manifestSha256: provenance.manifestSha256,
       provenance,
       validation,
+      inventory,
+      layout: staged.layout,
+      receipt,
       packaged,
       toolchain: { tauri },
       warnings,
@@ -135,6 +189,19 @@ export async function runBuild(options: BuildOptions): Promise<BuildResult> {
     await rm(stagingDir, { recursive: true, force: true });
     throw err;
   }
+}
+
+/** Apply a `--mode` override without mutating the caller's config. */
+function withMode(config: ForgeConfig, mode?: PackagingMode): ForgeConfig {
+  if (!mode || mode === config.packaging.mode) return config;
+  return { ...config, packaging: { ...config.packaging, mode } };
+}
+
+function toolchainWarning(tauri: string | null): string {
+  return tauri
+    ? `Tauri ${tauri} is available but local installer generation is not wired up yet; the bundle is staged only.`
+    : 'Tauri was not found on PATH; forge staged the bundle and produced no installers. ' +
+        'Install the Tauri CLI, or use "forge submit" to build on hosted workers.';
 }
 
 async function prepareOutDir(outDir: string, force?: boolean): Promise<void> {
@@ -154,85 +221,12 @@ async function prepareOutDir(outDir: string, force?: boolean): Promise<void> {
   await rm(outDir, { recursive: true, force: true });
 }
 
-/**
- * Stage the RVF itself. Embedded mode copies the file byte for byte so the
- * embedded hash matches the input (invariant 1); the other modes write a
- * locator the reader resolves and verifies at install time.
- */
-async function stagePayload(
-  stagingDir: string,
-  rvfPath: string,
-  manifest: BuildManifest,
-  policy: CapabilityPolicy,
-): Promise<string[]> {
-  if (manifest.packaging.mode === 'embedded') {
-    const target = join('rvf', basename(rvfPath));
-    await copyFile(rvfPath, join(stagingDir, target));
-    return [target];
-  }
-
-  const locator = {
-    schemaVersion: 1,
-    mode: manifest.packaging.mode,
-    rvfSha256: manifest.rvf.sha256,
-    rvfSizeBytes: manifest.rvf.size,
-    fileId: manifest.rvf.fileId,
-    distributionUrl: manifest.packaging.distributionUrl ?? null,
-    updateChannel: manifest.packaging.updateChannel ?? null,
-    capabilityPolicyHash: manifest.capabilityPolicyHash,
-    defaultDeny: policy.defaultDeny,
-  };
-  const target = join('rvf', 'locator.json');
-  await writeText(stagingDir, target, canonicalJsonFile(locator));
-  return [target];
-}
-
-interface SoftwareInventory {
-  schemaVersion: 1;
-  components: Array<Record<string, string | number>>;
-  rvfSegments: { count: number; executableCount: number; byType: Record<string, number> };
-  capabilityPolicyHash: string;
-}
-
-/** Software inventory: what is in the package, from inspection only. */
-function softwareInventory(manifest: BuildManifest, validation: ValidateResult): SoftwareInventory {
-  return {
-    schemaVersion: 1,
-    components: [
-      {
-        name: FORGE_PACKAGE_NAME,
-        version: manifest.generator.version,
-        role: 'builder',
-      },
-      {
-        name: 'rvf',
-        version: `format-v${validation.root.formatVersion}`,
-        role: 'payload',
-        sha256: manifest.rvf.sha256,
-        sizeBytes: manifest.rvf.size,
-      },
-      {
-        name: 'rvm',
-        version: manifest.runtime.rvmVersion,
-        role: 'runtime',
-        commit: manifest.runtime.rvmCommit,
-        profile: manifest.runtime.runtimeProfile,
-      },
-    ],
-    rvfSegments: {
-      count: validation.segments.count,
-      executableCount: validation.segments.executableCount,
-      byType: validation.segments.byType,
-    },
-    capabilityPolicyHash: manifest.capabilityPolicyHash,
-  };
-}
-
 async function buildProvenance(input: {
   manifest: BuildManifest;
   files: ProvenanceFile[];
   packaged: boolean;
   tauri: string | null;
+  matrixRevision: string;
 }): Promise<ProvenanceRecord> {
   const { manifest, files, packaged } = input;
   const signed = Object.keys(manifest.signing).length > 0;
@@ -241,6 +235,7 @@ async function buildProvenance(input: {
     createdAt: new Date().toISOString(),
     rvfIdentity: manifest.rvf.sha256,
     manifestSha256: manifestHash(manifest),
+    compatibilityMatrixRevision: input.matrixRevision,
     builder: {
       tool: FORGE_PACKAGE_NAME,
       version: forgeVersion(),
@@ -264,7 +259,7 @@ async function buildProvenance(input: {
 
 async function hashFiles(root: string, relativePaths: readonly string[]): Promise<ProvenanceFile[]> {
   const entries: ProvenanceFile[] = [];
-  for (const rel of [...relativePaths].sort()) {
+  for (const rel of [...new Set(relativePaths)].sort()) {
     const abs = join(root, rel);
     const info = await stat(abs);
     entries.push({ path: rel.split('\\').join('/'), sha256: await sha256File(abs), size: info.size });

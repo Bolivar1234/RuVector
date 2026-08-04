@@ -227,6 +227,11 @@ export interface ProvenanceRecord {
   rvfIdentity: string;
   /** SHA256 over the canonical JSON of the build manifest. */
   manifestSha256: string;
+  /**
+   * `sha256:<hex>` of the compatibility matrix that admitted this build, so a
+   * past admission decision can be reconstructed (ADR-291 §2).
+   */
+  compatibilityMatrixRevision: string;
   builder: {
     tool: string;
     version: string;

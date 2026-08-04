@@ -2,8 +2,12 @@
  * Artifact verification against a build provenance record.
  *
  * Recomputes the SHA256 of every file the record claims, re-derives the
- * manifest hash from the manifest's own bytes, and reports any divergence.
- * Verification reads files; it never runs them.
+ * manifest hash from the manifest's own bytes, checks the witness chain, and
+ * reports any divergence. Verification reads files; it never runs them.
+ *
+ * Every verification is itself witnessed: the result is appended to the
+ * build's receipt chain, pass or fail, so a package accumulates a verifiable
+ * history rather than only a build-time claim.
  */
 
 import { readFile, stat } from 'node:fs/promises';
@@ -13,6 +17,14 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ForgeError, ForgeErrorCode } from './errors';
 import { sha256File } from './hash';
 import { manifestHash } from './manifest';
+import { FORGE_PACKAGE_NAME, forgeVersion } from './version';
+import {
+  appendReceipt,
+  readReceipts,
+  verifyReceiptChain,
+  type ChainVerification,
+  type WitnessReceipt,
+} from './witness';
 import type { BuildManifest, ProvenanceRecord } from './types';
 
 export const PROVENANCE_FILENAME = 'provenance.json';
@@ -37,6 +49,10 @@ export interface VerifyResult {
   manifestSha256: { expected: string; actual: string | null; ok: boolean };
   files: FileCheck[];
   failures: FileCheck[];
+  /** Witness-chain state as found on disk, before this run was appended. */
+  witnessChain: ChainVerification;
+  /** The receipt this verification appended, when it could be written. */
+  receipt?: WitnessReceipt;
   /** Subset of `files` matching the artifact the caller named, if any. */
   target?: FileCheck;
 }
@@ -44,6 +60,8 @@ export interface VerifyResult {
 export interface VerifyOptions {
   /** Explicit provenance record path; otherwise discovered next to the artifact. */
   provenancePath?: string;
+  /** Skip appending a receipt — for read-only or dry-run verification. */
+  noReceipt?: boolean;
 }
 
 /**
@@ -76,7 +94,26 @@ export async function runVerify(target: string, options: VerifyOptions = {}): Pr
     );
   }
 
+  // A broken chain is checked before anything is appended: a receipt chained
+  // onto links that do not verify would launder the break into the record.
+  const witnessChain = verifyReceiptChain(await readReceipts(root));
+  if (!witnessChain.ok) {
+    throw new ForgeError(
+      ForgeErrorCode.VERIFY_FAILED,
+      `The witness chain in ${root} is broken — ` +
+        `${witnessChain.problems.map((p) => `receipt ${p.index}: ${p.reason} (${p.detail})`).join('; ')}.`,
+      {
+        provenance: PROVENANCE_FILENAME,
+        witnessProblems: witnessChain.problems.map((p) => ({ index: p.index, reason: p.reason })),
+      },
+    );
+  }
+
   const verified = failures.length === 0 && manifestCheck.ok;
+  const receipt = options.noReceipt
+    ? undefined
+    : await witnessVerification(root, provenance, verified, failures, manifestCheck);
+
   const result: VerifyResult = {
     root,
     provenancePath,
@@ -85,6 +122,8 @@ export async function runVerify(target: string, options: VerifyOptions = {}): Pr
     manifestSha256: manifestCheck,
     files,
     failures,
+    witnessChain,
+    ...(receipt ? { receipt } : {}),
     ...(targetCheck ? { target: targetCheck } : {}),
   };
 
@@ -96,10 +135,43 @@ export async function runVerify(target: string, options: VerifyOptions = {}): Pr
         provenance: PROVENANCE_FILENAME,
         failedFiles: failures.map((f) => ({ path: f.path, reason: f.reason })),
         manifestOk: manifestCheck.ok,
+        ...(receipt ? { receiptId: receipt.receiptId } : {}),
       },
     );
   }
   return result;
+}
+
+/**
+ * Record the outcome in the build's witness chain.
+ *
+ * A directory that cannot be written to — a read-only mount, a downloaded
+ * bundle — is not a verification failure, so this never converts an
+ * append error into one; the result simply carries no receipt.
+ */
+async function witnessVerification(
+  root: string,
+  provenance: ProvenanceRecord,
+  verified: boolean,
+  failures: FileCheck[],
+  manifestCheck: VerifyResult['manifestSha256'],
+): Promise<WitnessReceipt | undefined> {
+  try {
+    return await appendReceipt(root, {
+      subject: provenance.rvfIdentity,
+      event: 'verify',
+      outcome: verified ? 'pass' : 'fail',
+      actor: { kind: 'builder', id: `${FORGE_PACKAGE_NAME}@${forgeVersion()}` },
+      evidence: {
+        manifestSha256: provenance.manifestSha256,
+        manifestOk: manifestCheck.ok,
+        filesChecked: provenance.files.length,
+        failedFiles: failures.length,
+      },
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function failureMessage(failures: FileCheck[], manifest: VerifyResult['manifestSha256']): string {
