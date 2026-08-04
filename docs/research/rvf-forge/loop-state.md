@@ -21,7 +21,7 @@ artifacts, no secrets in code or logs.
        (TypeScript, tsc→dist, jest — follow `npm/packages/rvf` conventions;
        commands: init/validate/build/submit/status/download/verify;
        local RVF validation; canonical build manifest; stable error codes)
-- [ ] 2. `crates/rvf-forge-core` Rust packaging/verification crate
+- [x] 2. `crates/rvf-forge-core` — 103 tests + clippy + fmt green, committed ce25d787c
        (manifest parse, Ed25519 verify, segment hash verify, provenance
        record, SHA256 checksums — NEVER executes RVF content)
 - [~] 3. Tauri RVF Reader app scaffold — agent `reader-scaffold` in flight (crates/rvforge-reader)
@@ -47,7 +47,7 @@ artifacts, no secrets in code or logs.
     directory until it reports; then review, RENAME to
     `npm/packages/rvforge` + `@ruvector/rvforge` (bin `rvforge`), run
     npm test, commit.
-  - `forge-core` agent: `crates/rvf-forge-core` (step 2) — spawned this
+  - forge-core: DONE (committed ce25d787c). Was: spawned this
     iteration. On completion: review, `cargo test -p rvf-forge-core`,
     `cargo clippy -p rvf-forge-core -- -D warnings`, commit.
 - **Next action**: when either agent reports, review + test + commit its
