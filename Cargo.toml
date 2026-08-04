@@ -107,6 +107,9 @@ members = [
     "crates/cognitum-gate-tilezero",
     "crates/mcp-gate",
     "crates/rvf-forge-core",
+    # RVForge file-backed release registry: content-addressed objects, publish
+    # rules, trust ladder, revocation, Merkle transparency log (ADR-294).
+    "crates/rvforge-registry",
     "crates/mcp-brain",
     "crates/mcp-brain-server",
     "crates/ruvllm",
