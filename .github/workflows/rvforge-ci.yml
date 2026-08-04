@@ -1,0 +1,114 @@
+name: RVForge CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/rvf-forge'
+    paths:
+      - 'npm/packages/forge/**'
+      - 'npm/packages/rvforge/**'
+      - 'crates/rvf-forge-core/**'
+      - '.github/workflows/rvforge-ci.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'npm/packages/forge/**'
+      - 'npm/packages/rvforge/**'
+      - 'crates/rvf-forge-core/**'
+      - '.github/workflows/rvforge-ci.yml'
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20.x'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cli:
+    name: rvforge CLI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate CLI package
+        id: pkg
+        shell: bash
+        run: |
+          if [ -f npm/packages/rvforge/package.json ]; then
+            echo "dir=npm/packages/rvforge" >> "$GITHUB_OUTPUT"
+          elif [ -f npm/packages/forge/package.json ]; then
+            echo "dir=npm/packages/forge" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.pkg.outputs.dir != ''
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install
+        if: steps.pkg.outputs.dir != ''
+        shell: bash
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: npm install
+
+      - name: Typecheck + build
+        if: steps.pkg.outputs.dir != ''
+        shell: bash
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: npm run build
+
+      - name: Test
+        if: steps.pkg.outputs.dir != ''
+        shell: bash
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: npm test
+
+  core:
+    name: rvf-forge-core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check crate exists
+        id: crate
+        shell: bash
+        run: |
+          if [ -f crates/rvf-forge-core/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.crate.outputs.present == 'true'
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.crate.outputs.present == 'true'
+        with:
+          workspaces: '. -> target'
+
+      - name: Test
+        if: steps.crate.outputs.present == 'true'
+        run: cargo test -p rvf-forge-core
+
+      - name: Clippy
+        if: steps.crate.outputs.present == 'true'
+        run: cargo clippy -p rvf-forge-core -- -D warnings
+
+      - name: Format check
+        if: steps.crate.outputs.present == 'true'
+        shell: bash
+        run: cargo fmt -p rvf-forge-core -- --check

@@ -28,7 +28,7 @@ artifacts, no secrets in code or logs.
 - [ ] 4. rvm-* integration work items (rvm-rvf first; note: rvm is a
        separate repo github.com/ruvnet/rvm — for this repo, define the
        integration contract + compatibility matrix consumed by forge)
-- [ ] 5. GitHub Actions build matrix (linux/windows/macos) for forge
+- [x] 5. GitHub Actions build matrix — .github/workflows/rvforge-ci.yml (3-OS matrix for CLI npm test + cargo test/clippy/fmt; tolerant of pending package rename)
 - [ ] 6. Embedded + thin packaging modes
 - [ ] 7. Provenance, inventory, witness receipts wired end-to-end
 - [ ] 8. Tests green (cargo test -p rvf-forge-core, npm test in forge),
@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 3 (2026-08-03 ~21:03 local, loop fire #2). Registry data model v0.1 written (registry-model.md): content-addressed objects, predecessor-linked releases, capability manifest, witness receipt hash-chain, revocation (block-execution only), transparency log. Both agents still in flight (CLI: 12 src modules, no tests yet; crate: lib.rs started).
+- **Iteration**: 4 (loop fire #3). rvforge-ci.yml written: 3-OS matrix, path-filtered, handles both forge/rvforge package dirs. Agents still in flight (CLI: src+4 test suites+fixture; crate: 6 modules).
 - **In flight**:
   - `forge-scaffold` agent: `npm/packages/forge` (step 1) — package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
