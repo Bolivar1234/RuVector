@@ -131,7 +131,11 @@ pub fn checksums<P: AsRef<Path>>(root: impl AsRef<Path>, paths: &[P]) -> Result<
 
     for p in paths {
         let path = p.as_ref();
-        let absolute = if path.is_absolute() {
+        // has_root(), not is_absolute(): on Windows "/etc/hostname" has a
+        // root but no drive prefix, so is_absolute() is false — yet it is
+        // not a safe relative path either. Any rooted path takes the
+        // containment-checked branch on every platform.
+        let absolute = if path.has_root() {
             path.to_path_buf()
         } else {
             root.join(path)
@@ -225,7 +229,7 @@ fn hash_file(path: &Path) -> Result<([u8; 32], u64)> {
 
 /// Express `path` relative to `root`, rejecting anything that escapes it.
 fn relative_to(root: &Path, path: &Path) -> Result<String> {
-    let relative = if path.is_absolute() {
+    let relative = if path.has_root() {
         path.strip_prefix(root).map_err(|_| ForgeError::Manifest {
             detail: format!(
                 "{} is outside the artifact root {}",
