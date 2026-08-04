@@ -19,8 +19,12 @@ import { runDownload } from './download';
 import { ForgeError, ForgeErrorCode, toForgeError } from './errors';
 import { formatBytes } from './estimate';
 import { createReporter, renderEstimate, USAGE, type Reporter } from './output';
+import { runPack } from './pack';
+import { PROJECT_FILENAME, loadProject } from './project';
+import { renderPublishSummary, runPublish } from './publish';
 import { planSubmit, runSubmit } from './submit';
 import { runStatus } from './status';
+import { runTestAgent } from './test-agent';
 import { runVerify } from './verify';
 import { validateRvf } from './validate';
 import { PACKAGING_MODES, type PackagingMode } from './types';
@@ -33,7 +37,16 @@ interface ParsedArgs {
   repeated: Map<string, string[]>;
 }
 
-const VALUE_FLAGS = new Set(['config', 'out', 'provenance', 'mode']);
+const VALUE_FLAGS = new Set([
+  'config',
+  'out',
+  'provenance',
+  'mode',
+  'project',
+  'key-file',
+  'registry',
+  'receipts',
+]);
 const REPEATED_FLAGS = new Set(['only']);
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -125,6 +138,12 @@ async function dispatch(args: ParsedArgs, reporter: Reporter): Promise<number> {
       return cmdInit(args, reporter);
     case 'validate':
       return cmdValidate(args, reporter);
+    case 'pack':
+      return cmdPack(args, reporter);
+    case 'test':
+      return cmdTest(args, reporter);
+    case 'publish':
+      return cmdPublish(args, reporter);
     case 'build':
       return cmdBuild(args, reporter);
     case 'submit':
@@ -145,6 +164,7 @@ async function dispatch(args: ParsedArgs, reporter: Reporter): Promise<number> {
 }
 
 const configPath = (args: ParsedArgs): string => resolve(str(args, 'config') ?? CONFIG_FILENAME);
+const projectPath = (args: ParsedArgs): string => resolve(str(args, 'project') ?? PROJECT_FILENAME);
 
 /**
  * Split `build`/`submit` positionals into an optional RVF path and targets.
@@ -175,12 +195,131 @@ function requireOperand(args: ParsedArgs, index: number, label: string): string 
 }
 
 async function cmdInit(args: ParsedArgs, reporter: Reporter): Promise<number> {
-  const result = await runInit(configPath(args), { force: bool(args, 'force') });
+  const result = await runInit(configPath(args), {
+    force: bool(args, 'force'),
+    project: bool(args, 'with-project'),
+    keygen: bool(args, 'keygen'),
+    ...(str(args, 'project') ? { projectPath: projectPath(args) } : {}),
+    ...(str(args, 'key-file') ? { keyFile: resolve(str(args, 'key-file') as string) } : {}),
+  });
   reporter.success('init', result, () => [
     `Wrote ${result.path}`,
+    ...(result.projectPath ? [`Wrote ${result.projectPath}`] : []),
+    // The path, never the key: nothing in forge prints key material.
+    ...(result.keyFile ? [`Wrote ${result.keyFile} (mode 600) — key id ${result.keyId}`] : []),
     'Capability policy is default-deny: add explicit grants before building.',
-    'Next: forge validate <agent.rvf>',
+    result.projectPath ? 'Next: rvforge pack <agent.rvf>' : 'Next: rvforge validate <agent.rvf>',
   ]);
+  return 0;
+}
+
+async function cmdPack(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const rvfPath = resolve(requireOperand(args, 0, 'agent.rvf'));
+  const project = await loadProject(projectPath(args));
+  const result = await runPack({ rvfPath, project, allowUnsigned: bool(args, 'allow-unsigned') });
+
+  for (const warning of result.warnings) reporter.warn(warning);
+  reporter.success(
+    'pack',
+    {
+      rvfPath: result.rvfPath,
+      checks: result.checks,
+      securityProfile: result.securityProfile,
+      manualReviewTriggers: result.manualReviewTriggers,
+      capabilityManifest: result.capabilityManifest,
+      softwareInventory: result.softwareInventory,
+      release: result.release,
+    },
+    () => [
+      `Packed ${result.rvfPath}`,
+      ...result.checks.map((c) => `  ${statusMark(c.status)} ${c.title.padEnd(26)} ${c.detail}`),
+      `  security profile   ${result.securityProfile}`,
+      `  capability manifest ${result.capabilityManifest.manifestId}`,
+      `  draft release       ${result.release.releaseId} (unsigned, trust level ${result.release.trustLevel})`,
+      ...(result.manualReviewTriggers.length > 0
+        ? [`  manual review       ${result.manualReviewTriggers.join(', ')}`]
+        : []),
+    ],
+  );
+  return 0;
+}
+
+const statusMark = (status: string): string =>
+  status === 'pass' ? 'ok  ' : status === 'warn' ? 'warn' : status === 'skipped' ? 'skip' : 'FAIL';
+
+/**
+ * `test` reports; it does not throw for a failing category. The exit code is
+ * what an unattended caller branches on, so a failure exits non-zero — with
+ * the per-category report already printed.
+ */
+async function cmdTest(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const rvfPath = resolve(requireOperand(args, 0, 'agent.rvf'));
+  const project = await loadProject(projectPath(args));
+  const result = await runTestAgent({
+    rvfPath,
+    project,
+    allowUnsigned: bool(args, 'allow-unsigned'),
+    ...(str(args, 'receipts') ? { receiptsDir: resolve(str(args, 'receipts') as string) } : {}),
+  });
+
+  reporter.success('test', result, () => [
+    `Tested ${result.rvfPath} (inspection only — nothing was executed)`,
+    ...result.categories.map((c) => `  ${statusMark(c.status)} ${c.title.padEnd(30)} ${c.detail}`),
+    `  ${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped`,
+  ]);
+  if (result.ok) return 0;
+
+  return reporter.failure(
+    'test',
+    new ForgeError(
+      ForgeErrorCode.VERIFY_FAILED,
+      `${result.failed} of ${result.categories.length} test categories failed: ` +
+        result.categories
+          .filter((c) => c.status === 'fail')
+          .map((c) => `${c.id} (${c.detail})`)
+          .join('; '),
+    ),
+  );
+}
+
+async function cmdPublish(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const rvfPath = resolve(requireOperand(args, 0, 'agent.rvf'));
+  const project = await loadProject(projectPath(args));
+  const result = await runPublish({
+    rvfPath,
+    project,
+    allowUnsigned: bool(args, 'allow-unsigned'),
+    ...(str(args, 'registry') ? { registryDir: resolve(str(args, 'registry') as string) } : {}),
+    ...(str(args, 'key-file') ? { keyFile: resolve(str(args, 'key-file') as string) } : {}),
+  });
+
+  reporter.success(
+    'publish',
+    {
+      registryDir: result.registryDir,
+      publisherId: result.publisherId,
+      keyId: result.keyId,
+      releaseId: result.release.releaseId,
+      predecessor: result.predecessor,
+      capabilityManifest: result.capabilityManifest.manifestId,
+      objects: result.objects,
+      logEntry: result.logEntry,
+      treeHead: result.treeHead,
+      receiptId: result.receipt.receiptId,
+      summary: result.summary,
+    },
+    () => [
+      ...renderPublishSummary(result.summary),
+      '',
+      `Published to ${result.registryDir}`,
+      `  release      ${result.release.releaseId}`,
+      `  predecessor  ${result.predecessor ?? 'none (first release)'}`,
+      `  signed by    ${result.keyId}`,
+      `  objects      ${result.objects.length} written`,
+      `  log entry    #${result.logEntry.index}, tree head ${result.treeHead.treeHead}`,
+      `  witness      ${result.receipt.receiptId}`,
+    ],
+  );
   return 0;
 }
 

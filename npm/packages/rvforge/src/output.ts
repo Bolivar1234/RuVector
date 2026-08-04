@@ -84,13 +84,18 @@ export function renderEstimate(estimate: BuildEstimate): string[] {
 export const USAGE = `RVForge — one canonical RVF to signed platform installers
 
 Usage:
-  forge init [--force] [--config <path>]
-  forge validate <agent.rvf> [--deep] [--allow-unsigned]
-  forge build [agent.rvf] [targets...] [--mode <mode>] [--out <dir>] [--force]
-  forge submit [agent.rvf] [targets...] [--yes] [--cached]
-  forge status <BUILD_ID>
-  forge download <BUILD_ID> [--out <dir>] [--only <name>]
-  forge verify <artifact|dir> [--provenance <path>]
+  rvforge init [--force] [--with-project] [--keygen] [--key-file <path>]
+  rvforge validate <agent.rvf> [--deep] [--allow-unsigned]
+  rvforge build [agent.rvf] [targets...] [--mode <mode>] [--out <dir>] [--force]
+  rvforge submit [agent.rvf] [targets...] [--yes] [--cached]
+  rvforge status <BUILD_ID>
+  rvforge download <BUILD_ID> [--out <dir>] [--only <name>]
+  rvforge verify <artifact|dir> [--provenance <path>]
+
+Publisher (marketplace) verbs — read rvforge.json:
+  rvforge pack <agent.rvf> [--project <path>] [--allow-unsigned]
+  rvforge test <agent.rvf> [--project <path>] [--receipts <dir>]
+  rvforge publish <agent.rvf> [--registry <dir>] [--key-file <path>]
 
 Targets:
   windows-x64  windows-arm64  macos-x64  macos-arm64  macos-universal
@@ -105,7 +110,10 @@ Packaging modes (--mode):
 Global flags:
   --json            Machine-readable output on stdout
   --quiet           Suppress human-readable output
-  --config <path>   Config file (default: forge.config.json)
+  --config <path>   Build config file (default: forge.config.json)
+  --project <path>  Marketplace project file (default: rvforge.json)
+  --registry <dir>  Local registry directory (default: ~/.rvforge/registry)
+  --key-file <path> Ed25519 publisher key; never printed, path only
   --help, -h        Show this help
   --version, -v     Print the forge version
 
@@ -117,4 +125,5 @@ Exit codes:
   0 success   2 usage           3 invalid rvf   4 unsigned segment
   5 target    6 manifest        7 network       8 auth
   9 verify    10 io             11 not found    12 config
-  13 toolchain                  20 internal`;
+  13 toolchain 14 policy        15 license      16 key
+  17 registry  18 lineage       20 internal`;

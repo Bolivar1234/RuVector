@@ -17,12 +17,22 @@ Requires Node.js 20 or later.
 
 ```bash
 npx @ruvector/rvforge init                     # scaffold forge.config.json
+npx @ruvector/rvforge init --keygen            # …plus rvforge.json and a publisher key
 npx @ruvector/rvforge validate agent.rvf       # structural check, no execution
 npx @ruvector/rvforge build agent.rvf          # local build (--mode embedded|thin)
 npx @ruvector/rvforge submit agent.rvf --yes   # hosted build
 npx @ruvector/rvforge status BUILD_ID
 npx @ruvector/rvforge download BUILD_ID
 npx @ruvector/rvforge verify AgentSetup.exe
+```
+
+The publisher verbs work against `rvforge.json` and a registry rather than
+against installers:
+
+```bash
+npx @ruvector/rvforge pack agent.rvf           # the ADR-294 validation list
+npx @ruvector/rvforge test agent.rvf           # inspection-only test categories
+npx @ruvector/rvforge publish agent.rvf        # sign and append a release
 ```
 
 Targets are `windows-x64`, `windows-arm64`, `macos-x64`, `macos-arm64`,
@@ -244,6 +254,107 @@ so a reviewer can confirm the permissions an installer ships with match the
 ones they approved. `defaultDeny` is forced to `true`; a policy that opts out
 is rejected rather than silently accepted.
 
+## Publishing
+
+`pack`, `test`, and `publish` implement the ADR-294 §4 publisher CLI. They read
+`rvforge.json` — the marketplace project file, scaffolded by
+`rvforge init --keygen` — which holds the listing metadata, publisher identity,
+license, runtime requirements, and the capability contract the install UX
+renders. It is separate from `forge.config.json` on purpose: a build is
+reproducible from the build config alone, and nothing in the project file can
+change a build's output. Neither file ever holds credentials.
+
+### `pack`
+
+Runs every item on the ADR-294 validation list that is decidable locally — RVF
+structure, publisher signature, executable segments, model provenance,
+capability policy, runtime compatibility against the vendored matrix, memory
+requirements, external services, software inventory, and license — then emits an
+unsigned `CapabilityManifest` and a draft `Release` in the registry data model's
+shapes.
+
+```bash
+rvforge pack agent.rvf --project rvforge.json
+```
+
+Every check runs before the aggregate decides, so a publisher sees all their
+problems at once rather than one release at a time. A **vague capability scope**
+— `all-files`, `*`, `unrestricted` — is not a failure: ADR-294 §8 makes it
+*require human review*, so it is recorded in `manualReviewTriggers`, drops the
+security profile to `review-required`, and the pack still succeeds. Treating it
+as a failure would push publishers toward describing capabilities less precisely
+to dodge the flag. A missing license, an undeclared memory ceiling, a class both
+requested and denied, or a runtime absent from the matrix do fail, with
+`FORGE_E_LICENSE`, `FORGE_E_MANIFEST`, `FORGE_E_POLICY`, and
+`FORGE_E_UNSUPPORTED_TARGET` respectively.
+
+### `test`
+
+Six of the ten P4 test categories are decidable by inspection; four are not.
+
+| Category | Outcome |
+| --- | --- |
+| Malformed inputs | run — truncated and bit-flipped variants must be rejected cleanly |
+| Capability denials | run — all fifteen ADR-286 classes must be requested or denied |
+| Filesystem escape attempts | run in reduced form — declared scopes checked for traversal and root escapes |
+| State checkpoint and recovery | run — contract fields present |
+| Update and rollback | run — version ordering and rollback-safety declared coherently |
+| Witness verification | run when a `receipts.jsonl` exists, otherwise skipped with the reason |
+| Clean installation | **skipped: requires quarantined runtime (Reader/RVM)** |
+| Deterministic evaluations | **skipped: requires quarantined runtime (Reader/RVM)** |
+| Network monitoring | **skipped: requires quarantined runtime (Reader/RVM)** |
+| Resource exhaustion | **skipped: requires quarantined runtime (Reader/RVM)** |
+
+The four skipped categories are **never reported as passing**. Forge does not
+execute an RVF, so it has no evidence about them, and ADR-294 §7 makes a trust
+level a statement about evidence actually gathered. `filesystem-escape` says in
+its own detail line that runtime probing was not attempted, so a `pass` there
+cannot be read as the stronger claim.
+
+`test` exits `9` (`FORGE_E_VERIFY_FAILED`) when a category fails, after printing
+the full per-category report.
+
+### `publish`
+
+Targets a local registry directory implementing the storage layout in
+`docs/research/rvf-forge/registry-model.md`.
+
+```bash
+rvforge publish agent.rvf --registry ~/.rvforge/registry --key-file publisher.key
+```
+
+It writes the capability manifest, release, software inventory, and pack
+provenance to `objects/sha256/<2-hex>/<digest>.json`; signs the release with an
+Ed25519 key over its `releaseId`; appends to
+`packages/<publisher>/<name>/releases.jsonl` with the predecessor resolved from
+the current head; extends `log/entries.jsonl` and `log/tree-head.json`; and
+chains a `WitnessReceipt` for the publish. Then it prints the P4 summary block.
+
+An object's id is `sha256:<hex>` over its canonical JSON **excluding**
+`signatures` and its own id field, so adding a countersignature later does not
+change what it identifies.
+
+**Key handling.** `rvforge init --keygen` writes the key with mode `600` and
+never overwrites an existing one. `publish` refuses a key file any account other
+than its owner can read (POSIX only — Windows has no comparable mode bits, and
+the check is skipped rather than faked), and refuses a key the publisher record
+does not already list: key rotation is a registry operation, not a side effect of
+publishing. Key material is read only by `src/keys.ts` and never reaches a log
+line, an error message, or a registry object.
+
+**Deviations from `registry-model.md`**, for the parity test against
+`crates/rvforge-registry` to reconcile:
+
+- the tree head is a **hash chain**, not a Merkle tree, so it is tamper-evident
+  but yields no per-entry inclusion proof;
+- the tree head is unsigned — signing it is the registry's act, and a local
+  registry has only the publisher's key;
+- `packages/<publisher>/publisher.json` and `receipts.jsonl` are additions; the
+  documented layout names neither, and the model gives no way to resolve a
+  `publisherId` back to its record;
+- `publish` is added to the witness event vocabulary, which the model's list
+  does not cover.
+
 ## Security
 
 - **RVF content is never executed.** Validation, packaging, and scanning are
@@ -252,9 +363,15 @@ is rejected rather than silently accepted.
   in a staged bundle is runnable.
 - **The build path makes no network calls.** A locator records where an RVF
   will be fetched from; forge does not fetch it.
-- **Signing references only.** Forge records which key to ask for and which
-  service holds it. Private key material is never read, stored, logged, or
-  transmitted; signing happens on a worker with HSM or KMS access.
+- **Signing references only, for platform installers.** Forge records which key
+  to ask for and which service holds it. Platform-signing key material is never
+  read, stored, logged, or transmitted; signing happens on a worker with HSM or
+  KMS access.
+- **The publisher key is the one exception, and it is contained.** `publish`
+  needs an Ed25519 private key to sign a release. It is read only by
+  `src/keys.ts`, held as a `KeyObject` rather than bytes, refused when its file
+  is readable beyond its owner, and never returned, printed, or written into a
+  registry object — only its derived `keyId` and public half are.
 - **Credentials come from the environment.** `FORGE_API_TOKEN` is never
   accepted as a flag, so it stays out of shell history and process listings.
 - **Messages are redacted.** Bearer tokens, URL userinfo, and long opaque
@@ -286,6 +403,29 @@ const manifest = buildManifest({
 
 await runVerify('forge-out');
 verifyReceiptChain(await readReceipts('forge-out')); // { ok: true, … }
+```
+
+The publisher verbs are available the same way:
+
+```ts
+import { loadProject, runPack, runPublish, runTestAgent, verifyLog, readLog } from '@ruvector/rvforge';
+
+const project = await loadProject('rvforge.json');
+
+const packed = await runPack({ rvfPath: 'agent.rvf', project });
+packed.release.releaseId;        // 'sha256:…', unsigned draft
+packed.manualReviewTriggers;     // ADR-294 §8 triggers, if any
+
+const tested = await runTestAgent({ rvfPath: 'agent.rvf', project });
+tested.categories.filter((c) => c.status === 'skipped'); // the quarantine-only four
+
+const published = await runPublish({
+  rvfPath: 'agent.rvf',
+  project,
+  registryDir: '/tmp/registry',
+  keyFile: 'publisher.key',
+});
+verifyLog(await readLog(published.registryDir)); // { ok: true, … }
 ```
 
 ## Development

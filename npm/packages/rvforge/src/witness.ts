@@ -24,8 +24,28 @@ import { canonicalJson, sha256String } from './hash';
 
 export const RECEIPTS_FILENAME = 'receipts.jsonl';
 
-/** Events forge itself witnesses. The registry model defines more. */
-export type WitnessEvent = 'build' | 'verify';
+/**
+ * Events forge witnesses.
+ *
+ * `build` and `verify` come from the local pipeline; the rest are the registry
+ * data model's vocabulary, carried here so a receipt forge writes into a
+ * registry uses the same names a Reader will read.
+ *
+ * **Deviation from registry-model.md**: `publish` is not in the model's event
+ * list, which runs `build|verify|install|update|capability-grant|
+ * capability-denial|revocation-check`. Appending a release is an event worth a
+ * receipt and none of those names fits it, so forge adds one — to be
+ * reconciled with `crates/rvforge-registry` rather than left implicit.
+ */
+export type WitnessEvent =
+  | 'build'
+  | 'verify'
+  | 'publish'
+  | 'install'
+  | 'update'
+  | 'capability-grant'
+  | 'capability-denial'
+  | 'revocation-check';
 export type WitnessOutcome = 'pass' | 'fail' | 'denied';
 export type WitnessActorKind = 'builder' | 'reader' | 'registry' | 'rvm';
 

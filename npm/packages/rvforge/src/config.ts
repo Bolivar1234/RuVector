@@ -8,9 +8,12 @@
  */
 
 import { readFile, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 
 import { ForgeError, ForgeErrorCode } from './errors';
+import { generatePublisherKey, writePublisherKey } from './keys';
 import { defaultCapabilityPolicy, normalizeCapabilityPolicy } from './manifest';
+import { PROJECT_FILENAME, defaultProject, writeProject, type RvforgeProject } from './project';
 import {
   PACKAGING_MODES,
   RUNTIME_PROFILES,
@@ -135,14 +138,42 @@ export interface InitResult {
   path: string;
   created: boolean;
   config: ForgeConfig;
+  /** Path to the scaffolded `rvforge.json`, when one was written. */
+  projectPath?: string;
+  project?: RvforgeProject;
+  /**
+   * Path to a generated key file. The path only — the key itself is written
+   * with owner-only permissions and never returned, logged, or transmitted.
+   */
+  keyFile?: string;
+  keyId?: string;
+}
+
+export interface InitOptions {
+  force?: boolean;
+  /** Also scaffold `rvforge.json` (the marketplace project file). */
+  project?: boolean;
+  /** Generate an Ed25519 publisher key and point the project file at it. */
+  keygen?: boolean;
+  /** Where to write the key; defaults to `rvforge-publisher.key` beside the project. */
+  keyFile?: string;
+  /** Where to write `rvforge.json`; defaults to `rvforge.json` beside the config. */
+  projectPath?: string;
 }
 
 /**
- * Write a starter config.
+ * Write a starter config, and — when asked — the marketplace project file and
+ * a publisher key beside it.
  *
- * @throws {ForgeError} `FORGE_E_CONFIG` if the file exists and `force` is not set.
+ * `--keygen` implies the project file: a key with nothing to sign is not a
+ * useful thing to have generated, and the project file is where its path is
+ * recorded.
+ *
+ * @throws {ForgeError} `FORGE_E_CONFIG` if a file exists and `force` is not
+ * set; `FORGE_E_KEY` if a key file exists (never overwritten, even with
+ * `--force`).
  */
-export async function runInit(path: string, options: { force?: boolean } = {}): Promise<InitResult> {
+export async function runInit(path: string, options: InitOptions = {}): Promise<InitResult> {
   const config = defaultConfig();
   const body = `${JSON.stringify(config, null, 2)}\n`;
   try {
@@ -157,5 +188,25 @@ export async function runInit(path: string, options: { force?: boolean } = {}): 
     }
     throw new ForgeError(ForgeErrorCode.IO, `Cannot write ${path}.`, { path });
   }
-  return { path, created: true, config };
+
+  const result: InitResult = { path, created: true, config };
+  if (!options.project && !options.keygen) return result;
+
+  const projectPath = resolve(options.projectPath ?? join(dirname(path), PROJECT_FILENAME));
+  let keyFile: string | undefined;
+  let keyId: string | undefined;
+
+  if (options.keygen) {
+    keyFile = resolve(options.keyFile ?? join(dirname(path), 'rvforge-publisher.key'));
+    const generated = generatePublisherKey();
+    keyId = generated.keyId;
+    await writePublisherKey(keyFile, generated);
+  }
+
+  const project = defaultProject(
+    keyFile ? { publisher: { ...defaultProject().publisher, keyFile } } : {},
+  );
+  await writeProject(projectPath, project, { force: options.force });
+
+  return { ...result, projectPath, project, ...(keyFile ? { keyFile, keyId } : {}) };
 }

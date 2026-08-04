@@ -31,6 +31,16 @@ export enum ForgeErrorCode {
   CONFIG = 'FORGE_E_CONFIG',
   /** A required local build tool (Tauri, cargo) is unavailable. */
   TOOLCHAIN = 'FORGE_E_TOOLCHAIN',
+  /** The capability policy is absent, vague, or contradicts itself. */
+  POLICY = 'FORGE_E_POLICY',
+  /** The listing declares no license, or one forge cannot reconcile. */
+  LICENSE = 'FORGE_E_LICENSE',
+  /** A signing key is missing, unusable, over-permissioned, or unregistered. */
+  KEY = 'FORGE_E_KEY',
+  /** The local registry directory is unreadable, malformed, or inconsistent. */
+  REGISTRY = 'FORGE_E_REGISTRY',
+  /** A release's predecessor chain does not resolve to a coherent lineage. */
+  LINEAGE = 'FORGE_E_LINEAGE',
   /** An unexpected condition; always a bug in forge itself. */
   INTERNAL = 'FORGE_E_INTERNAL',
 }
@@ -49,6 +59,11 @@ export const EXIT_CODES: Readonly<Record<ForgeErrorCode, number>> = Object.freez
   [ForgeErrorCode.NOT_FOUND]: 11,
   [ForgeErrorCode.CONFIG]: 12,
   [ForgeErrorCode.TOOLCHAIN]: 13,
+  [ForgeErrorCode.POLICY]: 14,
+  [ForgeErrorCode.LICENSE]: 15,
+  [ForgeErrorCode.KEY]: 16,
+  [ForgeErrorCode.REGISTRY]: 17,
+  [ForgeErrorCode.LINEAGE]: 18,
   [ForgeErrorCode.INTERNAL]: 20,
 });
 

@@ -84,6 +84,7 @@ export {
   loadConfig,
   runInit,
   validateConfig,
+  type InitOptions,
   type InitResult,
 } from './config';
 
@@ -193,5 +194,113 @@ export {
   type ForgeApiOptions,
   type SubmitRequest,
 } from './api';
+
+export {
+  MANIFEST_CAPABILITY_CLASSES,
+  PROJECT_FILENAME,
+  REVIEW_TRIGGER_CLASSES,
+  VAGUE_SCOPES,
+  defaultDenials,
+  defaultProject,
+  loadProject,
+  publisherIdFor,
+  validateProject,
+  writeProject,
+  type CapabilityRequest,
+  type ManifestCapabilityClass,
+  type ProjectInitResult,
+  type ProjectListing,
+  type ProjectPublisher,
+  type ProjectRuntimeRequirements,
+  type RvforgeProject,
+} from './project';
+
+export {
+  assertKeyFilePermissions,
+  generatePublisherKey,
+  keyIdFor,
+  loadPublisherKey,
+  signObjectId,
+  verifyObjectId,
+  writePublisherKey,
+  type PublisherKey,
+  type PublisherKeyFile,
+} from './keys';
+
+export {
+  DEFAULT_REGISTRY_DIR,
+  LOG_ENTRIES_FILE,
+  PUBLISHER_FILENAME,
+  RELEASES_FILENAME,
+  TREE_HEAD_FILE,
+  appendLogEntry,
+  appendRelease,
+  digestOf,
+  getObject,
+  initRegistry,
+  objectId,
+  objectPath,
+  packagePath,
+  publisherPath,
+  putObject,
+  readLog,
+  readReleaseIndex,
+  readTreeHead,
+  verifyLog,
+  type CapabilityManifest,
+  type ObjectSignature,
+  type PublisherRecord,
+  type Release,
+  type ReleaseIndexEntry,
+  type RegistryObject,
+  type TransparencyLogEntry,
+  type TreeHead,
+} from './registry';
+
+export {
+  assertNoFailures,
+  capabilityPolicyCheck,
+  executableSegmentCheck,
+  externalServicesCheck,
+  licenseCheck,
+  memoryRequirementsCheck,
+  modelProvenanceCheck,
+  runtimeCompatibilityCheck,
+  signatureCheck,
+  structureCheck,
+  type CheckStatus,
+  type PackCheck,
+} from './pack-checks';
+
+export {
+  buildCapabilityManifest,
+  capabilityContractHash,
+  manualReviewTriggers,
+  packInventory,
+  runPack,
+  securityProfileFor,
+  type PackOptions,
+  type PackProvenance,
+  type PackResult,
+  type SecurityProfile,
+} from './pack';
+
+export {
+  QUARANTINE_REASON,
+  runTestAgent,
+  type TestAgentOptions,
+  type TestAgentResult,
+  type TestCategory,
+  type TestStatus,
+} from './test-agent';
+
+export {
+  publishSummary,
+  renderPublishSummary,
+  runPublish,
+  type PublishOptions,
+  type PublishResult,
+  type PublishSummary,
+} from './publish';
 
 export { forgeVersion, FORGE_PACKAGE_NAME } from './version';
