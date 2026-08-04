@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 2 (2026-08-03 ~20:57 local, loop fire #1)
+- **Iteration**: 3 (2026-08-03 ~21:03 local, loop fire #2). Registry data model v0.1 written (registry-model.md): content-addressed objects, predecessor-linked releases, capability manifest, witness receipt hash-chain, revocation (block-execution only), transparency log. Both agents still in flight (CLI: 12 src modules, no tests yet; crate: lib.rs started).
 - **In flight**:
   - `forge-scaffold` agent: `npm/packages/forge` (step 1) — package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
@@ -73,7 +73,7 @@ Enterprise** — an agentic app store + runtime + registry + trust system
        metadata; `test` = quarantined capability-denial/malformed-input/
        checkpoint-recovery tests (local, never executes RVF outside
        sandbox); `publish` = signed release record upload to registry.
-- [ ] P2. Registry data model (content-addressed releases, immutable,
+- [~] P2. Registry data model — wire-format contract done (registry-model.md); local file-backed implementation pending (content-addressed releases, immutable,
        predecessor-linked, transparency log) — schema + local registry
        implementation first, hosted later.
 - [ ] P3. Reader = the Tauri app (step 3) grows store/library/runtime/
