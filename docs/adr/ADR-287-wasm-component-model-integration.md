@@ -8,7 +8,7 @@
 
 ## Context
 
-rvForge converts one canonical `.rvf` artifact into installable packages for
+RVForge converts one canonical `.rvf` artifact into installable packages for
 Windows, macOS, Linux, and RVM. The same signed RVF must execute through RVM
 bare metal, RVM hosted mode, RVM WASM mode, browser WASM, and the desktop RVF
 Reader, with identical capability, witness, state, and lifecycle semantics on

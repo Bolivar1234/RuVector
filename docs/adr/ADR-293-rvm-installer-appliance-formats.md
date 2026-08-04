@@ -27,7 +27,7 @@ for it. That tier needs a bootable image produced by the same build that
 produces the installers, from the same canonical RVF, or the compatibility claim
 does not survive contact with a real Linux host.
 
-This ADR defines the RVM-specific outputs rvForge generates and what stays out
+This ADR defines the RVM-specific outputs RVForge generates and what stays out
 of scope. The runtime contract these images must carry is ADR-291; the acceleration
 segments a partition may load are ADR-292; the trust boundary of the build that
 emits them is ADR-290.

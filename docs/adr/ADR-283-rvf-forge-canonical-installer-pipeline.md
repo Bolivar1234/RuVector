@@ -1,4 +1,4 @@
-# ADR-283: rvForge — One Canonical RVF to Signed Platform Installers
+# ADR-283: RVForge — One Canonical RVF to Signed Platform Installers
 
 - **Status**: Proposed
 - **Date**: 2026-08-03
@@ -43,7 +43,7 @@ prioritizes Rust and WASM agents, with broader compatibility added later.
 
 ## Decision
 
-Build **rvForge**: an npm CLI (`@ruvector/forge`) plus an optional hosted
+Build **RVForge**: an npm CLI (`@ruvector/forge`) plus an optional hosted
 build service that converts one canonical `.rvf` into installable packages for
 Windows, macOS, Linux, and RVM.
 
@@ -64,7 +64,7 @@ npm CLI
    ↓
 Signed build manifest
    ↓
-rvForge scheduler
+RVForge scheduler
    ↓
 Linux worker / Windows worker / macOS worker
    ↓

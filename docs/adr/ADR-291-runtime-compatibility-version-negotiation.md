@@ -10,7 +10,7 @@
 
 The same signed RVF must run through RVM bare metal, RVM hosted mode, RVM WASM
 mode, browser WASM, and the desktop RVF Reader, with identical capability,
-witness, state, and lifecycle semantics across every backend. rvForge produces
+witness, state, and lifecycle semantics across every backend. RVForge produces
 packages for all of these from one canonical artifact.
 
 That guarantee only holds when the runtime inside a package is a version that

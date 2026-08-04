@@ -8,7 +8,7 @@
 
 ## Context
 
-rvForge converts one canonical `.rvf` artifact into installable packages for
+RVForge converts one canonical `.rvf` artifact into installable packages for
 Windows, macOS, Linux, and RVM. Cross compilation alone is insufficient: DMG and
 Debian bundles require their native build environments, so the hosted service
 must run Linux, Windows, and macOS builds on native workers.

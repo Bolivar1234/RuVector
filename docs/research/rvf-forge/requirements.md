@@ -1,13 +1,13 @@
-# rvForge — Canonical Requirements
+# RVForge — Canonical Requirements
 
-> Source of truth for the rvForge + RVM integration build-out (branch
+> Source of truth for the RVForge + RVM integration build-out (branch
 > `feat/rvf-forge`). Captured 2026-08-03 from the product directive. ADRs
 > ADR-283 through ADR-293 derive from this document. If an ADR and this
 > document disagree, reconcile the ADR and note the change here.
 
 ## Product Summary
 
-Build `rvForge`: an npm CLI plus an optional hosted build service that
+Build `RVForge`: an npm CLI plus an optional hosted build service that
 converts one canonical RVF into signed platform installers.
 
 ```bash
@@ -54,7 +54,7 @@ npm CLI
    ↓
 Signed build manifest
    ↓
-rvForge scheduler
+RVForge scheduler
    ↓
 Linux worker / Windows worker / macOS worker
    ↓
@@ -133,11 +133,11 @@ capabilities, and emit verifiable build and runtime witness records.
 
 ---
 
-# rvForge Requirements
+# RVForge Requirements
 
 ## 1. Objective
 
-rvForge converts one canonical `.rvf` artifact into installable packages
+RVForge converts one canonical `.rvf` artifact into installable packages
 for Windows, macOS, Linux, and RVM.
 
 The RVF identity, contents, policies, and signatures must remain unchanged
@@ -402,7 +402,7 @@ Applies specifically to [`ruvnet/rvm`](https://github.com/ruvnet/rvm).
 
 ## 1. Objective
 
-RVM must become an executable backend for rvForge packages.
+RVM must become an executable backend for RVForge packages.
 
 The same signed RVF must run through:
 
@@ -663,7 +663,7 @@ A release passes only when one signed RVF:
 
 # Product Vision & Distribution
 
-rvForge turns an RVF agent into a normal installable application that
+RVForge turns an RVF agent into a normal installable application that
 users can download, double tap, and run securely on almost any system.
 
 ## User experience
@@ -748,7 +748,7 @@ Today, distributing one agent across three operating systems and two
 processor architectures can require six builds, multiple signing pipelines,
 separate update systems, and weeks of integration work.
 
-rvForge reduces that to one agent artifact and an automated five to ten
+RVForge reduces that to one agent artifact and an automated five to ten
 minute packaging process. The platform specific wrappers change, but the
 agent identity and behavior remain constant.
 
@@ -764,3 +764,330 @@ A nontechnical user downloads the generated application, installs it
 without developer tools, runs it offline, confirms denied host access,
 moves its encrypted state to another platform, and resumes with the same
 verified identity and behavior.
+
+---
+
+# RVForge Platform — Store, Reader, Publisher, Registry, Enterprise
+
+RVForge is an independent agentic application store, runtime, package
+registry, and trust system built around RVF and RVM. It is closer to Steam
+plus npm plus an enterprise application catalog than to the Apple App
+Store.
+
+```text
+Developers publish intelligence
+Users install agents
+RVM quarantines execution
+RVF preserves identity and state
+RVForge governs trust, licensing, and updates
+```
+
+## P1. Product Definition
+
+RVForge consists of five products:
+
+1. **RVForge Store** — Public marketplace for discovering, purchasing, and
+   installing agents.
+2. **RVForge Reader** — Desktop application that installs and runs RVFs
+   through WASM, operating system isolation, or RVM.
+3. **RVForge Publisher** — Web console and npm CLI for building, testing,
+   signing, and publishing RVFs.
+4. **RVForge Registry** — Content addressed package registry containing
+   releases, manifests, signatures, evaluations, and provenance.
+5. **RVForge Enterprise** — Private agent stores with organizational
+   approval, policy enforcement, deployment, and audit controls.
+
+## P2. Distribution Model
+
+Users install RVForge once through a signed `.exe`, `.dmg`, `.deb`, `.rpm`,
+or `.AppImage`. Agents are then distributed directly as signed `.rvf`
+files.
+
+```text
+Install RVForge → Browse agents → Review capabilities →
+Install signed RVF → Run inside quarantine → Store encrypted state locally
+```
+
+RVForge does not require a new operating system installer for every agent.
+Standalone installers remain available for branded consumer and partner
+applications.
+
+This works on Windows, macOS, Linux, browsers with restrictions, and native
+RVM systems. It cannot fully replace Apple's iPhone and iPad App Store
+because Apple restricts downloaded executable functionality.
+Ref: https://developer.apple.com/app-store/review/guidelines/ (2.5.2)
+
+## P3. Core Marketplace Objects
+
+```text
+Publisher · Organization · RVF Package · Release · Capability Manifest
+Runtime Profile · Model Manifest · Evaluation Report · Security Report
+License · Entitlement · Installation · State Capsule · Update
+Witness Receipt · Revocation
+```
+
+Every release is immutable. A new version creates a new signed release
+linked to its predecessor.
+
+## P4. Publisher UX
+
+### Create
+
+```bash
+npx @ruvector/rvforge init
+```
+
+Publisher provides: agent name; description and category; icon and
+screenshots; pricing model; support information; privacy policy; runtime
+requirements; publisher identity.
+
+### Package
+
+```bash
+npx @ruvector/rvforge pack agent.rvf
+```
+
+RVForge validates:
+
+```text
+RVF structure · Publisher signature · Executable segments
+Model provenance · Capability policy · Runtime compatibility
+Memory requirements · External services · Software inventory
+License compatibility
+```
+
+### Test
+
+```bash
+npx @ruvector/rvforge test agent.rvf
+```
+
+Tests include: clean installation; deterministic evaluations; capability
+denials; network monitoring; filesystem escape attempts; resource
+exhaustion; malformed inputs; state checkpoint and recovery; update and
+rollback; witness verification.
+
+### Publish
+
+```bash
+npx @ruvector/rvforge publish agent.rvf
+```
+
+The publisher sees:
+
+```text
+Validation passed
+Security profile: restricted
+Evaluation score: 94 percent
+Supported runtimes: WASM and RVM
+Supported systems: Windows, macOS, Linux
+Requested capabilities: selected files
+Network access: none
+Ready to publish
+```
+
+## P5. Store UX
+
+Home sections: Featured Agents · Verified Publishers · Runs Entirely
+Locally · Enterprise Ready · Spatial Intelligence · Developer Tools ·
+Healthcare · Audio Intelligence · Recently Updated · Free and Open Source.
+
+Search filters: Category · Price · Publisher · Local or cloud model ·
+Runtime · Operating system · Capability level · Open source · Enterprise
+approved · Offline support · Evaluation score.
+
+Every listing displays: agent name, publisher identity, version, price,
+purpose, screenshots, runtime requirements, model location, data handling,
+capabilities, evaluation results, security findings, software inventory,
+release history, user reviews.
+
+Primary trust card (conceptual):
+
+```text
+Cognitum Analyst
+
+Verified publisher
+Runs locally
+No internet access
+Reads only files you select
+Encrypted persistent memory
+WASM and RVM isolation
+Evaluation score: 94 percent
+No critical security findings
+```
+
+Primary actions: Install · Try in Temporary Session · Review Capabilities ·
+View Source · Purchase · Add to Organization.
+
+## P6. Installation UX
+
+Before installation, RVForge presents the exact capability contract:
+
+```text
+This agent requests:
+  Selected document access · 512 MB memory · Local model execution
+  Encrypted persistent state
+
+This agent cannot:
+  Access the internet · Read other folders · Use the microphone
+  Run background processes · Contact external model providers
+```
+
+Actions: Install · Customize Permissions · Cancel.
+
+Broad permission descriptions such as "access your computer" are
+prohibited.
+
+## P7. Library UX
+
+Library states: Installed · Running · Paused · Updates · Quarantined ·
+Organization Managed · Archived.
+
+Each agent exposes: Open · Pause · Terminate · Clone · Reset · Export
+State · Import State · Review Activity · Change Permissions · Verify ·
+Uninstall.
+
+## P8. Runtime UX
+
+While an agent is active, RVForge displays: current task, runtime type,
+model activity, CPU usage, memory usage, network connections, filesystem
+access, tool calls, recent actions, witness status, estimated execution
+cost.
+
+Emergency controls remain visible: Pause · Terminate · Disconnect
+Network · Revoke Capabilities · Rollback State.
+
+## P9. Update UX
+
+Every update displays a semantic permission difference:
+
+```text
+Version 1.3 changes:
+  Adds PDF processing
+  Requests access to selected folders
+  Introduces optional OpenAI connectivity
+  Changes memory schema from 2 to 3
+```
+
+Users must approve any capability expansion. Updates containing only code
+fixes within the existing contract may follow organizational update
+policy.
+
+Rollback must remain available until state migration makes rollback
+unsafe. That condition must be declared before installation.
+
+## P10. Trust Levels
+
+1. **Published** — Identity verified and package structurally valid.
+2. **Tested** — Automated runtime, security, and evaluation tests passed.
+3. **Reviewed** — Human security and capability review completed.
+4. **Enterprise Approved** — Approved by the customer's security or
+   governance team.
+
+Trust levels must describe evidence, not imply that software is
+universally safe.
+
+## P11. Review Pipeline
+
+```text
+Upload → Signature verification → Static inspection →
+Malware and dependency scanning → Quarantined execution →
+Capability testing → Behavioral evaluation → Publisher review →
+Publish or reject
+```
+
+Manual review is required when an agent requests: unrestricted filesystem
+access; arbitrary network access; process creation; native code;
+credentials; background execution; financial transactions; health
+decisions; physical device control; inter agent delegation.
+
+## P12. Security Model
+
+1. Publisher signs the RVF.
+2. RVForge verifies and countersigns the release record.
+3. RVM verifies both before execution.
+4. Every capability defaults to denied.
+5. Every privileged operation passes through `rvm-security`.
+6. Runtime actions produce witness records.
+7. The registry maintains a public transparency log.
+8. Compromised packages can be revoked.
+9. Installed packages can be quarantined without deleting user state.
+10. Enterprise administrators can override public store availability.
+
+RVForge must never silently revoke or delete locally owned RVFs.
+Revocation blocks execution by policy while preserving export and forensic
+access.
+
+## P13. Commercial Model
+
+Supported licensing:
+
+```text
+Free · Open source · One time purchase · Subscription · Per user
+Per device · Per organization · Per execution · Usage metered
+Private enterprise license · Partner appliance license
+```
+
+A reasonable initial marketplace fee is 10 percent, excluding model and
+compute costs.
+
+The customer may choose: embedded local model; publisher supplied
+inference; Cognitum Meta LLM; customer supplied model credentials;
+enterprise private inference. All external inference costs must be
+disclosed before execution.
+
+## P14. Enterprise UX
+
+Administrators can: approve or deny agents; create private catalogs; set
+capability ceilings; require local inference; restrict network domains;
+control updates; assign licenses; deploy agents; revoke capabilities;
+inspect witnesses; export audit evidence; set jurisdiction rules.
+
+Organizational policy always overrides publisher requested permissions.
+
+## P15. MVP
+
+The first RVForge release should include:
+
+1. Windows, macOS, and Linux Reader.
+2. Public RVF registry.
+3. npm publisher CLI.
+4. Publisher identity and signing.
+5. Search and agent listings.
+6. Free agent installation.
+7. Capability cards.
+8. WASM quarantine.
+9. RVM integration.
+10. Updates and rollback.
+11. Witness viewer.
+12. Revocation.
+13. Private organization catalogs.
+
+Paid applications, revenue sharing, mobile support, and advanced
+evaluations follow. A functional marketplace MVP requires approximately
+twelve to sixteen weeks with five engineers; a production commercial store
+with payments, enterprise controls, moderation, and independent security
+validation is closer to six months.
+
+## P16. Primary Differentiation
+
+Conventional stores distribute applications. RVForge distributes governed
+intelligence:
+
+```text
+Code · Model · Memory · Policy · Runtime · Evaluation · Identity
+Lineage · Witness
+```
+
+The biggest failure mode is becoming another untrusted agent marketplace
+filled with unverifiable wrappers and exaggerated claims. The fix is
+making capability disclosure, reproducible evaluations, publisher
+identity, and witnessed execution mandatory rather than optional badges.
+
+## Platform acceptance test
+
+A publisher uploads one signed RVF, automated review detects its exact
+capabilities, a user installs it without developer tools, RVM denies
+undeclared access, the agent runs offline, an update requests fresh
+permission, and every build, installation, and privileged action verifies
+through the public witness record.
