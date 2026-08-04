@@ -17,7 +17,7 @@ artifacts, no secrets in code or logs.
 - [x] ADRs 283–293 authored, committed, pushed (commit 14541c870)
 - [x] Canonical requirements doc committed
 - [x] PR #790 opened
-- [ ] 1. `@ruvector/forge` CLI scaffold under `npm/packages/forge`
+- [x] 1. `@ruvector/rvforge` CLI — npm/packages/rvforge, 73 tests green, committed 4b1cb7551
        (TypeScript, tsc→dist, jest — follow `npm/packages/rvf` conventions;
        commands: init/validate/build/submit/status/download/verify;
        local RVF validation; canonical build manifest; stable error codes)
@@ -42,7 +42,7 @@ artifacts, no secrets in code or logs.
 
 - **Iteration**: 5 (loop fire #4). Compatibility matrix v1 written (compatibility-matrix.json, ADR-291): runtime profiles wasm/os-isolation+wasm supported, microvm/rvm-native planned; packaging modes; selection order. Third agent `reader-scaffold` spawned for crates/rvforge-reader (Tauri v2, standalone workspace, static UI, stubbed inspect pending rvf-forge-core FFI). CLI agent reached dist/ build; crate agent at 12 modules + workspace-registered.
 - **In flight**:
-  - `forge-scaffold` agent: `npm/packages/forge` (step 1) — package.json/
+  - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
     directory until it reports; then review, RENAME to
     `npm/packages/rvforge` + `@ruvector/rvforge` (bin `rvforge`), run
