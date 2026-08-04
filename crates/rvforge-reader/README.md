@@ -1,18 +1,21 @@
 # RVForge Reader
 
 Tauri v2 desktop reader for signed `.rvf` agent packages — the host described
-in [ADR-289](../../docs/adr/ADR-289-desktop-host-adapters.md). This is a
-**scaffold**: the screens, the capability derivation, the runtime selection
-order, and the state layout are real; RVF parsing, signature verification, and
-execution are not implemented and are clearly marked as stubs.
+in [ADR-289](../../docs/adr/ADR-289-desktop-host-adapters.md). RVF reading,
+verification, capability derivation, runtime selection, and encrypted state
+capsules are real; installing and running an agent are not, because they need
+`rvm-ffi`, which does not exist yet.
 
 ## Layout
 
 ```text
-src/inspect.rs      read a package without executing it (STUB)
-src/capability.rs   derive the P6 install-time capability contract
+src/inspect.rs      read and verify a package without executing it
+src/receipts.rs     the local witness log — one record per verification result
+src/capability/     derive the P6 install-time capability contract
+                    mod.rs the rules, text.rs the sentences users consent to
 src/runtime.rs      apply the FR004 runtime selection order
-src/state.rs        ADR-288 encrypted state-capsule layout (encryption STUB)
+src/state/mod.rs    ADR-288 state-capsule layout and lineage rules
+src/state/crypto.rs XChaCha20-Poly1305 sealing, per-install key
 src/dock.rs         ADR-295 dock entry: the agent/system split, in the types
 src/dock_text.rs    sanitizing and screening agent-authored strings
 src/dock_state.rs   the eight dock states and who may move between them
@@ -35,12 +38,14 @@ bundler, plugin build scripts — that every `cargo build --workspace` in the
 parent repo would otherwise pay for.
 
 Tauri is behind an optional `desktop` feature, so the core logic builds and
-tests with only `serde` and `serde_json`:
+tests without a webview. `rvf-forge-core` is a path dependency on a member of
+the *root* workspace; that works across the workspace boundary because it
+inherits its own workspace's `version` and `lints`.
 
 ```bash
 cd crates/rvforge-reader
 cargo check          # core only — no webview packages needed
-cargo test           # 90 tests, no Tauri dependency
+cargo test           # 113 tests, no Tauri dependency
 ```
 
 This is the CI-testable path. Building the desktop shell additionally needs the
@@ -61,37 +66,70 @@ Before producing installers, regenerate the icon set with
 `cargo tauri icon icons/icon.png` — the committed PNGs are placeholders and
 there is no `.ico` or `.icns` yet, which Windows and macOS bundling require.
 
-## What is stubbed, and why
+## Inspection, verification, and receipts
 
-| Stub | Current behavior | Replaced by |
+`inspect::inspect` calls `rvf_forge_core::inspect_bytes` and reports the real
+identity (SHA-256 of the container), the segment inventory, and the capability
+classes the container declares. It checks nothing, so its verification status is
+always `unverified`.
+
+`inspect::verify` calls `rvf_forge_core::verify_bytes` — root manifest present,
+per-segment content hashes, unsigned-executable refusal — and appends one
+receipt to `<state_root>/receipts.jsonl`, on a pass and on a refusal alike
+(ADR-284 §1 requirement 9). Both operations run against a single read of the
+file, so a package cannot be swapped between inspection and verification.
+
+Neither executes package content.
+
+## What is not implemented
+
+| Gap | Current behavior | Needs |
 |---|---|---|
-| `inspect::inspect` | Reads path metadata only. Reports `identity: null`, `verification: unverified`, `signature: unverified`. | `rvf-forge-core` over the `rvm_inspect` C ABI (ADR-289 §4) |
-| `inspect::capability_card` | Reads a `<file>.rvf.manifest.json` development sidecar if present; otherwise returns the everything-denied card. | The signed `CapabilityManifest` segment inside the RVF |
-| `state::seal` / `unseal` | Return `EncryptionNotImplemented`. | AEAD sealing bound to the base identity, with customer-held keys (ADR-288) |
-| Install / Customize permissions | Disabled buttons. | The install flow, once verification is real |
+| Publisher identity | `publisher: null`, and a present signature reports `not-checked` rather than `verified`. | A trust store mapping Ed25519 keys to publisher identities; `VerifyOptions::trusted_keys` is empty without one |
+| Scoped capability grants | The container declares classes with no scopes, so each granted class says so and raises a manual-review trigger. An unsigned `<file>.rvf.manifest.json` sidecar may narrow a class to a specific scope, never widen one. | A signed `CapabilityManifest` segment inside the RVF |
+| Install / Customize permissions | Disabled buttons. | The install flow |
 | Emergency controls | Disabled buttons on the Runtime screen. | `rvm-ffi` lifecycle calls (pause, terminate, revoke, rollback) |
 | Dock roster | In-process, seeded by `dock_add_scaffold_agent`, which reports the unknown value for every security-bearing field (unverified publisher, no confinement, no witness chain). | RVM telemetry over `rvm-ffi`; pause is `rvm_suspend`, terminate is `rvm_terminate` (ADR-295 implementation note) |
 | Dock instruction field | Disabled placeholder. | The agent instruction channel, once `rvm-ffi` is wired in |
-| Witness status | "no witness chain". | `rvm witness` export (ADR-289 §3) |
+| Dock witness status | "no witness chain". | `rvm witness` export (ADR-289 §3) |
 
-The stubs report *absence*, never a benign default. `VerificationStatus` and
-`SignatureStatus` have a single variant, `Unverified`, so no code path can
-accidentally default to "verified"; the `Verified` and `Failed` variants arrive
-with the code that can actually produce them.
+Each of these reports *absence*, never a benign default. `SignatureStatus`
+distinguishes `not-checked` from `verified` for exactly this reason: a signature
+nobody could check is not a signature the user can rely on.
+
+## State capsules
+
+`state::seal` / `unseal` use XChaCha20-Poly1305 — pure Rust, no unsafe, and
+constant-time on hosts without AES hardware, which the Windows, macOS, and Linux
+ARM builds cannot assume. The 192-bit nonce makes a random nonce per capsule
+safe without a counter, and a counter is what a state directory the user may
+copy, restore, or roll back would silently break.
+
+One 32-byte install key lives at `<state_root>/install.key`, created `0600` on
+first use from the OS CSPRNG; per-capsule keys are HKDF-SHA256 derived from it
+with the base RVF identity as `info`. The base identity is written into the
+capsule header in the clear — so a foreign lineage is refused without needing a
+key — and is covered by the AEAD's additional data, so relabelling a capsule to
+another lineage fails authentication rather than opening as that lineage's
+state. Customer-held keys (ADR-288 §4) are constructible today through
+`InstallKey::from_bytes`; a key-management UI is not.
 
 ## Security invariants
 
-These are enforced in the library and covered by tests. They must survive the
-replacement of every stub above.
+These are enforced in the library and covered by tests. They must survive
+whatever fills the gaps above.
 
 1. **RVF content is never executed.** No code path loads, links, or interprets
-   a segment. `inspect` and `verify` must be safe on an untrusted package
-   (ADR-289 §3).
-2. **Verification precedes any load**, and an unchecked package is reported as
-   unverified rather than assumed good.
-3. **Capability rendering is default-deny.** Every one of the fifteen ADR-286
-   classes that the manifest does not request appears in the "cannot" list; a
-   missing or rejected manifest yields a card that grants nothing.
+   a segment; the only bytes read from an executable segment are read to hash
+   them. `inspect` and `verify` must be safe on an untrusted package
+   (ADR-289 §3, ADR-284 §1 requirement 7).
+2. **Verification precedes any load, and every result is witnessed.** An
+   unchecked package reports `unverified` rather than being assumed good, and a
+   refusal is written to the receipt log exactly as a pass is.
+3. **Capability rendering is default-deny, and no card without verification.**
+   Every one of the fifteen ADR-286 classes the container does not declare
+   appears in the "cannot" list; a package that did not verify yields a card
+   that grants nothing, as does a missing or rejected manifest.
 4. **No vague permission prose.** Broad scopes (`all-files`, `*`,
    `unrestricted`) and banned phrases such as "access your computer" are
    rejected at derivation time, not filtered in the UI (requirements P6).

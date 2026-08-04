@@ -15,16 +15,25 @@ use crate::dock::{
 use crate::dock_events::Notification;
 use crate::dock_roster::{AgentPill, DockRoster, ExpandedAgentView, RosterView};
 use crate::dock_state::DockState;
-use crate::inspect::{self, InspectionSummary};
+use crate::inspect::{self, InspectionSummary, VerificationOutcome};
 use crate::runtime::{self, HostProfile, RuntimeChoice};
 
-/// Read identity and verification status for a package. Never executes it.
+/// Read identity, segments, and declared capabilities. Checks nothing, executes
+/// nothing: the returned verification status is always `unverified`.
 #[tauri::command]
 pub fn inspect_rvf(path: String) -> InspectionSummary {
     inspect::inspect(&PathBuf::from(path))
 }
 
-/// The P6 install-time capability contract for a package.
+/// Run the root-manifest, per-segment-hash, and unsigned-executable checks, and
+/// append the witness receipt. Still executes nothing.
+#[tauri::command]
+pub fn verify_rvf(path: String) -> VerificationOutcome {
+    inspect::verify(&PathBuf::from(path))
+}
+
+/// The P6 install-time capability contract for a package. Verifies first, and
+/// returns the everything-denied card if verification does not pass.
 #[tauri::command]
 pub fn capability_card(path: String) -> CapabilityCard {
     inspect::capability_card(&PathBuf::from(path))

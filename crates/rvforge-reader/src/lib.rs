@@ -4,23 +4,29 @@
 //! every decision the user sees is made in a plain library module that can be
 //! tested without a webview:
 //!
-//! - [`inspect`] — read an `.rvf` without executing it (ADR-289 §3).
+//! - [`inspect`] — read and verify an `.rvf` through `rvf-forge-core`, without
+//!   executing it (ADR-289 §3).
+//! - [`receipts`] — the local witness log, one record per verification result.
 //! - [`capability`] — derive the install-time capability contract (requirements P6).
 //! - [`runtime`] — apply the FR004 runtime selection order (ADR-289 §2).
-//! - [`state`] — encrypted state-capsule layout (ADR-288).
+//! - [`state`] — encrypted state-capsule layout and sealing (ADR-288).
 //! - [`dock`], [`dock_state`], [`dock_roster`], [`dock_events`] — the Agent
 //!   Dock: what a running agent shows and how it is stopped (ADR-295).
 //!
 //! # Security invariants
 //!
-//! These hold for every module here and must survive the replacement of the
-//! stubs by `rvf-forge-core`:
+//! These hold for every module here:
 //!
-//! 1. **RVF content is never executed.** Inspection reads metadata only. There
-//!    is no code path in this crate that loads, links, or interprets a segment.
-//! 2. **Verification precedes any load.** Until `rvf-forge-core` lands, every
-//!    inspection reports [`inspect::VerificationStatus::Unverified`] rather
-//!    than asserting a signature it did not check.
+//! 1. **RVF content is never executed.** Inspection reads segment headers and
+//!    hashes payloads. There is no code path in this crate that loads, links,
+//!    or interprets a segment (ADR-284 §1 requirement 7).
+//! 2. **Verification precedes any load, and every result is witnessed.**
+//!    [`inspect::inspect`] alone reports
+//!    [`inspect::VerificationStatus::Unverified`]; only [`inspect::verify`]
+//!    reports a real outcome, and it appends a receipt for a refusal exactly as
+//!    for a pass (ADR-284 §1 requirement 9). A signature that could not be
+//!    checked reports [`inspect::SignatureStatus::NotChecked`], never
+//!    `Verified`.
 //! 3. **Capability rendering is default-deny.** A class that was not requested
 //!    is rendered in the "cannot" list. A missing manifest yields a card where
 //!    everything is denied, not an empty card.
@@ -46,6 +52,7 @@ pub mod dock_roster;
 pub mod dock_state;
 pub mod dock_text;
 pub mod inspect;
+pub mod receipts;
 pub mod runtime;
 pub mod state;
 
@@ -62,6 +69,7 @@ pub fn run() {
         .manage(commands::DockSurface::default())
         .invoke_handler(tauri::generate_handler![
             commands::inspect_rvf,
+            commands::verify_rvf,
             commands::capability_card,
             commands::runtime_selection,
             commands::dock_view,

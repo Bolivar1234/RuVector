@@ -41,10 +41,16 @@
             <dt>Publisher</dt><dd id="f-publisher">—</dd>
             <dt>Signature</dt><dd id="f-signature">—</dd>
             <dt>Verification</dt><dd id="f-verification">—</dd>
+            <dt>Segments</dt><dd id="f-segments">—</dd>
+            <dt>Declares</dt><dd id="f-capabilities">—</dd>
           </dl>
           <ul id="f-notes" class="notes"></ul>
           <div class="row end">
-            <button id="to-capability" class="primary">Review capabilities</button>
+            <button id="verify" class="primary">Verify</button>
+            <button id="to-capability" disabled
+                    title="Verify the package before reviewing what it may do.">
+              Review capabilities
+            </button>
           </div>
         </div>
       </section>
@@ -233,7 +239,8 @@
 
     <footer class="chrome">
       <span id="stub-banner" class="banner">
-        Scaffold build — inspection and verification are stubs. No package is executed.
+        Inspection and verification run through rvf-forge-core. No package is
+        executed, and every verification result is written to the local receipt log.
       </span>
     </footer>
 

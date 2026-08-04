@@ -11,8 +11,20 @@
 //!   rejected at derivation time, as are banned phrases such as "access your
 //!   computer". The card cannot render a permission it could not describe
 //!   specifically.
+//!
+//! The authoritative source of *which classes* a package opens is the verified
+//! container's own declaration, read by `rvf-forge-core`; see
+//! [`CapabilityCard::from_declared_classes`]. That declaration carries class
+//! names and no scopes, so an unsigned development sidecar may narrow it to
+//! specific scopes — [`CapabilityCard::refined_with_manifest_json`] — but it can
+//! only ever narrow: a sidecar cannot grant a class the container did not
+//! declare.
+
+mod text;
 
 use serde::{Deserialize, Serialize};
+
+use text::{check_phrases, denial_text, request_text, unscoped_request_text};
 
 /// The fifteen ADR-286 capability classes.
 pub const CAPABILITY_CLASSES: [&str; 15] = [
@@ -48,16 +60,6 @@ const VAGUE_SCOPES: [&str; 12] = [
     "system",
     "unrestricted",
     "your-computer",
-];
-
-/// Phrases that must never reach the user, whatever the manifest says.
-const BANNED_PHRASES: [&str; 6] = [
-    "access your computer",
-    "access to your computer",
-    "control your computer",
-    "full access",
-    "unrestricted access",
-    "all your files",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -269,6 +271,133 @@ impl CapabilityCard {
             notes: Vec::new(),
         })
     }
+
+    /// Derive a card from the capability classes a verified container declares.
+    ///
+    /// The container's declaration is class names only — `rvf.capabilities=
+    /// network,filesystem` — with no scope attached, so every line says which
+    /// class is open and states plainly that the scope is undeclared. Each such
+    /// class also raises a manual-review trigger (ADR-294 §8): a class opened
+    /// without a stated limit is exactly what review exists to look at.
+    ///
+    /// # Errors
+    ///
+    /// [`CapabilityError::UnknownClass`] for a name outside the fifteen ADR-286
+    /// classes, and [`CapabilityError::BannedPhrase`] if a generated sentence
+    /// would carry banned prose.
+    pub fn from_declared_classes(classes: &[String]) -> Result<Self, CapabilityError> {
+        let mut requests = Vec::new();
+        let mut declared: Vec<String> = Vec::new();
+        let mut triggers = Vec::new();
+
+        for name in classes {
+            let class = name.trim().to_ascii_lowercase();
+            if !CAPABILITY_CLASSES.contains(&class.as_str()) {
+                return Err(CapabilityError::UnknownClass(name.clone()));
+            }
+            if declared.contains(&class) {
+                continue;
+            }
+            let text = unscoped_request_text(&class);
+            check_phrases(&class, &text)?;
+            triggers.push(format!("class '{class}' is declared without a scope"));
+            declared.push(class.clone());
+            requests.push(CardLine {
+                class,
+                scope: None,
+                text,
+            });
+        }
+
+        Ok(Self {
+            status: CardStatus::Derived,
+            manifest_id: None,
+            default_policy: "deny".to_string(),
+            cannot: deny_all_except(&declared),
+            requests,
+            manual_review_triggers: triggers,
+            notes: vec![
+                "Granted classes come from the verified container's own declaration.".to_string(),
+            ],
+        })
+    }
+
+    /// Narrow a container's declared classes with scopes from a sidecar manifest.
+    ///
+    /// The sidecar is held to the full P6 rules, so a vague scope in it rejects
+    /// the whole card rather than downgrading to the unscoped rendering — a
+    /// publisher who wrote `all-files` does not get a friendlier card than one
+    /// who wrote nothing. A sidecar request for a class the container did not
+    /// declare is dropped into the "cannot" list with a note.
+    ///
+    /// # Errors
+    ///
+    /// Any [`CapabilityError`] the sidecar itself raises, plus those of
+    /// [`Self::from_declared_classes`].
+    pub fn refined_with_manifest_json(
+        declared: &[String],
+        json: &str,
+    ) -> Result<Self, CapabilityError> {
+        let sidecar = Self::from_manifest_json(json)?;
+        let mut card = Self::from_declared_classes(declared)?;
+
+        let mut widened: Vec<String> = Vec::new();
+        for line in &sidecar.requests {
+            match card.requests.iter_mut().find(|r| r.class == line.class) {
+                Some(existing) => *existing = line.clone(),
+                None => widened.push(line.class.clone()),
+            }
+        }
+
+        // A class that now carries a scope no longer needs the undeclared-scope
+        // trigger, so the trigger list is rebuilt rather than filtered.
+        let mut triggers: Vec<String> = card
+            .requests
+            .iter()
+            .filter(|r| r.scope.is_none())
+            .map(|r| format!("class '{}' is declared without a scope", r.class))
+            .collect();
+        for trigger in sidecar.manual_review_triggers {
+            if !triggers.contains(&trigger) {
+                triggers.push(trigger);
+            }
+        }
+        card.manual_review_triggers = triggers;
+
+        // Denials the sidecar names explicitly — including tokens outside the
+        // fifteen classes, such as `microphone` — are worth showing verbatim.
+        for line in sidecar.cannot {
+            if !card.cannot.iter().any(|c| c.class == line.class)
+                && !card.requests.iter().any(|r| r.class == line.class)
+            {
+                card.cannot.push(line);
+            }
+        }
+
+        card.manifest_id = sidecar.manifest_id;
+        if !widened.is_empty() {
+            card.notes.push(format!(
+                "The sidecar requested {} the container does not declare; \
+                 {} denied.",
+                widened.join(", "),
+                if widened.len() == 1 { "it stays" } else { "they stay" }
+            ));
+        }
+        Ok(card)
+    }
+}
+
+/// Every class not in `granted`, rendered as a denial.
+fn deny_all_except(granted: &[String]) -> Vec<CardLine> {
+    CAPABILITY_CLASSES
+        .iter()
+        .filter(|c| !granted.iter().any(|g| g == *c))
+        .map(|c| CardLine {
+            class: (*c).to_string(),
+            scope: None,
+            text: denial_text(c),
+        })
+        .collect()
 }
 
 fn check_scope(class: &str, scope: &str) -> Result<(), CapabilityError> {
@@ -286,77 +415,4 @@ fn check_scope(class: &str, scope: &str) -> Result<(), CapabilityError> {
         });
     }
     Ok(())
-}
-
-fn check_phrases(class: &str, text: &str) -> Result<(), CapabilityError> {
-    let lowered = text.to_ascii_lowercase();
-    for phrase in BANNED_PHRASES {
-        if lowered.contains(phrase) {
-            return Err(CapabilityError::BannedPhrase {
-                class: class.to_string(),
-                phrase: phrase.to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Per-class, per-scope sentence. Every branch names the specific class and
-/// the specific scope; there is no generic fallback that could read as
-/// "access your computer".
-fn request_text(class: &str, scope: &str) -> String {
-    match (class, scope) {
-        ("filesystem", "user-selected") => {
-            "Read the files and folders you select, and nothing else".to_string()
-        }
-        ("persistent-state", "encrypted-local") => {
-            "Keep encrypted memory on this computer between sessions".to_string()
-        }
-        ("model", "embedded") | ("model", "local") => {
-            "Run its bundled model on this computer".to_string()
-        }
-        ("memory", s) => format!("Use up to {s} of memory"),
-        ("filesystem", s) => format!("Read files under: {s}"),
-        ("network", s) => format!("Open network connections to: {s}"),
-        ("model", s) => format!("Run a model located at: {s}"),
-        ("mcp", s) => format!("Call MCP tools limited to: {s}"),
-        ("process", s) => format!("Start processes limited to: {s}"),
-        ("clock", s) => format!("Read the runtime clock: {s}"),
-        ("randomness", s) => format!("Draw randomness from: {s}"),
-        ("gpu", s) => format!("Use the GPU for: {s}"),
-        ("sensor", s) => format!("Read sensor data from: {s}"),
-        ("display", s) => format!("Draw to the display: {s}"),
-        ("audio", s) => format!("Use audio limited to: {s}"),
-        ("clipboard", s) => format!("Use the clipboard limited to: {s}"),
-        ("persistent-state", s) => format!("Store persistent state as: {s}"),
-        ("inter-agent-messaging", s) => format!("Exchange messages with: {s}"),
-        (c, s) => format!("Use the '{c}' capability limited to: {s}"),
-    }
-}
-
-/// Denial sentences. Tokens outside the fifteen classes appear in real
-/// manifests (`microphone`, `background`), so they get specific phrasing too.
-fn denial_text(token: &str) -> String {
-    match token {
-        "network" => "Access the internet".to_string(),
-        "filesystem" => "Read folders you have not selected".to_string(),
-        "process" => "Start other programs".to_string(),
-        "background" => "Run in the background".to_string(),
-        "external-model-providers" => "Contact external model providers".to_string(),
-        "microphone" => "Use the microphone".to_string(),
-        "camera" => "Use the camera".to_string(),
-        "audio" => "Record or play audio".to_string(),
-        "clipboard" => "Read or write your clipboard".to_string(),
-        "gpu" => "Use the GPU".to_string(),
-        "sensor" => "Read sensors on this computer".to_string(),
-        "display" => "Draw outside its own window".to_string(),
-        "mcp" => "Call MCP tools".to_string(),
-        "model" => "Run a model".to_string(),
-        "memory" => "Allocate memory beyond its declared quota".to_string(),
-        "clock" => "Read the system clock".to_string(),
-        "randomness" => "Draw randomness outside the runtime".to_string(),
-        "persistent-state" => "Keep memory between sessions".to_string(),
-        "inter-agent-messaging" => "Exchange messages with other agents".to_string(),
-        other => format!("Use the '{other}' capability"),
-    }
 }

@@ -13,7 +13,7 @@ const invoke = (cmd, args) => {
 };
 
 const $ = (id) => document.getElementById(id);
-const state = { path: null, card: null };
+const state = { path: null, card: null, verified: false };
 
 function showError(message) {
   const box = $("error");
@@ -85,8 +85,33 @@ async function runInspect() {
   try {
     const summary = await invoke("inspect_rvf", { path });
     state.path = path;
+    state.verified = false;
     renderInspection(summary);
-    enableStep("capability");
+    // Reviewing capabilities stays closed until verification has actually run:
+    // there is nothing to permit until the package is known to be intact.
+    $("to-capability").disabled = true;
+  } catch (err) {
+    showError(String(err));
+  }
+}
+
+async function runVerify() {
+  if (!state.path) {
+    showError("Inspect a package first.");
+    return;
+  }
+  showError("");
+  try {
+    const outcome = await invoke("verify_rvf", { path: state.path });
+    state.verified = outcome.summary.verification === "verified";
+    renderInspection(outcome.summary);
+    if (state.verified) {
+      $("to-capability").disabled = false;
+      $("to-capability").title = "";
+      enableStep("capability");
+    } else {
+      showError("This package did not verify. It cannot be installed.");
+    }
   } catch (err) {
     showError(String(err));
   }
@@ -95,18 +120,25 @@ async function runInspect() {
 function renderInspection(s) {
   $("f-name").textContent = s.file_name || s.path;
   $("f-size").textContent = s.exists ? humanBytes(s.size_bytes) : "file not found";
-  $("f-identity").textContent = s.identity || "not computed";
+  $("f-identity").textContent = s.identity || "not a readable container";
   $("f-publisher").textContent = s.publisher || "unknown";
+  $("f-segments").textContent = s.segments.length
+    ? s.segments.map((seg) => seg.segment_type).join(", ")
+    : "none read";
+  $("f-capabilities").textContent = s.declared_capabilities.length
+    ? s.declared_capabilities.join(", ")
+    : "nothing (default deny)";
 
-  // "unverified" is rendered as a warning, never as a neutral or reassuring
-  // state. The reader has not checked a signature.
+  // Anything short of a completed, passing check is rendered as a warning.
+  // "not-checked" is a warning too: a signature nobody verified is not a
+  // signature the user can rely on.
   const sig = $("f-signature");
   sig.textContent = s.signature;
-  sig.className = s.signature === "unverified" ? "status-unverified" : "status-ok";
+  sig.className = s.signature === "verified" ? "status-ok" : "status-unverified";
 
   const ver = $("f-verification");
   ver.textContent = s.verification;
-  ver.className = s.verification === "unverified" ? "status-unverified" : "status-ok";
+  ver.className = s.verification === "verified" ? "status-ok" : "status-unverified";
 
   fillNotes("f-notes", s.notes);
   $("open-result").hidden = false;
@@ -117,6 +149,10 @@ function renderInspection(s) {
 async function showCapabilities() {
   if (!state.path) {
     showError("Inspect a package first.");
+    return;
+  }
+  if (!state.verified) {
+    showError("Verify the package first. An unverified package has no capability card.");
     return;
   }
   showError("");
@@ -167,7 +203,7 @@ function renderCard(card) {
   $("install").disabled = true;
   $("install").title = "Installation is not implemented in this scaffold.";
   $("customize").disabled = true;
-  $("customize").title = "Per-scope customization arrives with rvf-forge-core.";
+  $("customize").title = "Per-scope customization needs a signed capability manifest in the container; it is not implemented.";
 }
 
 // Screen 3 — runtime status.
@@ -225,6 +261,7 @@ function renderRuntime(c) {
 
 $("pick").addEventListener("click", pickFile);
 $("inspect").addEventListener("click", runInspect);
+$("verify").addEventListener("click", runVerify);
 $("path").addEventListener("keydown", (e) => {
   if (e.key === "Enter") runInspect();
 });
@@ -237,7 +274,7 @@ $("install").addEventListener("click", () =>
   showError("Installation is not implemented in this scaffold."),
 );
 $("customize").addEventListener("click", () =>
-  showError("Per-scope customization arrives with rvf-forge-core."),
+  showError("Per-scope customization needs a signed capability manifest in the container; it is not implemented."),
 );
 
 for (const btn of document.querySelectorAll(".step")) {
