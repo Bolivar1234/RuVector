@@ -1,7 +1,7 @@
 {
   "name": "@ruvector/rvforge",
   "version": "0.1.0",
-  "description": "RVForge — one canonical RVF to signed platform installers",
+  "description": "RVForge \u2014 one canonical RVF to signed platform installers",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -23,7 +23,8 @@
     "clean": "rm -rf dist *.tsbuildinfo",
     "test": "jest",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src --ext .ts"
+    "lint": "eslint src --ext .ts",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "rvf",
