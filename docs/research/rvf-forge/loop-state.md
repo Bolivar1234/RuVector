@@ -29,8 +29,8 @@ artifacts, no secrets in code or logs.
        separate repo github.com/ruvnet/rvm — for this repo, define the
        integration contract + compatibility matrix consumed by forge)
 - [x] 5. GitHub Actions build matrix — .github/workflows/rvforge-ci.yml (3-OS matrix for CLI npm test + cargo test/clippy/fmt; tolerant of pending package rename)
-- [ ] 6. Embedded + thin packaging modes
-- [ ] 7. Provenance, inventory, witness receipts wired end-to-end
+- [~] 6. Embedded + thin packaging modes — agent `forge-packaging` in flight
+- [~] 7. Provenance, inventory, witness receipts — agent `forge-packaging` in flight (CLI side)
 - [ ] 8. Tests green (cargo test -p rvf-forge-core, npm test in forge),
        lint clean, security review pass (default-deny caps, no RVF
        execution during packaging, no secrets)
@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 6 (loop fire #5). CI failure diagnosed+fixed: npm install resolved parent workspace, EBADPLATFORM on router-darwin-arm64; now --workspaces=false (verified clean-install 73 tests green locally). forge-core agent still testing (tests/pipeline.rs present, doc-test passes); reader-scaffold has full tree (src+ui+tests+build.rs).
+- **Iteration**: 7 (loop fire #6). CI: CLI PASS ubuntu+windows (workspaces fix verified), macos+core jobs pending. Spawned `forge-packaging` on npm/packages/rvforge: embedded+thin modes (FR001/2), identical-hash invariant, compat-matrix enforcement (ADR-291), software inventory, witness receipt chains (steps 6+7). reader-scaffold still in flight (17 files).
 - **In flight**:
   - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
