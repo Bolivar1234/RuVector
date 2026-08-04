@@ -24,7 +24,7 @@ artifacts, no secrets in code or logs.
 - [x] 2. `crates/rvf-forge-core` — 103 tests + clippy + fmt green, committed ce25d787c
        (manifest parse, Ed25519 verify, segment hash verify, provenance
        record, SHA256 checksums — NEVER executes RVF content)
-- [~] 3. Tauri RVF Reader app scaffold — agent `reader-scaffold` in flight (crates/rvforge-reader)
+- [x] 3. Tauri RVF Reader scaffold — crates/rvforge-reader, 39 tests green, committed 2db655fe1 (inspect stubbed pending rvf-forge-core FFI; dock next per ADR-295)
 - [~] 4. rvm-* integration — compatibility-matrix.json v1 done (this repo side); rvm-rvf crates live in ruvnet/rvm (rvm-rvf first; note: rvm is a
        separate repo github.com/ruvnet/rvm — for this repo, define the
        integration contract + compatibility matrix consumed by forge)
@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 8. Scope widened to all ADRs 283-295 (user directive). registry-core agent spawned. In flight: reader-scaffold, forge-packaging, adr-author-5 (ADR-295), registry-core.
+- **Iteration**: 9. Reader scaffold + ADR-295 committed (2db655fe1). In flight: forge-packaging (CLI packaging modes), registry-core (registry crate). Next after those land: dock implementation in reader (P5), publisher verbs pack/test/publish (P1), rvf-forge-core FFI into reader, ADR status flips.
 - **In flight**:
   - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
