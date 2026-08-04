@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 14. CI 5/6 green (windows core queued). PR #790 body updated with implementation status table. registry-core at 23 files; dock-impl + publisher-verbs actively editing. Previously: 13. publisher-verbs spawned on now-free CLI dir (pack/test/publish per P4; publish targets local registry layout, parity with crates/rvforge-registry reconciled later). CI: full matrix pending on latest push e82f863f9. In flight: registry-core, dock-impl, publisher-verbs. Previously: 12. forge-packaging DONE+committed: CLI now 137 tests, packaging modes+compat+inventory+witness landed. CLI dir now FREE -> next agent: publisher verbs pack/test/publish (P1) wiring to rvforge-registry once registry-core lands. Previously: 11. Durable memory written (project_rvforge_buildout.md) so future sessions resume from this file. CI latest run: CLI pass ubuntu+windows, others queued. registry-core at 12 files, forge-packaging + dock-impl actively editing. Previously: 10. CI: CLI green ubuntu+windows, core green ubuntu, rest pending. Spawned dock-impl on crates/rvforge-reader (ADR-295: typed trust boundary AgentProvidedStatus vs SystemOwnedStatus, 8-state machine, roster policy, event thresholds, pill+expanded UI). In flight: forge-packaging (CLI, actively editing), registry-core (registry crate, started), dock-impl (reader). Queued: publisher verbs (needs CLI free), core FFI into reader (needs reader free), ADR status flips (needs implementations landed).
+- **Iteration**: 15. registry-core DONE+committed (67 tests: 36 unit + 19 + 12 integration; trust-raise + non-destructive revocation + Merkle proofs all tested). P4 trust/revocation semantics now implemented in crate. Remaining in flight: dock-impl, publisher-verbs. After those: parity test CLI-publish vs Rust registry, core FFI into reader, ADR status flips, acceptance run, merge gate. Previously: 14. CI 5/6 green (windows core queued). PR #790 body updated with implementation status table. registry-core at 23 files; dock-impl + publisher-verbs actively editing. Previously: 13. publisher-verbs spawned on now-free CLI dir (pack/test/publish per P4; publish targets local registry layout, parity with crates/rvforge-registry reconciled later). CI: full matrix pending on latest push e82f863f9. In flight: registry-core, dock-impl, publisher-verbs. Previously: 12. forge-packaging DONE+committed: CLI now 137 tests, packaging modes+compat+inventory+witness landed. CLI dir now FREE -> next agent: publisher verbs pack/test/publish (P1) wiring to rvforge-registry once registry-core lands. Previously: 11. Durable memory written (project_rvforge_buildout.md) so future sessions resume from this file. CI latest run: CLI pass ubuntu+windows, others queued. registry-core at 12 files, forge-packaging + dock-impl actively editing. Previously: 10. CI: CLI green ubuntu+windows, core green ubuntu, rest pending. Spawned dock-impl on crates/rvforge-reader (ADR-295: typed trust boundary AgentProvidedStatus vs SystemOwnedStatus, 8-state machine, roster policy, event thresholds, pill+expanded UI). In flight: forge-packaging (CLI, actively editing), registry-core (registry crate, started), dock-impl (reader). Queued: publisher verbs (needs CLI free), core FFI into reader (needs reader free), ADR status flips (needs implementations landed).
 - **In flight**:
   - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
@@ -78,8 +78,7 @@ Enterprise** — an agentic app store + runtime + registry + trust system
        implementation first, hosted later.
 - [ ] P3. Reader = the Tauri app (step 3) grows store/library/runtime/
        update UX per requirements P5–P9; capability cards mandatory.
-- [ ] P4. Trust levels + revocation semantics (revocation blocks
-       execution, never deletes local RVFs or state).
+- [x] P4. Trust levels + revocation semantics — implemented+tested in crates/rvforge-registry.
 - [~] P5. RVForge Agent Dock (requirements "RVForge Agent Dock" D1–D8;
        ADR-295 being authored by agent `adr-author-5`). Security/control
        surface: RVForge-owned chrome, agent content strictly separated
@@ -101,7 +100,7 @@ separate repo). As each ADR's scope lands, flip its Status to
 Implemented with an Updated date.
 
 Additional in-flight (iteration 8):
-- [~] P2-impl. crates/rvforge-registry — agent `registry-core` building
+- [x] P2-impl. crates/rvforge-registry — DONE, 67 tests+clippy+fmt green (was: agent building
   the file-backed content-addressed registry with ed25519 release rules,
   trust-level raise enforcement, non-destructive revocation, Merkle
   transparency log, witness chains.
