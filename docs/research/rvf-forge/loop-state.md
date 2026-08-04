@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 10. CI: CLI green ubuntu+windows, core green ubuntu, rest pending. Spawned dock-impl on crates/rvforge-reader (ADR-295: typed trust boundary AgentProvidedStatus vs SystemOwnedStatus, 8-state machine, roster policy, event thresholds, pill+expanded UI). In flight: forge-packaging (CLI, actively editing), registry-core (registry crate, started), dock-impl (reader). Queued: publisher verbs (needs CLI free), core FFI into reader (needs reader free), ADR status flips (needs implementations landed).
+- **Iteration**: 11. Durable memory written (project_rvforge_buildout.md) so future sessions resume from this file. CI latest run: CLI pass ubuntu+windows, others queued. registry-core at 12 files, forge-packaging + dock-impl actively editing. Previously: 10. CI: CLI green ubuntu+windows, core green ubuntu, rest pending. Spawned dock-impl on crates/rvforge-reader (ADR-295: typed trust boundary AgentProvidedStatus vs SystemOwnedStatus, 8-state machine, roster policy, event thresholds, pill+expanded UI). In flight: forge-packaging (CLI, actively editing), registry-core (registry crate, started), dock-impl (reader). Queued: publisher verbs (needs CLI free), core FFI into reader (needs reader free), ADR status flips (needs implementations landed).
 - **In flight**:
   - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
