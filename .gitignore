@@ -159,6 +159,7 @@ examples/real-eeg-analysis/data/*.edf
 examples/real-eeg-multi-seizure/data/*.edf
 agentdb.rvf
 agentdb.rvf.lock
+agentdb.rvf.idmap.json
 .kalshi
 bench_data/
 
@@ -167,6 +168,19 @@ bench_data/
 # transient so any tree they land in should ignore them.
 acceleras.log
 hailo_sdk.client.log
+
+# Python virtualenvs for the Hailo SDK/DFC toolchains (recreate with
+# python -m venv; never committed)
+venv-hailo/
+venv-hailo-dfc/
+venv*/
+.venv/
+
+# RuvNet Brain per-tree scratch state
+**/.ruvnet-brain/
+
+# Test coverage output
+**/coverage/
 
 # Iter 228 — per-crate Cargo.lock files for the hailo workspace members
 # (post iter-219 workspace rejoin). The parent workspace's Cargo.lock
