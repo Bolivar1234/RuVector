@@ -1,0 +1,321 @@
+#!/usr/bin/env node
+/**
+ * `forge` command router.
+ *
+ * Hand-rolled argument parsing rather than a CLI framework: the surface is
+ * seven commands, the package ships as a signing-adjacent tool where every
+ * runtime dependency is attack surface, and zero dependencies keeps the
+ * install reproducible.
+ *
+ * Every command supports `--json` for unattended use and exits with the stable
+ * code in `EXIT_CODES`.
+ */
+
+import { resolve } from 'node:path';
+
+import { CONFIG_FILENAME, loadConfig, runInit } from './config';
+import { runBuild } from './build';
+import { runDownload } from './download';
+import { ForgeError, ForgeErrorCode, toForgeError } from './errors';
+import { formatBytes } from './estimate';
+import { createReporter, renderEstimate, USAGE, type Reporter } from './output';
+import { planSubmit, runSubmit } from './submit';
+import { runStatus } from './status';
+import { runVerify } from './verify';
+import { validateRvf } from './validate';
+import { forgeVersion } from './version';
+
+interface ParsedArgs {
+  command: string;
+  positionals: string[];
+  flags: Map<string, string | boolean>;
+  repeated: Map<string, string[]>;
+}
+
+const VALUE_FLAGS = new Set(['config', 'out', 'provenance', 'mode']);
+const REPEATED_FLAGS = new Set(['only']);
+
+export function parseArgs(argv: readonly string[]): ParsedArgs {
+  const positionals: string[] = [];
+  const flags = new Map<string, string | boolean>();
+  const repeated = new Map<string, string[]>();
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--') {
+      positionals.push(...argv.slice(i + 1));
+      break;
+    }
+    if (!arg.startsWith('-')) {
+      positionals.push(arg);
+      continue;
+    }
+
+    const short = arg === '-h' ? '--help' : arg === '-v' ? '--version' : arg;
+    if (!short.startsWith('--')) {
+      throw new ForgeError(ForgeErrorCode.USAGE, `Unknown flag "${arg}".`, { flag: arg });
+    }
+
+    const eq = short.indexOf('=');
+    const name = (eq === -1 ? short.slice(2) : short.slice(2, eq)).toLowerCase();
+    let value: string | undefined = eq === -1 ? undefined : short.slice(eq + 1);
+
+    if (VALUE_FLAGS.has(name) || REPEATED_FLAGS.has(name)) {
+      if (value === undefined) {
+        value = argv[++i];
+        if (value === undefined || value.startsWith('-')) {
+          throw new ForgeError(ForgeErrorCode.USAGE, `Flag --${name} requires a value.`, { flag: name });
+        }
+      }
+      if (REPEATED_FLAGS.has(name)) {
+        repeated.set(name, [...(repeated.get(name) ?? []), value]);
+      } else {
+        flags.set(name, value);
+      }
+      continue;
+    }
+    if (value !== undefined) {
+      throw new ForgeError(ForgeErrorCode.USAGE, `Flag --${name} does not take a value.`, { flag: name });
+    }
+    flags.set(name, true);
+  }
+
+  const command = positionals.shift() ?? '';
+  return { command, positionals, flags, repeated };
+}
+
+const bool = (args: ParsedArgs, name: string): boolean => args.flags.get(name) === true;
+const str = (args: ParsedArgs, name: string): string | undefined => {
+  const value = args.flags.get(name);
+  return typeof value === 'string' ? value : undefined;
+};
+
+/** Run the CLI. Returns the process exit code; never throws. */
+export async function main(argv: readonly string[]): Promise<number> {
+  let args: ParsedArgs;
+  let reporter: Reporter = createReporter();
+
+  try {
+    args = parseArgs(argv);
+    reporter = createReporter({ json: bool(args, 'json'), quiet: bool(args, 'quiet') });
+  } catch (err) {
+    return reporter.failure('forge', toForgeError(err));
+  }
+
+  if (bool(args, 'version')) {
+    reporter.success('version', { version: forgeVersion() }, () => [forgeVersion()]);
+    return 0;
+  }
+  if (bool(args, 'help') || args.command === '' || args.command === 'help') {
+    reporter.success('help', { usage: USAGE }, () => [USAGE]);
+    return 0;
+  }
+
+  try {
+    return await dispatch(args, reporter);
+  } catch (err) {
+    return reporter.failure(args.command, toForgeError(err));
+  }
+}
+
+async function dispatch(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  switch (args.command) {
+    case 'init':
+      return cmdInit(args, reporter);
+    case 'validate':
+      return cmdValidate(args, reporter);
+    case 'build':
+      return cmdBuild(args, reporter);
+    case 'submit':
+      return cmdSubmit(args, reporter);
+    case 'status':
+      return cmdStatus(args, reporter);
+    case 'download':
+      return cmdDownload(args, reporter);
+    case 'verify':
+      return cmdVerify(args, reporter);
+    default:
+      throw new ForgeError(
+        ForgeErrorCode.USAGE,
+        `Unknown command "${args.command}". Run "forge --help" for the command list.`,
+        { command: args.command },
+      );
+  }
+}
+
+const configPath = (args: ParsedArgs): string => resolve(str(args, 'config') ?? CONFIG_FILENAME);
+
+/**
+ * Split `build`/`submit` positionals into an optional RVF path and targets.
+ *
+ * The grammar is `build [agent.rvf] [targets...]`, which is ambiguous for a
+ * single operand. Resolving it by extension rather than by position means
+ * `forge build linux-x64` reports an unsupported target if it is misspelled,
+ * instead of an unreadable "no such file: linux-x64".
+ */
+export function splitBuildOperands(positionals: readonly string[]): {
+  rvfPath?: string;
+  targets?: string[];
+} {
+  const [first, ...rest] = positionals;
+  if (first === undefined) return {};
+  if (first.toLowerCase().endsWith('.rvf')) {
+    return { rvfPath: first, ...(rest.length > 0 ? { targets: rest } : {}) };
+  }
+  return { targets: [...positionals] };
+}
+
+function requireOperand(args: ParsedArgs, index: number, label: string): string {
+  const value = args.positionals[index];
+  if (!value) {
+    throw new ForgeError(ForgeErrorCode.USAGE, `Missing required argument <${label}>.`, { expected: label });
+  }
+  return value;
+}
+
+async function cmdInit(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const result = await runInit(configPath(args), { force: bool(args, 'force') });
+  reporter.success('init', result, () => [
+    `Wrote ${result.path}`,
+    'Capability policy is default-deny: add explicit grants before building.',
+    'Next: forge validate <agent.rvf>',
+  ]);
+  return 0;
+}
+
+async function cmdValidate(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const path = requireOperand(args, 0, 'agent.rvf');
+  const result = await validateRvf(resolve(path), {
+    deep: bool(args, 'deep'),
+    allowUnsigned: bool(args, 'allow-unsigned'),
+  });
+
+  for (const warning of result.warnings) reporter.warn(warning);
+  reporter.success('validate', result, () => [
+    `${result.path}: valid RVF (format v${result.root.formatVersion}, ${formatBytes(result.size)})`,
+    `  file id     ${result.root.fileId}`,
+    `  segments    ${result.segments.count} (${result.segments.executableCount} executable)`,
+    `  signature   ${result.root.signaturePresent ? `present (algo ${result.root.signatureAlgo})` : 'absent'}`,
+    result.deep ? `  sha256      ${result.identity.sha256}` : '  sha256      not computed (pass --deep)',
+    `  checked in  ${result.durationMs} ms`,
+  ]);
+  return 0;
+}
+
+async function cmdBuild(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const config = await loadConfig(configPath(args));
+  const result = await runBuild({
+    config,
+    ...splitBuildOperands(args.positionals),
+    outDir: str(args, 'out') ?? 'forge-out',
+    force: bool(args, 'force'),
+    allowUnsigned: bool(args, 'allow-unsigned'),
+  });
+
+  for (const warning of result.warnings) reporter.warn(warning);
+  reporter.success(
+    'build',
+    {
+      outDir: result.outDir,
+      manifestSha256: result.manifestSha256,
+      rvfIdentity: result.manifest.rvf.sha256,
+      targets: result.manifest.targets,
+      packaged: result.packaged,
+      status: result.provenance.status,
+      toolchain: result.toolchain,
+      files: result.provenance.files,
+    },
+    () => [
+      `Staged build in ${result.outDir}`,
+      `  rvf identity   ${result.manifest.rvf.sha256}`,
+      `  manifest hash  ${result.manifestSha256}`,
+      `  targets        ${result.manifest.targets.join(', ')}`,
+      `  packaging      ${result.manifest.packaging.mode} (${result.provenance.packaging.status})`,
+      `  files          ${result.provenance.files.length}`,
+      result.packaged ? '' : '  No installers were produced — this is a staged bundle, not a release.',
+    ].filter(Boolean),
+  );
+  return 0;
+}
+
+async function cmdSubmit(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const config = await loadConfig(configPath(args));
+  const options = {
+    config,
+    ...splitBuildOperands(args.positionals),
+    cached: bool(args, 'cached'),
+    allowUnsigned: bool(args, 'allow-unsigned'),
+    confirmed: bool(args, 'yes'),
+  };
+
+  // Show the estimate before the upload, whether or not it is confirmed.
+  if (!options.confirmed) {
+    const plan = await planSubmit(options);
+    for (const line of renderEstimate(plan.estimate)) reporter.warn(line);
+  }
+
+  const result = await runSubmit(options);
+  reporter.success(
+    'submit',
+    { build: result.build, estimate: result.estimate, endpoint: result.endpoint },
+    () => [
+      `Submitted build ${result.build.id} to ${result.endpoint}`,
+      `  state    ${result.build.state}`,
+      `  targets  ${result.build.targets.join(', ')}`,
+      ...renderEstimate(result.estimate),
+      `Next: forge status ${result.build.id}`,
+    ],
+  );
+  return 0;
+}
+
+async function cmdStatus(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const id = requireOperand(args, 0, 'BUILD_ID');
+  const result = await runStatus(id);
+  reporter.success('status', result, () => [
+    `Build ${result.build.id}: ${result.build.state}${result.terminal ? ' (terminal)' : ''}`,
+    `  targets   ${result.build.targets.join(', ')}`,
+    `  rvf       ${result.build.rvfIdentity}`,
+    `  updated   ${result.build.updatedAt}`,
+    ...(result.build.message ? [`  message   ${result.build.message}`] : []),
+  ]);
+  return 0;
+}
+
+async function cmdDownload(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const id = requireOperand(args, 0, 'BUILD_ID');
+  const result = await runDownload(id, {
+    outDir: str(args, 'out'),
+    only: args.repeated.get('only'),
+  });
+  reporter.success('download', result, () => [
+    `Downloaded ${result.artifacts.length} artifact(s) to ${result.outDir}`,
+    ...result.artifacts.map((a) => `  ${a.name}  ${formatBytes(a.sizeBytes)}  sha256 verified`),
+  ]);
+  return 0;
+}
+
+async function cmdVerify(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const target = requireOperand(args, 0, 'artifact');
+  const result = await runVerify(resolve(target), { provenancePath: str(args, 'provenance') });
+  reporter.success('verify', result, () => [
+    `Verified against ${result.provenancePath}`,
+    `  rvf identity   ${result.rvfIdentity}`,
+    `  manifest hash  ${result.manifestSha256.expected}`,
+    `  files checked  ${result.files.length}, all matching`,
+    ...(result.target ? [`  target         ${result.target.path} ok`] : []),
+  ]);
+  return 0;
+}
+
+/* istanbul ignore next -- entrypoint wiring */
+if (require.main === module) {
+  main(process.argv.slice(2))
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((err: unknown) => {
+      process.stderr.write(`internal error: ${toForgeError(err).message}\n`);
+      process.exitCode = 20;
+    });
+}

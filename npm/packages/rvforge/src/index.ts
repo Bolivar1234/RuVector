@@ -1,0 +1,125 @@
+/**
+ * `@ruvector/rvforge` — RVForge programmatic API.
+ *
+ * The CLI in `./cli` is a thin router over these functions; anything the
+ * command line can do is available here for use inside a build pipeline.
+ */
+
+export {
+  EXIT_CODES,
+  ForgeError,
+  ForgeErrorCode,
+  exitCodeFor,
+  redact,
+  redactDetails,
+  toForgeError,
+  type ForgeErrorDetails,
+  type ForgeErrorJson,
+} from './errors';
+
+export {
+  CAPABILITY_CLASSES,
+  PACKAGING_MODES,
+  RUNTIME_PROFILES,
+  SUPPORTED_TARGETS,
+  TARGET_ARTIFACTS,
+  TARGET_WORKER,
+  resolveTarget,
+  resolveTargets,
+  type AppMetadata,
+  type BuildManifest,
+  type BuildTarget,
+  type CapabilityClass,
+  type CapabilityPolicy,
+  type ForgeConfig,
+  type PackagingMode,
+  type ProvenanceFile,
+  type ProvenanceRecord,
+  type RuntimeContract,
+  type RuntimeProfile,
+  type RvfIdentityRecord,
+  type SigningRef,
+  type SigningRefs,
+  type WorkerFamily,
+} from './types';
+
+export {
+  canonicalJson,
+  canonicalJsonFile,
+  sha256Buffer,
+  sha256Canonical,
+  sha256File,
+  sha256String,
+} from './hash';
+
+export {
+  EXECUTABLE_SEGMENT_TYPES,
+  ROOT_MANIFEST_MAGIC_BYTES,
+  ROOT_MANIFEST_SIZE,
+  SEGMENT_HEADER_SIZE,
+  SEGMENT_MAGIC_BYTES,
+  SEGMENT_TYPE_NAMES,
+  crc32c,
+  parseRootManifest,
+  parseSegmentHeader,
+  type RvfRootManifest,
+  type RvfSegmentHeader,
+} from './rvf';
+
+export {
+  RVM_COMPATIBILITY_MATRIX,
+  buildManifest,
+  capabilityPolicyHash,
+  defaultCapabilityPolicy,
+  manifestFileContents,
+  manifestHash,
+  normalizeCapabilityPolicy,
+  serializeManifest,
+  type BuildManifestInput,
+} from './manifest';
+
+export {
+  CONFIG_FILENAME,
+  defaultConfig,
+  loadConfig,
+  runInit,
+  validateConfig,
+  type InitResult,
+} from './config';
+
+export {
+  estimateBuild,
+  formatBytes,
+  RUNNER_COST_PER_MINUTE,
+  type BuildEstimate,
+  type EstimateInput,
+  type TargetEstimate,
+} from './estimate';
+
+export { validateRvf, type SegmentSummary, type ValidateOptions, type ValidateResult } from './validate';
+export { runBuild, type BuildOptions, type BuildResult } from './build';
+export { planSubmit, runSubmit, type SubmitOptions, type SubmitPlan, type SubmitResult } from './submit';
+export { assertBuildId, runStatus, type StatusOptions, type StatusResult } from './status';
+export { runDownload, type DownloadOptions, type DownloadResult } from './download';
+export {
+  MANIFEST_FILENAME,
+  PROVENANCE_FILENAME,
+  runVerify,
+  type FileCheck,
+  type VerifyOptions,
+  type VerifyResult,
+} from './verify';
+
+export {
+  API_TOKEN_ENV,
+  API_URL_ENV,
+  DEFAULT_API_URL,
+  ForgeApiClient,
+  type BuildArtifact,
+  type BuildRecord,
+  type BuildState,
+  type ForgeApiOptions,
+  type SubmitRequest,
+} from './api';
+
+export { forgeVersion, FORGE_PACKAGE_NAME } from './version';
