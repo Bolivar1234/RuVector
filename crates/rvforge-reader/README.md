@@ -13,12 +13,17 @@ src/inspect.rs      read a package without executing it (STUB)
 src/capability.rs   derive the P6 install-time capability contract
 src/runtime.rs      apply the FR004 runtime selection order
 src/state.rs        ADR-288 encrypted state-capsule layout (encryption STUB)
+src/dock.rs         ADR-295 dock entry: the agent/system split, in the types
+src/dock_text.rs    sanitizing and screening agent-authored strings
+src/dock_state.rs   the eight dock states and who may move between them
+src/dock_roster.rs  multi-agent policy and the two-interaction control path
+src/dock_events.rs  D8 event thresholds — what may interrupt
 src/commands.rs     Tauri command wrappers (feature `desktop`)
 src/lib.rs          module root + the security invariants this crate holds
-ui/                 three screens, plain HTML/CSS/JS, no build step
+ui/                 four screens, plain HTML/CSS/JS, no build step
 assets/             vendored copy of compatibility-matrix.json
 capabilities/       Tauri v2 ACL: file dialog only
-tests/              runtime selection, capability card, inspection, state
+tests/              runtime selection, capability card, inspection, state, dock
 ```
 
 ## Build and test
@@ -35,7 +40,7 @@ tests with only `serde` and `serde_json`:
 ```bash
 cd crates/rvforge-reader
 cargo check          # core only — no webview packages needed
-cargo test           # 39 tests, no Tauri dependency
+cargo test           # 90 tests, no Tauri dependency
 ```
 
 This is the CI-testable path. Building the desktop shell additionally needs the
@@ -64,7 +69,9 @@ there is no `.ico` or `.icns` yet, which Windows and macOS bundling require.
 | `inspect::capability_card` | Reads a `<file>.rvf.manifest.json` development sidecar if present; otherwise returns the everything-denied card. | The signed `CapabilityManifest` segment inside the RVF |
 | `state::seal` / `unseal` | Return `EncryptionNotImplemented`. | AEAD sealing bound to the base identity, with customer-held keys (ADR-288) |
 | Install / Customize permissions | Disabled buttons. | The install flow, once verification is real |
-| Emergency controls | Disabled buttons. | `rvm-ffi` lifecycle calls (pause, terminate, revoke, rollback) |
+| Emergency controls | Disabled buttons on the Runtime screen. | `rvm-ffi` lifecycle calls (pause, terminate, revoke, rollback) |
+| Dock roster | In-process, seeded by `dock_add_scaffold_agent`, which reports the unknown value for every security-bearing field (unverified publisher, no confinement, no witness chain). | RVM telemetry over `rvm-ffi`; pause is `rvm_suspend`, terminate is `rvm_terminate` (ADR-295 implementation note) |
+| Dock instruction field | Disabled placeholder. | The agent instruction channel, once `rvm-ffi` is wired in |
 | Witness status | "no witness chain". | `rvm witness` export (ADR-289 §3) |
 
 The stubs report *absence*, never a benign default. `VerificationStatus` and
@@ -98,6 +105,12 @@ replacement of every stub above.
 7. **Hosted mode does not claim bare-metal isolation.** The card shows the
    isolation class the matrix records for the selected profile —
    `os-sandbox+wasm`, never `partition` (ADR-285).
+8. **Agent input cannot reach dock chrome.** An agent supplies task text and
+   progress, through `AgentProvidedStatus::from_agent(&str, i64)` and nowhere
+   else. State, trust badge, network indicator, permission summary, witness
+   status, resource usage, and cost live in `SystemOwnedStatus`, whose fields
+   are private and whose single constructor takes no agent-derived value
+   (ADR-295 §7).
 
 Today `HostProfile::detect()` claims no OS confinement, no KVM, and no measured
 boot, because the `rvm-host` adapters do not exist yet. Selection therefore
@@ -114,6 +127,40 @@ as adapters land — not before.
    selection order and where it came from, a per-profile eligibility table, and
    the emergency controls (Pause · Terminate · Disconnect Network · Revoke
    Capabilities · Rollback State) as disabled placeholders.
+4. **Dock** — the ADR-295 agent dock. A collapsed pill (icon · name ·
+   agent-reported task · progress · state · Pause · Stop · Expand), an expanded
+   panel with the ten §2 elements and the seven-line §8 capability card, and the
+   §5 multi-agent collapse: one active agent, two secondary icons, an overflow
+   count, and aggregates computed over every agent including the hidden ones.
+
+## The dock trust boundary (ADR-295 §7)
+
+Agent-authored text is confined to `.agent-region` — an inset, dashed,
+monospace block on a tinted background, preceded by a dock-drawn
+"Agent-reported" label and clipped to one line. It reaches the DOM only through
+`textContent`, so it cannot produce markup, a class name, or a state indicator.
+System chrome uses presentation the agent has no way to emit from inside that
+region.
+
+Before it is rendered, agent text is stripped of ANSI escapes, control
+characters, bidi overrides and line breaks, capped at 120 characters, and then
+screened for chrome mimicry: a task string reading "Paused", "Stopped", "✓
+Network disabled", or "Verified publisher" is withheld and flagged rather than
+drawn next to the dock's own labels. System-authored lines are cleaned but not
+screened, because "Running → Paused" written by the runtime *is* the label.
+
+The state machine carries the same rule: an agent may assert `Idle`, `Running`,
+`WaitingForApproval`, `Error`, or `Completed`, and nothing else. It cannot put
+itself into `Paused`, `CapabilityDenied`, or `Quarantined`, and it cannot leave
+them. Pause and terminate are legal for the user from every non-terminal state,
+in one call, with no confirmation chain — which is what keeps the acceptance
+test ("identify, read, inspect permissions, terminate, in two interactions")
+satisfiable: expand carries the permissions and the capability card, terminate
+is reachable from the collapsed pill.
+
+Event thresholds (§9) allow only approvals, policy violations, cost limits,
+failures, and milestones to interrupt. Progress, tool calls, network samples,
+and state changes accrue silently into the expanded panel's recent actions.
 
 ## Keeping the matrix in sync
 

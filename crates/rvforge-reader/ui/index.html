@@ -13,6 +13,7 @@
         <button class="step" data-goto="open" aria-current="true">1 · Open</button>
         <button class="step" data-goto="capability" disabled>2 · Capabilities</button>
         <button class="step" data-goto="runtime" disabled>3 · Runtime</button>
+        <button class="step" data-goto="dock">4 · Dock</button>
       </nav>
     </header>
 
@@ -112,6 +113,120 @@
           <button disabled>Rollback state</button>
         </div>
       </section>
+      <!-- Screen 4: the agent dock (ADR-295) -->
+      <section id="screen-dock" class="screen" aria-labelledby="dock-title">
+        <h2 id="dock-title">Agent dock</h2>
+        <p class="lede">
+          Everything with a security meaning here — state, trust badge, network
+          indicator, permissions, witness status, cost — is drawn by RVForge
+          from RVForge’s own state. Agents supply only the text and the
+          percentage inside the marked “agent-reported” regions.
+        </p>
+
+        <!-- Collapsed bar. System chrome: solid surface, square edges,
+             system font. Agent content is confined to .agent-region. -->
+        <div class="dock-bar" role="group" aria-label="Agent dock">
+          <div id="dock-empty" class="dock-empty">No agent is running.</div>
+
+          <div id="dock-pill" class="pill" hidden>
+            <span class="pill-icon" id="pill-icon" aria-hidden="true">◆</span>
+            <span class="pill-name" id="pill-name">—</span>
+
+            <span class="agent-region" id="pill-task-region">
+              <span class="agent-label" id="pill-task-label">Agent-reported</span>
+              <span class="agent-text" id="pill-task">—</span>
+            </span>
+
+            <span class="pill-progress">
+              <progress id="pill-progress-bar" max="100" value="0"></progress>
+              <span id="pill-progress-text" class="mono">0%</span>
+            </span>
+
+            <span class="state-chip" id="pill-state">
+              <span class="state-glyph" id="pill-state-glyph" aria-hidden="true"></span>
+              <span id="pill-state-label">—</span>
+            </span>
+
+            <button class="ctl" id="pill-pause">Pause</button>
+            <button class="ctl stop" id="pill-stop">Stop</button>
+            <button class="ctl" id="pill-expand" aria-expanded="false">Expand</button>
+          </div>
+
+          <div class="pill-secondary" id="dock-secondary" aria-label="Other agents"></div>
+          <button class="overflow" id="dock-overflow" hidden>+0 more</button>
+
+          <div class="dock-aggregate">
+            <span title="Aggregate CPU across every agent, hidden ones included"
+                  id="agg-cpu" class="mono">0 mCPU</span>
+            <span title="Aggregate memory across every agent" id="agg-mem" class="mono">0 B</span>
+            <span title="Estimated cost across every agent" id="agg-cost" class="mono">$0.00</span>
+            <span id="agg-approvals" class="approvals">0 approvals</span>
+          </div>
+        </div>
+
+        <!-- Expanded panel: the ten ADR-295 §2 elements + the §8 card. -->
+        <div id="dock-expanded" class="panel" hidden>
+          <div class="expanded-grid">
+            <div>
+              <h3>Objective</h3>
+              <p class="agent-region block">
+                <span class="agent-label">Agent-reported</span>
+                <span class="agent-text" id="exp-objective">—</span>
+              </p>
+
+              <h3>Recent actions</h3>
+              <ul id="exp-actions" class="actions"></ul>
+
+              <h3>Pending approvals</h3>
+              <ul id="exp-approvals" class="notes"></ul>
+
+              <h3>Instruction</h3>
+              <div class="row">
+                <input id="exp-instruction" type="text"
+                       placeholder="Send an instruction to this agent" />
+                <button id="exp-send">Send</button>
+              </div>
+            </div>
+
+            <div>
+              <h3>Measured by RVForge</h3>
+              <dl class="facts compact">
+                <dt>Model</dt><dd id="exp-model">—</dd>
+                <dt>Tokens</dt><dd id="exp-tokens">—</dd>
+                <dt>CPU</dt><dd id="exp-cpu">—</dd>
+                <dt>Memory</dt><dd id="exp-mem">—</dd>
+                <dt>Network</dt><dd id="exp-network">—</dd>
+                <dt>Witness</dt><dd id="exp-witness">—</dd>
+                <dt>Estimated cost</dt><dd id="exp-cost">—</dd>
+              </dl>
+
+              <h3>Capability grants</h3>
+              <ul id="exp-grants" class="notes"></ul>
+
+              <h3>Key capability card</h3>
+              <ul id="exp-card" class="capcard"></ul>
+            </div>
+          </div>
+        </div>
+
+        <h3>Development harness</h3>
+        <p class="hint">
+          No runtime is attached, so a registered agent reports its unknown
+          values: unverified publisher, no confinement engaged, no witness
+          chain. The agent channel below carries the only two values an agent
+          can supply.
+        </p>
+        <div class="row">
+          <input id="dock-new-name" type="text" placeholder="Agent name" />
+          <button id="dock-add">Register agent</button>
+        </div>
+        <div class="row">
+          <input id="dock-agent-task" type="text"
+                 placeholder="Agent-supplied task text (sanitized on arrival)" />
+          <input id="dock-agent-progress" type="text" class="narrow" placeholder="0–100" />
+          <button id="dock-agent-send">Report as agent</button>
+        </div>
+      </section>
     </main>
 
     <p id="error" class="error" role="alert" hidden></p>
@@ -123,5 +238,6 @@
     </footer>
 
     <script src="main.js"></script>
+    <script src="dock.js"></script>
   </body>
 </html>
