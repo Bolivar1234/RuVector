@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 9. Reader scaffold + ADR-295 committed (2db655fe1). In flight: forge-packaging (CLI packaging modes), registry-core (registry crate). Next after those land: dock implementation in reader (P5), publisher verbs pack/test/publish (P1), rvf-forge-core FFI into reader, ADR status flips.
+- **Iteration**: 10. CI: CLI green ubuntu+windows, core green ubuntu, rest pending. Spawned dock-impl on crates/rvforge-reader (ADR-295: typed trust boundary AgentProvidedStatus vs SystemOwnedStatus, 8-state machine, roster policy, event thresholds, pill+expanded UI). In flight: forge-packaging (CLI, actively editing), registry-core (registry crate, started), dock-impl (reader). Queued: publisher verbs (needs CLI free), core FFI into reader (needs reader free), ADR status flips (needs implementations landed).
 - **In flight**:
   - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
