@@ -40,14 +40,22 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 1 (2026-08-03 ~20:50 local)
-- **In flight**: background coder agent `forge-scaffold` is scaffolding
-  `npm/packages/forge` (step 1). BEFORE starting step 1 work, check
-  whether `npm/packages/forge/package.json` exists and tests pass — if
-  the agent finished, review + commit its output instead of rewriting.
-- **Next action**: review/commit forge CLI scaffold; then start step 2
-  (`crates/rvf-forge-core`).
+- **Iteration**: 2 (2026-08-03 ~20:57 local, loop fire #1)
+- **In flight**:
+  - `forge-scaffold` agent: `npm/packages/forge` (step 1) — package.json/
+    src/tsconfig exist, tests not yet; still running. Do NOT touch its
+    directory until it reports; then review, RENAME to
+    `npm/packages/rvforge` + `@ruvector/rvforge` (bin `rvforge`), run
+    npm test, commit.
+  - `forge-core` agent: `crates/rvf-forge-core` (step 2) — spawned this
+    iteration. On completion: review, `cargo test -p rvf-forge-core`,
+    `cargo clippy -p rvf-forge-core -- -D warnings`, commit.
+- **Next action**: when either agent reports, review + test + commit its
+  output. If both still running at next fire, start step P2 (registry
+  data model schema under npm/packages or docs — content-addressed
+  releases, immutable, predecessor-linked, transparency log JSON schema).
 - **Blockers**: none.
+- ADR-294 committed (a6efab480) and pushed.
 
 ## Scope expansion (2026-08-03 late) — RVForge Platform
 
@@ -56,7 +64,7 @@ The user expanded RVForge into a five-product platform (see requirements
 Enterprise** — an agentic app store + runtime + registry + trust system
 (Steam + npm + enterprise catalog). Additions to the work plan:
 
-- [ ] P-ADR. ADR-294 (RVForge platform: marketplace objects, trust levels,
+- [x] P-ADR. ADR-294 (RVForge platform: marketplace objects, trust levels,
        review pipeline, security/countersigning model, licensing) — agent
        `adr-author-4` in flight; review, rename-sweep, commit when landed.
 - [ ] P1. Publisher CLI verbs `pack | test | publish` added to the CLI
