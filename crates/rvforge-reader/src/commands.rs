@@ -10,13 +10,14 @@ use std::sync::Mutex;
 use crate::capability::CapabilityCard;
 use crate::dock::{
     AgentDockEntry, IsolationClass, NetworkIndicator, PermissionSummary, ResourceUsage,
-    SystemOwnedStatus, TrustBadge, WitnessStatus,
+    SystemOwnedStatus, TrustBadge,
 };
 use crate::dock_events::Notification;
 use crate::dock_roster::{AgentPill, DockRoster, ExpandedAgentView, RosterView};
 use crate::dock_state::DockState;
 use crate::inspect::{self, InspectionSummary, VerificationOutcome};
 use crate::runtime::{self, HostProfile, RuntimeChoice};
+use crate::witness_view::{self, WitnessChainView};
 
 /// Read identity, segments, and declared capabilities. Checks nothing, executes
 /// nothing: the returned verification status is always `unverified`.
@@ -48,6 +49,20 @@ pub fn runtime_selection(path: String) -> Result<RuntimeChoice, String> {
     let mut choice = runtime::select_for_host(&HostProfile::detect()).map_err(|e| e.to_string())?;
     choice.subject = Some(path);
     Ok(choice)
+}
+
+/// The witness chain, verified.
+///
+/// With no `path`, the reader's own receipt log; with one, an external
+/// `receipts.jsonl` such as the CLI writes. Each receipt's content address is
+/// recomputed and each `prevReceipt` link is checked, so the returned status is
+/// derived here rather than reported by whoever wrote the file.
+#[tauri::command]
+pub fn witness_chain(path: Option<String>) -> Result<WitnessChainView, String> {
+    match path {
+        Some(p) => witness_view::chain_at(&PathBuf::from(p)).map_err(|e| e.to_string()),
+        None => Ok(witness_view::chain_from_default_log()),
+    }
 }
 
 /// The dock's roster, managed by the Tauri app.
@@ -139,8 +154,13 @@ pub fn dock_agent_report(
 /// is wired in.
 ///
 /// Every security-bearing field reports its unknown value — unverified
-/// publisher, no confinement engaged, no witness chain — because the scaffold
-/// has measured none of them. It does not fabricate a trusted-looking agent.
+/// publisher, no confinement engaged — because the scaffold has measured none
+/// of them. It does not fabricate a trusted-looking agent.
+///
+/// The witness status is the exception, and it is not a placeholder: it is the
+/// verdict [`crate::witness_view`] reached over the reader's own receipt log.
+/// An empty log still reports `Unavailable`, but a log the viewer found broken
+/// reports `Broken` here too.
 #[tauri::command]
 pub fn dock_add_scaffold_agent(
     dock: tauri::State<'_, DockSurface>,
@@ -161,7 +181,7 @@ pub fn dock_add_scaffold_agent(
             grants: Vec::new(),
             pending_approvals: Vec::new(),
         },
-        WitnessStatus::Unavailable,
+        witness_view::chain_from_default_log().dock_status,
         ResourceUsage::ZERO,
         0,
         None,

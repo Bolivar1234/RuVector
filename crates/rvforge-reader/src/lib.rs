@@ -12,6 +12,9 @@
 //! - [`state`] — encrypted state-capsule layout and sealing (ADR-288).
 //! - [`dock`], [`dock_state`], [`dock_roster`], [`dock_events`] — the Agent
 //!   Dock: what a running agent shows and how it is stopped (ADR-295).
+//! - [`witness_receipt`], [`witness_view`] — the witness viewer: recompute each
+//!   receipt's content address, check `prevReceipt` continuity per subject, and
+//!   report where a chain stops verifying (requirements P15.11, P8).
 //!
 //! # Security invariants
 //!
@@ -55,6 +58,8 @@ pub mod inspect;
 pub mod receipts;
 pub mod runtime;
 pub mod state;
+pub mod witness_receipt;
+pub mod witness_view;
 
 #[cfg(feature = "desktop")]
 pub mod commands;
@@ -80,6 +85,7 @@ pub fn run() {
             commands::dock_notifications,
             commands::dock_agent_report,
             commands::dock_add_scaffold_agent,
+            commands::witness_chain,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RVForge Reader");

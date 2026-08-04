@@ -361,3 +361,85 @@ input[type="text"] {
 .capcard .detail { color: var(--muted); margin-left: auto; text-align: right; }
 
 input[type="text"].narrow { flex: none; width: 90px; min-width: 0; }
+
+/* Witness viewer (requirements P15.11).
+   -------------------------------------------------------------------------
+   System chrome throughout: no agent-authored string reaches this screen, so
+   there is no .agent-region here. Only a chain Rust reported as `valid` gets
+   the grant colour; every other label — broken, empty, unchained — takes the
+   deny colour, and a broken receipt is marked in place rather than the chain
+   being greyed out as a whole. */
+
+.wit-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin: 12px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.wit-banner.ok { border-color: var(--grant); }
+.wit-banner.unverified { border-color: var(--deny); }
+
+.wit-chip {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--bg);
+  background: var(--deny);
+}
+.wit-chip.ok { background: var(--grant); }
+.wit-chip.unverified { background: var(--deny); }
+
+.wit-subject {
+  margin: 18px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.wit-subject-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.wit-subject-head .hint { margin: 0; margin-left: auto; }
+
+.wit-chain { margin: 0; padding: 0 0 0 34px; }
+
+.wit-receipt {
+  padding: 10px 12px 10px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.wit-receipt:last-child { border-bottom: none; }
+/* The break is drawn on the receipt that failed: the ones above it verified. */
+.wit-receipt.broken {
+  border-left: 3px solid var(--deny);
+  margin-left: -3px;
+  background: var(--surface-2);
+}
+
+.wit-receipt-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.wit-receipt-head .hint { margin: 0; }
+.wit-receipt-head .id { margin-left: auto; color: var(--muted); }
+
+.wit-event { font-weight: 600; }
+.wit-outcome { font-size: 12px; font-weight: 700; }
+.wit-outcome.ok { color: var(--grant); }
+.wit-outcome.unverified { color: var(--deny); }
+
+.wit-detail { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+.wit-note { margin: 4px 0 0; font-size: 13px; color: var(--muted); font-style: italic; }
+.wit-break { margin: 6px 0 0; font-size: 13px; color: var(--deny); font-weight: 600; }

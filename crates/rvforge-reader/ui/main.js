@@ -238,8 +238,20 @@ function renderRuntime(c) {
     c.policy_source === "embedded-default"
       ? "embedded default (no signed policy override)"
       : c.policy_source;
-  $("rt-witness").textContent = "no witness chain — rvm-ffi is not wired in";
+  // The witness line is read from the verified chain, not written here. Until
+  // it answers, the field says so rather than showing a status nobody checked.
+  $("rt-witness").textContent = "reading the witness chain…";
   $("rt-witness").className = "status-unverified";
+  invoke("witness_chain", { path: null })
+    .then((chain) => {
+      $("rt-witness").textContent = chain.summary;
+      $("rt-witness").className =
+        chain.label === "valid" ? "status-ok" : "status-unverified";
+    })
+    .catch((err) => {
+      $("rt-witness").textContent = `the witness chain could not be read: ${err}`;
+      $("rt-witness").className = "status-unverified";
+    });
 
   const body = $("rt-eval");
   body.replaceChildren();

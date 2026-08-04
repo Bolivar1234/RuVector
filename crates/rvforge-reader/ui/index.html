@@ -14,6 +14,7 @@
         <button class="step" data-goto="capability" disabled>2 · Capabilities</button>
         <button class="step" data-goto="runtime" disabled>3 · Runtime</button>
         <button class="step" data-goto="dock">4 · Dock</button>
+        <button class="step" data-goto="witness">5 · Witness</button>
       </nav>
     </header>
 
@@ -233,6 +234,38 @@
           <button id="dock-agent-send">Report as agent</button>
         </div>
       </section>
+      <!-- Screen 5: the witness viewer (requirements P15.11) -->
+      <section id="screen-witness" class="screen" aria-labelledby="wit-title">
+        <h2 id="wit-title">Witness chain</h2>
+        <p class="lede">
+          Every receipt below was re-hashed here and every link re-checked here.
+          Nothing on this screen is a status a file reported about itself.
+        </p>
+
+        <div class="row">
+          <input id="wit-path" type="text" spellcheck="false"
+                 placeholder="…or a path to a receipts.jsonl written by the CLI" />
+          <button id="wit-load" class="primary">Load chain</button>
+          <button id="wit-load-local">Use this reader’s log</button>
+        </div>
+
+        <div id="wit-banner" class="wit-banner" hidden>
+          <span id="wit-label" class="wit-chip">—</span>
+          <span id="wit-summary">—</span>
+        </div>
+        <p class="hint mono" id="wit-source" hidden>—</p>
+
+        <div id="wit-subjects"></div>
+
+        <div id="wit-malformed-box" hidden>
+          <h3>Unreadable records</h3>
+          <p class="hint">
+            A line nobody can read is a gap in the evidence, so it is listed
+            rather than skipped, and the chain does not report as valid.
+          </p>
+          <ul id="wit-malformed" class="notes"></ul>
+        </div>
+      </section>
     </main>
 
     <p id="error" class="error" role="alert" hidden></p>
@@ -246,5 +279,6 @@
 
     <script src="main.js"></script>
     <script src="dock.js"></script>
+    <script src="witness.js"></script>
   </body>
 </html>
