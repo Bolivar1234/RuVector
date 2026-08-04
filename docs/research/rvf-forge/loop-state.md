@@ -29,8 +29,8 @@ artifacts, no secrets in code or logs.
        separate repo github.com/ruvnet/rvm — for this repo, define the
        integration contract + compatibility matrix consumed by forge)
 - [x] 5. GitHub Actions build matrix — .github/workflows/rvforge-ci.yml (3-OS matrix for CLI npm test + cargo test/clippy/fmt; tolerant of pending package rename)
-- [~] 6. Embedded + thin packaging modes — agent `forge-packaging` in flight
-- [~] 7. Provenance, inventory, witness receipts — agent `forge-packaging` in flight (CLI side)
+- [x] 6. Embedded + thin packaging modes — done, 137 CLI tests green
+- [x] 7. Provenance, inventory, witness receipts — CLI side done (receipts.jsonl chains, inventory, provenance); registry+reader sides via registry-core/dock-impl
 - [ ] 8. Tests green (cargo test -p rvf-forge-core, npm test in forge),
        lint clean, security review pass (default-deny caps, no RVF
        execution during packaging, no secrets)
@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 11. Durable memory written (project_rvforge_buildout.md) so future sessions resume from this file. CI latest run: CLI pass ubuntu+windows, others queued. registry-core at 12 files, forge-packaging + dock-impl actively editing. Previously: 10. CI: CLI green ubuntu+windows, core green ubuntu, rest pending. Spawned dock-impl on crates/rvforge-reader (ADR-295: typed trust boundary AgentProvidedStatus vs SystemOwnedStatus, 8-state machine, roster policy, event thresholds, pill+expanded UI). In flight: forge-packaging (CLI, actively editing), registry-core (registry crate, started), dock-impl (reader). Queued: publisher verbs (needs CLI free), core FFI into reader (needs reader free), ADR status flips (needs implementations landed).
+- **Iteration**: 12. forge-packaging DONE+committed: CLI now 137 tests, packaging modes+compat+inventory+witness landed. CLI dir now FREE -> next agent: publisher verbs pack/test/publish (P1) wiring to rvforge-registry once registry-core lands. Previously: 11. Durable memory written (project_rvforge_buildout.md) so future sessions resume from this file. CI latest run: CLI pass ubuntu+windows, others queued. registry-core at 12 files, forge-packaging + dock-impl actively editing. Previously: 10. CI: CLI green ubuntu+windows, core green ubuntu, rest pending. Spawned dock-impl on crates/rvforge-reader (ADR-295: typed trust boundary AgentProvidedStatus vs SystemOwnedStatus, 8-state machine, roster policy, event thresholds, pill+expanded UI). In flight: forge-packaging (CLI, actively editing), registry-core (registry crate, started), dock-impl (reader). Queued: publisher verbs (needs CLI free), core FFI into reader (needs reader free), ADR status flips (needs implementations landed).
 - **In flight**:
   - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
