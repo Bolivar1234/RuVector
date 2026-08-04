@@ -24,8 +24,8 @@ artifacts, no secrets in code or logs.
 - [ ] 2. `crates/rvf-forge-core` Rust packaging/verification crate
        (manifest parse, Ed25519 verify, segment hash verify, provenance
        record, SHA256 checksums — NEVER executes RVF content)
-- [ ] 3. Tauri RVF Reader app scaffold
-- [ ] 4. rvm-* integration work items (rvm-rvf first; note: rvm is a
+- [~] 3. Tauri RVF Reader app scaffold — agent `reader-scaffold` in flight (crates/rvforge-reader)
+- [~] 4. rvm-* integration — compatibility-matrix.json v1 done (this repo side); rvm-rvf crates live in ruvnet/rvm (rvm-rvf first; note: rvm is a
        separate repo github.com/ruvnet/rvm — for this repo, define the
        integration contract + compatibility matrix consumed by forge)
 - [x] 5. GitHub Actions build matrix — .github/workflows/rvforge-ci.yml (3-OS matrix for CLI npm test + cargo test/clippy/fmt; tolerant of pending package rename)
@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 4 (loop fire #3). rvforge-ci.yml written: 3-OS matrix, path-filtered, handles both forge/rvforge package dirs. Agents still in flight (CLI: src+4 test suites+fixture; crate: 6 modules).
+- **Iteration**: 5 (loop fire #4). Compatibility matrix v1 written (compatibility-matrix.json, ADR-291): runtime profiles wasm/os-isolation+wasm supported, microvm/rvm-native planned; packaging modes; selection order. Third agent `reader-scaffold` spawned for crates/rvforge-reader (Tauri v2, standalone workspace, static UI, stubbed inspect pending rvf-forge-core FFI). CLI agent reached dist/ build; crate agent at 12 modules + workspace-registered.
 - **In flight**:
   - `forge-scaffold` agent: `npm/packages/forge` (step 1) — package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
