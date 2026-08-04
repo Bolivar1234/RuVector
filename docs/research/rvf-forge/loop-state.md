@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 7 (loop fire #6). CI: CLI PASS ubuntu+windows (workspaces fix verified), macos+core jobs pending. Spawned `forge-packaging` on npm/packages/rvforge: embedded+thin modes (FR001/2), identical-hash invariant, compat-matrix enforcement (ADR-291), software inventory, witness receipt chains (steps 6+7). reader-scaffold still in flight (17 files).
+- **Iteration**: 8. Scope widened to all ADRs 283-295 (user directive). registry-core agent spawned. In flight: reader-scaffold, forge-packaging, adr-author-5 (ADR-295), registry-core.
 - **In flight**:
   - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
@@ -91,9 +91,22 @@ Enterprise** — an agentic app store + runtime + registry + trust system
        + understand + inspect + terminate within 5 seconds / 2
        interactions.
 
-MVP focus stays: CLI + core crate + Reader + WASM quarantine + registry
-schema. Store web UI and payments are NOT in this loop's scope unless the
-user says so.
+SCOPE (user directive 2026-08-03 late): fully implement ALL RVForge
+ADRs 283–295 until production ready, published, and merged. The earlier
+web-UI/payments guardrail is lifted to the extent an ADR requires it —
+P15 MVP items (registry, publisher verbs, capability cards, witness
+viewer, revocation, private catalogs) are IN scope. Cross-repo rvm-*
+items are contract/stub-side only in this repo (blocker: ruvnet/rvm is a
+separate repo). As each ADR's scope lands, flip its Status to
+Implemented with an Updated date.
+
+Additional in-flight (iteration 8):
+- [~] P2-impl. crates/rvforge-registry — agent `registry-core` building
+  the file-backed content-addressed registry with ed25519 release rules,
+  trust-level raise enforcement, non-destructive revocation, Merkle
+  transparency log, witness chains.
+- Cron job recreated as e34a0b75 (ADR-283..295 wording); old 79a54ad6
+  deleted.
 
 ## Decisions / assumptions log
 
