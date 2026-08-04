@@ -40,7 +40,7 @@ artifacts, no secrets in code or logs.
 
 ## Current iteration
 
-- **Iteration**: 12. forge-packaging DONE+committed: CLI now 137 tests, packaging modes+compat+inventory+witness landed. CLI dir now FREE -> next agent: publisher verbs pack/test/publish (P1) wiring to rvforge-registry once registry-core lands. Previously: 11. Durable memory written (project_rvforge_buildout.md) so future sessions resume from this file. CI latest run: CLI pass ubuntu+windows, others queued. registry-core at 12 files, forge-packaging + dock-impl actively editing. Previously: 10. CI: CLI green ubuntu+windows, core green ubuntu, rest pending. Spawned dock-impl on crates/rvforge-reader (ADR-295: typed trust boundary AgentProvidedStatus vs SystemOwnedStatus, 8-state machine, roster policy, event thresholds, pill+expanded UI). In flight: forge-packaging (CLI, actively editing), registry-core (registry crate, started), dock-impl (reader). Queued: publisher verbs (needs CLI free), core FFI into reader (needs reader free), ADR status flips (needs implementations landed).
+- **Iteration**: 13. publisher-verbs spawned on now-free CLI dir (pack/test/publish per P4; publish targets local registry layout, parity with crates/rvforge-registry reconciled later). CI: full matrix pending on latest push e82f863f9. In flight: registry-core, dock-impl, publisher-verbs. Previously: 12. forge-packaging DONE+committed: CLI now 137 tests, packaging modes+compat+inventory+witness landed. CLI dir now FREE -> next agent: publisher verbs pack/test/publish (P1) wiring to rvforge-registry once registry-core lands. Previously: 11. Durable memory written (project_rvforge_buildout.md) so future sessions resume from this file. CI latest run: CLI pass ubuntu+windows, others queued. registry-core at 12 files, forge-packaging + dock-impl actively editing. Previously: 10. CI: CLI green ubuntu+windows, core green ubuntu, rest pending. Spawned dock-impl on crates/rvforge-reader (ADR-295: typed trust boundary AgentProvidedStatus vs SystemOwnedStatus, 8-state machine, roster policy, event thresholds, pill+expanded UI). In flight: forge-packaging (CLI, actively editing), registry-core (registry crate, started), dock-impl (reader). Queued: publisher verbs (needs CLI free), core FFI into reader (needs reader free), ADR status flips (needs implementations landed).
 - **In flight**:
   - forge-scaffold: DONE (renamed to rvforge, committed). Was: package.json/
     src/tsconfig exist, tests not yet; still running. Do NOT touch its
@@ -67,7 +67,7 @@ Enterprise** — an agentic app store + runtime + registry + trust system
 - [x] P-ADR. ADR-294 (RVForge platform: marketplace objects, trust levels,
        review pipeline, security/countersigning model, licensing) — agent
        `adr-author-4` in flight; review, rename-sweep, commit when landed.
-- [ ] P1. Publisher CLI verbs `pack | test | publish` added to the CLI
+- [~] P1. Publisher CLI verbs — agent `publisher-verbs` in flight (pack/test/publish vs registry-model layout, ed25519 via node:crypto, honest skipped categories for quarantine-required tests)
        (union with existing init/validate/build/submit/status/download/
        verify). `pack` = validate + capability manifest + listing
        metadata; `test` = quarantined capability-denial/malformed-input/
