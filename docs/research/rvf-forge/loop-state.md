@@ -80,6 +80,16 @@ Enterprise** — an agentic app store + runtime + registry + trust system
        update UX per requirements P5–P9; capability cards mandatory.
 - [ ] P4. Trust levels + revocation semantics (revocation blocks
        execution, never deletes local RVFs or state).
+- [~] P5. RVForge Agent Dock (requirements "RVForge Agent Dock" D1–D8;
+       ADR-295 being authored by agent `adr-author-5`). Security/control
+       surface: RVForge-owned chrome, agent content strictly separated
+       (spoofing defense), 8 states, one-action pause/terminate,
+       event-threshold noise control. First implementation target:
+       dock window + runtime screen in crates/rvforge-reader AFTER the
+       reader scaffold lands (do not collide with reader-scaffold agent;
+       dock implementation waits for its completion). Acceptance: identify
+       + understand + inspect + terminate within 5 seconds / 2
+       interactions.
 
 MVP focus stays: CLI + core crate + Reader + WASM quarantine + registry
 schema. Store web UI and payments are NOT in this loop's scope unless the

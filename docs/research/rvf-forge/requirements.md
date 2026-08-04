@@ -1091,3 +1091,103 @@ capabilities, a user installs it without developer tools, RVM denies
 undeclared access, the agent runs offline, an update requests fresh
 permission, and every build, installation, and privileged action verifies
 through the public witness record.
+
+---
+
+# RVForge Agent Dock
+
+A horizontal pill that shows persistent agents without opening the full
+application — a **security and control surface, not a decorative chat
+widget**. It is a continuous trust indicator differentiating RVForge from
+conventional agent interfaces that hide autonomous activity in the
+background.
+
+## D1. Collapsed state
+
+```text
+Agent icon · Agent name · Current task · Progress · Runtime status ·
+Pause · Terminate · Expand
+```
+
+Example:
+
+```text
+Cognitum Analyst   Reviewing 42 documents   68%   Pause   Stop
+```
+
+## D2. Expanded state
+
+1. Current objective.
+2. Recent actions.
+3. Pending approvals.
+4. Model and token usage.
+5. CPU and memory consumption.
+6. Network activity.
+7. Capability grants.
+8. Witness status.
+9. Estimated cost.
+10. Text or voice instruction field.
+
+## D3. Agent states
+
+Unmistakable colors and icons:
+
+```text
+Idle · Running · Waiting for approval · Paused · Capability denied ·
+Error · Quarantined · Completed
+```
+
+The user must always be able to pause or terminate an agent with one
+action.
+
+## D4. Multiple agents
+
+Do not place every agent in the bar. Show:
+
+```text
+Active agent · Two secondary agent icons · Additional agent count ·
+Aggregate resource usage · Approval count
+```
+
+Selecting the count opens the full swarm view.
+
+## D5. Platform placement
+
+1. macOS menu bar or floating notch style dock.
+2. Windows system tray plus optional floating dock.
+3. Linux panel or floating dock.
+4. Browser toolbar inside RVForge.
+5. Mobile Live Activity for status and approvals.
+6. RVM appliance dashboard for active coherence domains.
+
+## D6. Security requirements
+
+The dock chrome must be controlled by RVForge, **never by the agent**.
+Agents may provide task text and progress but cannot alter the pause
+button, trust badge, network indicator, or permission state.
+
+System messages and agent generated content must be visually distinct.
+Otherwise a malicious agent could display a fake approval or claim it has
+stopped when it is still executing.
+
+## D7. Key capability card
+
+Expanding the agent icon immediately shows:
+
+```text
+Verified publisher · RVM or WASM isolated · Local model ·
+Network disabled · Selected folder access · Encrypted memory ·
+Witness chain valid
+```
+
+## D8. Noise control
+
+The largest UX risk is excessive noise from perpetual agents. The fix is
+event thresholds: show only approvals, policy violations, cost limits,
+failures, and meaningful milestones.
+
+## Dock acceptance test
+
+From any application, the user can identify the active agent, understand
+what it is doing, inspect its permissions, and terminate it within five
+seconds and two interactions.
