@@ -13,11 +13,28 @@ requirements.
 
 Requires Node.js 20 or later.
 
+## Quick start
+
+From an empty directory to a staged build, with nothing else installed:
+
+```bash
+npx @ruvector/rvforge init --keygen        # forge.config.json, rvforge.json, a publisher key
+npx @ruvector/rvforge create               # writes a signed agent.rvf
+npx @ruvector/rvforge validate agent.rvf --deep
+npx @ruvector/rvforge test agent.rvf
+npx @ruvector/rvforge build --mode embedded
+npx @ruvector/rvforge verify forge-out
+```
+
+`create` is what makes the rest runnable: every other command reads an `.rvf`,
+and until you have one there is nothing to validate, pack, or build.
+
 ## Commands
 
 ```bash
 npx @ruvector/rvforge init                     # scaffold forge.config.json
 npx @ruvector/rvforge init --keygen            # …plus rvforge.json and a publisher key
+npx @ruvector/rvforge create                   # write a signed agent.rvf
 npx @ruvector/rvforge validate agent.rvf       # structural check, no execution
 npx @ruvector/rvforge build agent.rvf          # local build (--mode embedded|thin)
 npx @ruvector/rvforge submit agent.rvf --yes   # hosted build
@@ -45,6 +62,51 @@ npx @ruvector/rvforge build agent.rvf windows macos linux
 
 Omit the `.rvf` and forge uses `rvf` from the config; omit the targets and it
 uses `targets`.
+
+### `create`
+
+Writes a valid, signed `.rvf`. It reads the project metadata and declared
+capabilities from `rvforge.json` and signs with the key `init --keygen`
+recorded there, so the common case takes no arguments:
+
+```bash
+forge create                       # -> agent.rvf, signed
+forge create build/my-agent.rvf    # explicit output path
+forge create --from ./payload      # include real payload files as segments
+forge create --unsigned            # development build, no signature
+forge create --force               # overwrite an existing output file
+```
+
+With no `--from`, the output is a minimal but complete agent skeleton: a `META`
+segment declaring the capability classes the project requests, and a signed
+root `MANIFEST`. That is enough for `validate`, `test`, `pack`, `publish`, and
+`build` to run, which is the point — you can walk the whole pipeline before you
+have a model to put in it.
+
+`--from <dir>` adds every file under the directory as a segment, visited in
+sorted order. A `.wasm` file becomes an executable `WASM` segment and is signed
+individually; anything else becomes an opaque `VEC` payload segment. Payload
+bytes are read, hashed, and stored — never parsed as code, linked, or executed.
+
+**Refuses to overwrite.** An existing output file is an error (`FORGE_E_IO`)
+unless `--force` is passed, so a second `create` cannot silently discard the
+artifact you already signed and published.
+
+**Signing.** `--key-file` overrides the path in `rvforge.json`. Without either,
+`create` fails with `FORGE_E_KEY` rather than quietly writing something
+unsigned; pass `--unsigned` when that is what you actually want. Only the key
+*id* is ever printed. An unsigned container carrying an executable segment is
+refused by `validate` unless you also pass `--allow-unsigned`.
+
+**Deterministic.** The same project, key, and inputs produce byte-identical
+output. Timestamps are zero, segment ids come from position, payload files are
+sorted, and the file id is derived from the project's name, version, and
+publisher — so rebuilding an agent reproduces its identity rather than minting
+a new one.
+
+The container `create` writes is the format `crates/rvf-forge-core` reads;
+`scripts/rvforge-parity-check.sh` proves it by having the Rust crate inspect
+and verify a container this command produced, signatures included.
 
 ### `validate`
 
@@ -229,6 +291,11 @@ Exit codes are stable:
 | `FORGE_E_NOT_FOUND` | 11 | Unknown build, artifact, or record |
 | `FORGE_E_CONFIG` | 12 | Bad `forge.config.json` |
 | `FORGE_E_TOOLCHAIN` | 13 | Required local build tool unavailable |
+| `FORGE_E_POLICY` | 14 | Capability policy absent, vague, or contradictory |
+| `FORGE_E_LICENSE` | 15 | No license declared, or one forge cannot reconcile |
+| `FORGE_E_KEY` | 16 | Signing key missing, unusable, or over-permissioned |
+| `FORGE_E_REGISTRY` | 17 | Registry directory unreadable or inconsistent |
+| `FORGE_E_LINEAGE` | 18 | Predecessor chain does not resolve |
 | `FORGE_E_INTERNAL` | 20 | A bug in forge |
 
 ## Capability policy
@@ -263,6 +330,12 @@ license, runtime requirements, and the capability contract the install UX
 renders. It is separate from `forge.config.json` on purpose: a build is
 reproducible from the build config alone, and nothing in the project file can
 change a build's output. Neither file ever holds credentials.
+
+All three take an `.rvf` that `rvforge create` wrote:
+
+```bash
+rvforge init --keygen && rvforge create && rvforge pack agent.rvf
+```
 
 ### `pack`
 

@@ -17,10 +17,12 @@ import { sha256File } from './hash';
 import {
   ROOT_MANIFEST_SIZE,
   SEGMENT_HEADER_SIZE,
+  SIGNATURE_FOOTER_MIN_SIZE,
   MAX_SEGMENT_PAYLOAD,
   alignUp,
   parseRootManifest,
   parseSegmentHeader,
+  parseSignatureFooter,
   type RvfRootManifest,
   type RvfSegmentHeader,
 } from './rvf';
@@ -42,6 +44,10 @@ export interface ValidateOptions {
 export interface SegmentSummary {
   count: number;
   executableCount: number;
+  /** Segments carrying an Ed25519 signature footer. */
+  signedCount: number;
+  /** Executable segments with no signature footer of their own. */
+  unsignedExecutableCount: number;
   payloadBytes: number;
   byType: Record<string, number>;
   truncated: boolean;
@@ -103,17 +109,20 @@ export async function validateRvf(path: string, options: ValidateOptions = {}): 
     const warnings = checkManifestSanity(root, size, path);
     const segments = await walkSegments(handle, size - ROOT_MANIFEST_SIZE, path);
 
-    if (segments.executableCount > 0 && !root.signaturePresent && !options.allowUnsigned) {
+    // An executable segment is covered either by its own signature footer or
+    // by a signed root manifest. Only a segment with neither is unsigned.
+    const uncovered = root.signaturePresent ? 0 : segments.unsignedExecutableCount;
+    if (uncovered > 0 && !options.allowUnsigned) {
       throw new ForgeError(
         ForgeErrorCode.UNSIGNED_SEGMENT,
-        `RVF contains ${segments.executableCount} executable segment(s) but its root manifest carries no signature. ` +
+        `RVF contains ${uncovered} executable segment(s) with no signature, and its root manifest carries none either. ` +
           'Sign the RVF, or pass --allow-unsigned for a development build.',
-        { path, executableSegments: segments.executableCount },
+        { path, executableSegments: segments.executableCount, unsignedExecutableSegments: uncovered },
       );
     }
-    if (segments.executableCount > 0 && !root.signaturePresent) {
+    if (uncovered > 0) {
       warnings.push(
-        `${segments.executableCount} executable segment(s) are unsigned; the resulting build is development-only.`,
+        `${uncovered} executable segment(s) are unsigned; the resulting build is development-only.`,
       );
     }
 
@@ -238,6 +247,8 @@ async function walkSegments(handle: FileHandle, bodySize: number, path: string):
   const summary: SegmentSummary = {
     count: 0,
     executableCount: 0,
+    signedCount: 0,
+    unsignedExecutableCount: 0,
     payloadBytes: 0,
     byType: {},
     truncated: false,
@@ -270,15 +281,62 @@ async function walkSegments(handle: FileHandle, bodySize: number, path: string):
     }
     assertPayloadFits(seg, offset, bodySize, path, summary.count);
 
+    const payloadEnd = offset + SEGMENT_HEADER_SIZE + Number(seg.payloadLength);
+    const footerLength = seg.signed
+      ? await readFooterLength(handle, payloadEnd, bodySize, path, summary.count)
+      : 0;
+
     summary.count += 1;
     summary.payloadBytes += Number(seg.payloadLength);
     summary.byType[seg.segTypeName] = (summary.byType[seg.segTypeName] ?? 0) + 1;
-    if (seg.executable) summary.executableCount += 1;
+    if (seg.signed) summary.signedCount += 1;
+    if (seg.executable) {
+      summary.executableCount += 1;
+      if (!seg.signed) summary.unsignedExecutableCount += 1;
+    }
 
-    offset = alignUp(offset + SEGMENT_HEADER_SIZE + Number(seg.payloadLength));
+    // The next segment starts after the footer, not after the payload. Missing
+    // this lands the walk in the middle of a signature and reports bad magic.
+    offset = alignUp(payloadEnd + footerLength);
   }
 
   return summary;
+}
+
+/**
+ * Size of the signature footer at `payloadEnd`.
+ *
+ * The footer is read rather than assumed: its length depends on the signature
+ * algorithm, and a footer whose declared length disagrees with the signature
+ * it carries is a malformed container, not a differently-sized one.
+ */
+async function readFooterLength(
+  handle: FileHandle,
+  payloadEnd: number,
+  bodySize: number,
+  path: string,
+  index: number,
+): Promise<number> {
+  const bad = (detail: string): ForgeError =>
+    new ForgeError(
+      ForgeErrorCode.INVALID_RVF,
+      `Segment ${index} sets the SIGNED flag but ${detail}.`,
+      { path, offset: payloadEnd, segmentIndex: index },
+    );
+
+  const head = Buffer.alloc(SIGNATURE_FOOTER_MIN_SIZE);
+  const { bytesRead } = await handle.read(head, 0, head.length, payloadEnd);
+  if (bytesRead !== head.length) throw bad('its footer is truncated');
+
+  const sigLength = head.readUInt16LE(2);
+  const full = Buffer.alloc(4 + sigLength + 4);
+  if (payloadEnd + full.length > bodySize) throw bad('its footer runs past the segment area');
+  const read = await handle.read(full, 0, full.length, payloadEnd);
+  if (read.bytesRead !== full.length) throw bad('its footer is truncated');
+
+  const footer = parseSignatureFooter(full, 0);
+  if (!footer) throw bad('its footer is malformed or declares a zero-length signature');
+  return footer.footerLength;
 }
 
 function assertPayloadFits(

@@ -25,6 +25,18 @@ export const SEGMENT_HEADER_SIZE = 64;
 export const SEGMENT_ALIGNMENT = 64;
 export const MAX_SEGMENT_PAYLOAD = 4 * 1024 * 1024 * 1024;
 
+/**
+ * `SegmentFlags::SIGNED` (`crates/rvf/rvf-types/src/flags.rs`) — a signature
+ * footer follows the payload, and the next segment starts after *it*.
+ */
+export const SEGMENT_FLAG_SIGNED = 0x0004;
+/** `SegmentFlags::ENCRYPTED`. */
+export const SEGMENT_FLAG_ENCRYPTED = 0x0002;
+/** `sig_algo` + `sig_length` + `footer_length`, with no signature bytes. */
+export const SIGNATURE_FOOTER_MIN_SIZE = 8;
+/** Longest signature the footer codec accepts, from `SignatureFooter`. */
+export const MAX_SIGNATURE_LENGTH = 7856;
+
 /** Root manifest field offsets (level0.rs). */
 const OFF = {
   MAGIC: 0x000,
@@ -154,6 +166,43 @@ export interface RvfSegmentHeader {
   compression: number;
   contentHash: string;
   executable: boolean;
+  /** The `SIGNED` flag is set, so a signature footer follows the payload. */
+  signed: boolean;
+  /** The `ENCRYPTED` flag is set. */
+  encrypted: boolean;
+}
+
+/** A segment's trailing signature footer (`rvf-crypto/src/footer.rs`). */
+export interface RvfSignatureFooter {
+  sigAlgo: number;
+  sigLength: number;
+  /** Total footer size on the wire, as the footer itself declares it. */
+  footerLength: number;
+}
+
+/** The footer length a `sigLength`-byte signature implies. */
+export const footerLengthFor = (sigLength: number): number =>
+  SIGNATURE_FOOTER_MIN_SIZE + sigLength;
+
+/**
+ * Parse a signature footer at `offset`.
+ *
+ * Returns `undefined` when the bytes are not a well-formed footer: too short,
+ * an implausible signature length, or a declared `footerLength` inconsistent
+ * with the signature it claims to carry. A segment's zero padding decodes as a
+ * structurally valid but empty footer, so accepting one would let any segment
+ * claim `SIGNED` by flipping a single flag bit and changing nothing else.
+ */
+export function parseSignatureFooter(buf: Buffer, offset: number): RvfSignatureFooter | undefined {
+  if (offset + SIGNATURE_FOOTER_MIN_SIZE > buf.length) return undefined;
+  const sigAlgo = buf.readUInt16LE(offset);
+  const sigLength = buf.readUInt16LE(offset + 2);
+  if (sigLength === 0 || sigLength > MAX_SIGNATURE_LENGTH) return undefined;
+  if (offset + 4 + sigLength + 4 > buf.length) return undefined;
+
+  const footerLength = buf.readUInt32LE(offset + 4 + sigLength);
+  if (footerLength !== footerLengthFor(sigLength)) return undefined;
+  return { sigAlgo, sigLength, footerLength };
 }
 
 const hex = (buf: Buffer): string => buf.toString('hex');
@@ -206,13 +255,16 @@ export function parseSegmentHeader(buf: Buffer, offset: number): RvfSegmentHeade
     throw new RangeError(`segment header at ${offset} extends past end of buffer`);
   }
   const segType = buf[offset + 0x05];
+  const flags = buf.readUInt16LE(offset + 0x06);
   return {
+    signed: (flags & SEGMENT_FLAG_SIGNED) !== 0,
+    encrypted: (flags & SEGMENT_FLAG_ENCRYPTED) !== 0,
     offset,
     magicValid: buf.subarray(offset, offset + 4).equals(SEGMENT_MAGIC_BYTES),
     version: buf[offset + 0x04],
     segType,
     segTypeName: SEGMENT_TYPE_NAMES[segType] ?? `unknown(0x${segType.toString(16)})`,
-    flags: buf.readUInt16LE(offset + 0x06),
+    flags,
     segmentId: buf.readBigUInt64LE(offset + 0x08),
     payloadLength: buf.readBigUInt64LE(offset + 0x10),
     timestampNs: buf.readBigUInt64LE(offset + 0x18),

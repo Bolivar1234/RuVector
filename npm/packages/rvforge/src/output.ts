@@ -85,6 +85,7 @@ export const USAGE = `RVForge — one canonical RVF to signed platform installer
 
 Usage:
   rvforge init [--force] [--with-project] [--keygen] [--key-file <path>]
+  rvforge create [agent.rvf] [--from <dir>] [--unsigned] [--force]
   rvforge validate <agent.rvf> [--deep] [--allow-unsigned]
   rvforge build [agent.rvf] [targets...] [--mode <mode>] [--out <dir>] [--force]
   rvforge submit [agent.rvf] [targets...] [--yes] [--cached]
@@ -96,6 +97,13 @@ Publisher (marketplace) verbs — read rvforge.json:
   rvforge pack <agent.rvf> [--project <path>] [--allow-unsigned]
   rvforge test <agent.rvf> [--project <path>] [--receipts <dir>]
   rvforge publish <agent.rvf> [--registry <dir>] [--key-file <path>]
+
+Getting started — the full sequence from an empty directory:
+  rvforge init --keygen            scaffold forge.config.json, rvforge.json, a key
+  rvforge create                   write a signed agent.rvf
+  rvforge validate agent.rvf --deep
+  rvforge test agent.rvf
+  rvforge build --mode embedded
 
 Targets:
   windows-x64  windows-arm64  macos-x64  macos-arm64  macos-universal

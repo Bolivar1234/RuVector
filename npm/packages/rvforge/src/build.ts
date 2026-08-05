@@ -191,6 +191,26 @@ export async function runBuild(options: BuildOptions): Promise<BuildResult> {
   }
 }
 
+/**
+ * Split `build`/`submit` positionals into an optional RVF path and targets.
+ *
+ * The grammar is `build [agent.rvf] [targets...]`, which is ambiguous for a
+ * single operand. Resolving it by extension rather than by position means
+ * `forge build linux-x64` reports an unsupported target if it is misspelled,
+ * instead of an unreadable "no such file: linux-x64".
+ */
+export function splitBuildOperands(positionals: readonly string[]): {
+  rvfPath?: string;
+  targets?: string[];
+} {
+  const [first, ...rest] = positionals;
+  if (first === undefined) return {};
+  if (first.toLowerCase().endsWith('.rvf')) {
+    return { rvfPath: first, ...(rest.length > 0 ? { targets: rest } : {}) };
+  }
+  return { targets: [...positionals] };
+}
+
 /** Apply a `--mode` override without mutating the caller's config. */
 function withMode(config: ForgeConfig, mode?: PackagingMode): ForgeConfig {
   if (!mode || mode === config.packaging.mode) return config;

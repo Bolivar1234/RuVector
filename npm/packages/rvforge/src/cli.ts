@@ -14,7 +14,13 @@
 import { resolve } from 'node:path';
 
 import { CONFIG_FILENAME, loadConfig, runInit } from './config';
-import { runBuild } from './build';
+import { runBuild, splitBuildOperands } from './build';
+import {
+  DEFAULT_RVF_FILENAME,
+  createRvf,
+  renderCreateSummary,
+  resolveSigningKey,
+} from './create';
 import { runDownload } from './download';
 import { ForgeError, ForgeErrorCode, toForgeError } from './errors';
 import { formatBytes } from './estimate';
@@ -29,6 +35,10 @@ import { runVerify } from './verify';
 import { validateRvf } from './validate';
 import { PACKAGING_MODES, type PackagingMode } from './types';
 import { forgeVersion } from './version';
+
+// Operand splitting belongs to `build`, but it is part of the router's parsing
+// contract, so it stays reachable from here.
+export { splitBuildOperands } from './build';
 
 interface ParsedArgs {
   command: string;
@@ -46,6 +56,7 @@ const VALUE_FLAGS = new Set([
   'key-file',
   'registry',
   'receipts',
+  'from',
 ]);
 const REPEATED_FLAGS = new Set(['only']);
 
@@ -136,6 +147,8 @@ async function dispatch(args: ParsedArgs, reporter: Reporter): Promise<number> {
   switch (args.command) {
     case 'init':
       return cmdInit(args, reporter);
+    case 'create':
+      return cmdCreate(args, reporter);
     case 'validate':
       return cmdValidate(args, reporter);
     case 'pack':
@@ -166,26 +179,6 @@ async function dispatch(args: ParsedArgs, reporter: Reporter): Promise<number> {
 const configPath = (args: ParsedArgs): string => resolve(str(args, 'config') ?? CONFIG_FILENAME);
 const projectPath = (args: ParsedArgs): string => resolve(str(args, 'project') ?? PROJECT_FILENAME);
 
-/**
- * Split `build`/`submit` positionals into an optional RVF path and targets.
- *
- * The grammar is `build [agent.rvf] [targets...]`, which is ambiguous for a
- * single operand. Resolving it by extension rather than by position means
- * `forge build linux-x64` reports an unsupported target if it is misspelled,
- * instead of an unreadable "no such file: linux-x64".
- */
-export function splitBuildOperands(positionals: readonly string[]): {
-  rvfPath?: string;
-  targets?: string[];
-} {
-  const [first, ...rest] = positionals;
-  if (first === undefined) return {};
-  if (first.toLowerCase().endsWith('.rvf')) {
-    return { rvfPath: first, ...(rest.length > 0 ? { targets: rest } : {}) };
-  }
-  return { targets: [...positionals] };
-}
-
 function requireOperand(args: ParsedArgs, index: number, label: string): string {
   const value = args.positionals[index];
   if (!value) {
@@ -208,8 +201,32 @@ async function cmdInit(args: ParsedArgs, reporter: Reporter): Promise<number> {
     // The path, never the key: nothing in forge prints key material.
     ...(result.keyFile ? [`Wrote ${result.keyFile} (mode 600) — key id ${result.keyId}`] : []),
     'Capability policy is default-deny: add explicit grants before building.',
-    result.projectPath ? 'Next: rvforge pack <agent.rvf>' : 'Next: rvforge validate <agent.rvf>',
+    // `create` is the only next step that works from here: nothing else in
+    // forge writes an .rvf, so pointing at pack/validate would name a file
+    // that does not exist yet.
+    result.projectPath
+      ? 'Next: rvforge create  (writes agent.rvf, signed with the key above)'
+      : 'Next: rvforge init --keygen, then rvforge create',
   ]);
+  return 0;
+}
+
+async function cmdCreate(args: ParsedArgs, reporter: Reporter): Promise<number> {
+  const operand = args.positionals[0] ?? DEFAULT_RVF_FILENAME;
+  const project = await loadProject(projectPath(args));
+  const key = bool(args, 'unsigned')
+    ? undefined
+    : await resolveSigningKey(project, str(args, 'key-file'));
+
+  const result = await createRvf({
+    outPath: resolve(operand),
+    project,
+    force: bool(args, 'force'),
+    ...(key ? { key } : {}),
+    ...(str(args, 'from') ? { fromDir: resolve(str(args, 'from') as string) } : {}),
+  });
+
+  reporter.success('create', result, () => renderCreateSummary(result, operand));
   return 0;
 }
 
