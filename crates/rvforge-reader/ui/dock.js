@@ -286,6 +286,21 @@
     }
   });
 
+  // Rebuild the roster from the library. Everything the pill shows about an
+  // installed agent — state, trust badge, network, permissions, witness — is
+  // re-derived in Rust from the install record and the verified chain, so this
+  // button cannot produce a friendlier-looking dock than the facts support.
+  $("dock-sync").addEventListener("click", async () => {
+    clearError();
+    try {
+      renderView(await invoke("dock_sync"));
+      dock.expandedAgent = null;
+      $("dock-expanded").hidden = true;
+    } catch (err) {
+      fail(err);
+    }
+  });
+
   // Development harness. `dock_add_scaffold_agent` reports unknown values for
   // every security-bearing field, and `dock_agent_report` is the agent channel:
   // task text and progress, both sanitized in Rust.

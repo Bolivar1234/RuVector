@@ -218,7 +218,16 @@ pub fn capability_card(path: &Path) -> CapabilityCard {
 
 /// [`capability_card`], with the receipt log named explicitly.
 pub fn capability_card_with_receipts(path: &Path, log: &ReceiptLog) -> CapabilityCard {
-    let outcome = verify_with_receipts(path, log);
+    card_for(&verify_with_receipts(path, log), path)
+}
+
+/// The card for an outcome whose verification has already run.
+///
+/// Exists so a caller that has just verified a package — the install flow —
+/// derives the card the user was shown without verifying the same bytes twice
+/// and writing a second receipt for one user action. The refusal rule is
+/// unchanged and is applied here, not by the caller.
+pub fn card_for(outcome: &VerificationOutcome, path: &Path) -> CapabilityCard {
     if outcome.summary.verification != VerificationStatus::Verified {
         let reason = outcome
             .summary

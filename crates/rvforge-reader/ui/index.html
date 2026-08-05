@@ -13,8 +13,9 @@
         <button class="step" data-goto="open" aria-current="true">1 · Open</button>
         <button class="step" data-goto="capability" disabled>2 · Capabilities</button>
         <button class="step" data-goto="runtime" disabled>3 · Runtime</button>
-        <button class="step" data-goto="dock">4 · Dock</button>
-        <button class="step" data-goto="witness">5 · Witness</button>
+        <button class="step" data-goto="library">4 · Library</button>
+        <button class="step" data-goto="dock">5 · Dock</button>
+        <button class="step" data-goto="witness">6 · Witness</button>
       </nav>
     </header>
 
@@ -67,6 +68,10 @@
         <div class="contract">
           <div class="card requests">
             <h3>This agent requests</h3>
+            <p class="hint">
+              Clear a box to install without that capability. You cannot add
+              one the package did not declare — the install refuses it.
+            </p>
             <ul id="cap-requests"><li class="empty">Nothing is granted.</li></ul>
           </div>
           <div class="card denials">
@@ -77,10 +82,72 @@
 
         <ul id="cap-notes" class="notes"></ul>
 
+        <div class="row">
+          <input id="install-name" type="text" placeholder="Name this agent in your library" />
+          <label class="inline">
+            <input id="install-rollback-unsafe" type="checkbox" />
+            This release declares rollback unsafe
+          </label>
+        </div>
+
         <div class="row end">
           <button id="cancel-install">Cancel</button>
-          <button id="customize">Customize permissions</button>
           <button id="install" class="primary">Install</button>
+        </div>
+      </section>
+
+      <!-- Screen 4: the installed-agent library (requirements P7) -->
+      <section id="screen-library" class="screen" aria-labelledby="lib-title">
+        <h2 id="lib-title">Library</h2>
+        <p class="lede">
+          Every installed agent, its state, and the operations P7 lists.
+          Uninstalling keeps your state unless you ask for it to go.
+        </p>
+
+        <div class="row">
+          <button id="lib-refresh" class="primary">Refresh</button>
+          <span id="lib-count" class="hint">—</span>
+        </div>
+
+        <table class="eval">
+          <thead>
+            <tr>
+              <th>Agent</th><th>State</th><th>Base identity</th>
+              <th>Granted</th><th>State held</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="lib-rows"></tbody>
+        </table>
+
+        <div id="lib-detail" class="panel" hidden>
+          <h3>Update <span id="upd-subject" class="mono">—</span></h3>
+          <p class="hint">
+            An update is a new base RVF. It is refused unless it declares the
+            installed release as its predecessor.
+          </p>
+          <div class="row">
+            <input id="upd-path" type="text" spellcheck="false"
+                   placeholder="Path to the new .rvf" />
+            <input id="upd-version" type="text" class="narrow" placeholder="Version" />
+            <button id="upd-plan">Compute difference</button>
+          </div>
+          <div class="row">
+            <label class="inline">
+              <input id="upd-rollback-unsafe" type="checkbox" />
+              The new release declares rollback unsafe
+            </label>
+            <input id="upd-schema" type="text" class="narrow" placeholder="State schema" />
+          </div>
+
+          <div id="upd-diff-box" hidden>
+            <h4>Version changes</h4>
+            <ul id="upd-diff" class="notes"></ul>
+            <p id="upd-approval" class="hint">—</p>
+            <div class="row end">
+              <button id="upd-apply" class="primary">Approve and update</button>
+              <button id="upd-rollback">Roll back</button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -120,7 +187,7 @@
           <button disabled>Rollback state</button>
         </div>
       </section>
-      <!-- Screen 4: the agent dock (ADR-295) -->
+      <!-- Screen 5: the agent dock (ADR-295) -->
       <section id="screen-dock" class="screen" aria-labelledby="dock-title">
         <h2 id="dock-title">Agent dock</h2>
         <p class="lede">
@@ -216,6 +283,15 @@
           </div>
         </div>
 
+        <div class="row">
+          <button id="dock-sync" class="primary">Sync from library</button>
+          <span class="hint">
+            Rebuilds the roster from installed agents. Chrome is re-derived
+            from the install records; agent-reported text is dropped until the
+            agent reports again.
+          </span>
+        </div>
+
         <h3>Development harness</h3>
         <p class="hint">
           No runtime is attached, so a registered agent reports its unknown
@@ -234,7 +310,7 @@
           <button id="dock-agent-send">Report as agent</button>
         </div>
       </section>
-      <!-- Screen 5: the witness viewer (requirements P15.11) -->
+      <!-- Screen 6: the witness viewer (requirements P15.11) -->
       <section id="screen-witness" class="screen" aria-labelledby="wit-title">
         <h2 id="wit-title">Witness chain</h2>
         <p class="lede">
@@ -272,12 +348,14 @@
 
     <footer class="chrome">
       <span id="stub-banner" class="banner">
-        Inspection and verification run through rvf-forge-core. No package is
-        executed, and every verification result is written to the local receipt log.
+        Inspection, verification, installation, and updates run through
+        rvf-forge-core and the reader's own library. No package is executed, and
+        every result — including every refusal — is written to the local logs.
       </span>
     </footer>
 
     <script src="main.js"></script>
+    <script src="library.js"></script>
     <script src="dock.js"></script>
     <script src="witness.js"></script>
   </body>

@@ -443,3 +443,28 @@ input[type="text"].narrow { flex: none; width: 90px; min-width: 0; }
 .wit-detail { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
 .wit-note { margin: 4px 0 0; font-size: 13px; color: var(--muted); font-style: italic; }
 .wit-break { margin: 6px 0 0; font-size: 13px; color: var(--deny); font-weight: 600; }
+
+/* Capability consent and the library (requirements P6, P7, P9).
+   A grant checkbox sits inside the sentence it governs, so what is being
+   cleared is never ambiguous. */
+label.inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: none;
+}
+label.inline input[type="checkbox"] { flex: none; }
+
+#cap-requests li { margin-bottom: 6px; }
+
+/* The action column wraps rather than forcing the table wide: every P7
+   operation stays visible without a horizontal scroll. */
+#lib-rows td:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+#lib-rows td { vertical-align: top; }
+#lib-rows .mono { font-size: 12px; }
+
+#lib-detail h4 { margin: 12px 0 4px; }

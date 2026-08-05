@@ -13,7 +13,7 @@ const invoke = (cmd, args) => {
 };
 
 const $ = (id) => document.getElementById(id);
-const state = { path: null, card: null, verified: false };
+const state = { path: null, card: null, offer: null, verified: false, installed: null };
 
 function showError(message) {
   const box = $("error");
@@ -157,9 +157,13 @@ async function showCapabilities() {
   }
   showError("");
   try {
-    const card = await invoke("capability_card", { path: state.path });
-    state.card = card;
-    renderCard(card);
+    // `install_offer` verifies the same bytes the install will copy and reports
+    // exactly which classes the install will accept, so the screen cannot show
+    // one contract and submit another.
+    const offer = await invoke("install_offer", { path: state.path });
+    state.offer = offer;
+    state.card = offer.card;
+    renderOffer(offer);
     goto("capability");
     enableStep("runtime");
   } catch (err) {
@@ -167,9 +171,12 @@ async function showCapabilities() {
   }
 }
 
-function renderCard(card) {
+function renderOffer(offer) {
   $("cap-subject").textContent = state.path;
+  const card = offer.card;
 
+  // One checkbox per requested class. Clearing one narrows the grant; there is
+  // no control that widens it, because the install would refuse anyway.
   const requests = $("cap-requests");
   requests.replaceChildren();
   if (!card.requests.length) {
@@ -180,7 +187,17 @@ function renderCard(card) {
   } else {
     for (const line of card.requests) {
       const li = document.createElement("li");
-      li.textContent = line.text;
+      const label = document.createElement("label");
+      label.className = "inline";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = true;
+      box.dataset.class = line.class;
+      box.className = "grant";
+      const text = document.createElement("span");
+      text.textContent = line.text;
+      label.append(box, text);
+      li.append(label);
       requests.append(li);
     }
   }
@@ -197,13 +214,44 @@ function renderCard(card) {
   for (const trigger of card.manual_review_triggers || []) {
     notes.push(`Manual review trigger: ${trigger}`);
   }
+  if (offer.runtime_profile) {
+    notes.push(`Runtime selected for this host: ${offer.runtime_profile} (${offer.isolation_claim}).`);
+  }
+  if (offer.refusal) notes.push(offer.refusal);
   fillNotes("cap-notes", notes);
 
-  // Installing is only meaningful once verification is real.
-  $("install").disabled = true;
-  $("install").title = "Installation is not implemented in this scaffold.";
-  $("customize").disabled = true;
-  $("customize").title = "Per-scope customization needs a signed capability manifest in the container; it is not implemented.";
+  if (!$("install-name").value) {
+    $("install-name").value = ($("f-name").textContent || "Agent").replace(/\.rvf$/i, "");
+  }
+
+  // The refusal is the Rust side's, rendered rather than re-decided here.
+  $("install").disabled = Boolean(offer.refusal);
+  $("install").title = offer.refusal || "";
+}
+
+async function runInstall() {
+  if (!state.offer || state.offer.refusal) {
+    showError(state.offer?.refusal || "Review the capability contract first.");
+    return;
+  }
+  const acceptedClasses = [...document.querySelectorAll("input.grant:checked")].map(
+    (box) => box.dataset.class,
+  );
+  showError("");
+  try {
+    const entry = await invoke("install_agent", {
+      path: state.path,
+      name: $("install-name").value.trim() || "Unnamed agent",
+      acceptedClasses,
+      rollbackUnsafe: $("install-rollback-unsafe").checked,
+    });
+    state.installed = entry.record.installId;
+    enableStep("library");
+    goto("library");
+    window.rvforgeLibrary?.refresh();
+  } catch (err) {
+    showError(String(err));
+  }
 }
 
 // Screen 3 — runtime status.
@@ -280,14 +328,10 @@ $("path").addEventListener("keydown", (e) => {
 $("to-capability").addEventListener("click", showCapabilities);
 $("cancel-install").addEventListener("click", () => {
   state.card = null;
+  state.offer = null;
   goto("open");
 });
-$("install").addEventListener("click", () =>
-  showError("Installation is not implemented in this scaffold."),
-);
-$("customize").addEventListener("click", () =>
-  showError("Per-scope customization needs a signed capability manifest in the container; it is not implemented."),
-);
+$("install").addEventListener("click", runInstall);
 
 for (const btn of document.querySelectorAll(".step")) {
   btn.addEventListener("click", () => {
