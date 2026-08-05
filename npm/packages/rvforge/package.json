@@ -1,7 +1,7 @@
 {
   "name": "@ruvector/rvforge",
-  "version": "0.1.0",
-  "description": "RVForge \u2014 one canonical RVF to signed platform installers",
+  "version": "0.2.0",
+  "description": "RVForge — one canonical RVF to signed platform installers",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
