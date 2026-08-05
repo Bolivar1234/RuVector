@@ -16,11 +16,19 @@
 //! The footer is present exactly when the header's `SIGNED` flag is set, and
 //! its own trailing `footer_length` field gives its size. The next segment
 //! begins at the next 64-byte boundary.
+//!
+//! A complete RVF file is that segment stream followed by a fixed 4096-byte
+//! Level-0 root manifest page at EOF (`rvf-manifest/src/level0.rs`), which is
+//! not itself a segment and carries `RVM0` rather than the segment magic. The
+//! walk therefore trims that page before it starts; see
+//! [`split_root_manifest`]. Containers that are a bare segment stream — the
+//! shape [`crate::testkit`] built before authoring existed — have no such page
+//! and are walked whole.
 
 use crate::error::{ForgeError, Result};
 use rvf_types::{
-    SegmentFlags, SegmentHeader, SegmentType, MAX_SEGMENT_PAYLOAD, SEGMENT_ALIGNMENT,
-    SEGMENT_HEADER_SIZE,
+    SegmentFlags, SegmentHeader, SegmentType, MAX_SEGMENT_PAYLOAD, ROOT_MANIFEST_MAGIC,
+    ROOT_MANIFEST_SIZE, SEGMENT_ALIGNMENT, SEGMENT_HEADER_SIZE,
 };
 use std::ops::Range;
 
@@ -80,7 +88,38 @@ impl ParsedSegment {
     }
 }
 
+/// Split a container into its segment area and its trailing Level-0 root
+/// manifest page.
+///
+/// The page is identified by its `RVM0` magic at exactly `len - 4096`, which
+/// is the only place the format permits it. Recognising it by magic rather
+/// than by size alone means a bare segment stream that happens to be at least
+/// 4096 bytes long is still walked whole.
+pub(crate) fn split_root_manifest(data: &[u8]) -> (&[u8], Option<Range<usize>>) {
+    // Require room for at least one segment ahead of the page: a file that is
+    // nothing but a root manifest has no segments, and reporting that as
+    // "holds no segments" is clearer than reporting a bad magic.
+    if data.len() < ROOT_MANIFEST_SIZE + SEGMENT_HEADER_SIZE {
+        return (data, None);
+    }
+    let start = data.len() - ROOT_MANIFEST_SIZE;
+    let magic = u32::from_le_bytes([
+        data[start],
+        data[start + 1],
+        data[start + 2],
+        data[start + 3],
+    ]);
+    if magic == ROOT_MANIFEST_MAGIC {
+        (&data[..start], Some(start..data.len()))
+    } else {
+        (data, None)
+    }
+}
+
 /// Walk `data` and return every segment in stream order.
+///
+/// A trailing Level-0 root manifest page is trimmed first and is not reported
+/// as a segment, because it is not one.
 ///
 /// # Errors
 ///
@@ -88,6 +127,12 @@ impl ParsedSegment {
 /// implausible payload length, carries a malformed signature footer, or has
 /// trailing bytes that are not a segment.
 pub(crate) fn walk(data: &[u8]) -> Result<Vec<ParsedSegment>> {
+    let (body, _) = split_root_manifest(data);
+    walk_segments(body)
+}
+
+/// Walk a segment area that has already had any root manifest page trimmed.
+fn walk_segments(data: &[u8]) -> Result<Vec<ParsedSegment>> {
     if data.len() < SEGMENT_HEADER_SIZE {
         return Err(ForgeError::invalid_rvf(format!(
             "container is {} bytes, shorter than one {SEGMENT_HEADER_SIZE}-byte segment header",
@@ -318,6 +363,48 @@ mod tests {
         let err = walk(&data).unwrap_err();
         assert_eq!(err.code(), crate::ErrorCode::InvalidRvf);
         assert!(err.to_string().contains("trailing"), "{err}");
+    }
+
+    #[test]
+    fn a_trailing_root_manifest_page_is_trimmed_not_walked() {
+        let built = crate::author::ContainerBuilder::new()
+            .segment(SegmentType::Vec, b"vectors".to_vec())
+            .build()
+            .unwrap();
+
+        let (body, page) = split_root_manifest(&built.bytes);
+        assert_eq!(
+            page,
+            Some(built.bytes.len() - ROOT_MANIFEST_SIZE..built.bytes.len())
+        );
+        assert_eq!(body.len(), built.bytes.len() - ROOT_MANIFEST_SIZE);
+
+        // The page is not reported as a segment.
+        let segs = walk(&built.bytes).unwrap();
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1].header.seg_type, SegmentType::Manifest as u8);
+    }
+
+    #[test]
+    fn a_bare_segment_stream_has_no_root_manifest_page() {
+        let data = write_segment(
+            SegmentType::Meta as u8,
+            &[0u8; 8192],
+            SegmentFlags::empty(),
+            1,
+        );
+        let (body, page) = split_root_manifest(&data);
+        assert_eq!(page, None);
+        assert_eq!(body.len(), data.len());
+        assert_eq!(walk(&data).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn trailing_bytes_that_are_not_a_root_manifest_are_still_rejected() {
+        let mut data = write_segment(SegmentType::Meta as u8, b"x", SegmentFlags::empty(), 1);
+        data.extend(std::iter::repeat_n(0xEE, ROOT_MANIFEST_SIZE));
+        let err = walk(&data).unwrap_err();
+        assert_eq!(err.code(), crate::ErrorCode::InvalidRvf);
     }
 
     #[test]

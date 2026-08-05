@@ -1,19 +1,24 @@
 //! RVForge packaging and verification library (ADR-283, ADR-290, ADR-291).
 //!
 //! One canonical `.rvf` becomes installable packages for Windows, macOS,
-//! Linux, and RVM. This crate is the part of that pipeline that reads,
-//! verifies, and describes the artifact; it does not build installers, and it
-//! never runs the agent inside one.
+//! Linux, and RVM. This crate is the part of that pipeline that authors,
+//! reads, verifies, and describes the artifact; it does not build installers,
+//! and it never runs the agent inside one.
 //!
-//! # The five operations
+//! # The six operations
 //!
 //! | Function | Produces | Purpose |
 //! |---|---|---|
+//! | [`ContainerBuilder`] | [`AuthoredContainer`] | A valid, signed container built from segments |
 //! | [`inspect`] | [`ForgeInspection`] | Identity, segment inventory, declared capabilities, signature metadata |
 //! | [`verify`] | [`VerificationReport`] | Root-manifest and per-segment checks, one witness record each |
 //! | [`build_manifest`] | [`CanonicalBuildManifest`] | The deterministic, canonical-JSON build request |
 //! | [`provenance`] | [`ProvenanceRecord`] | The trace from output back to input, runtime, revision, builder, and signer |
 //! | [`checksums`] | [`Sha256Manifest`] | SHA-256 of every produced artifact |
+//!
+//! Authoring is the newest of the six and the only one that writes. It exists
+//! because the rest of the pipeline consumes an artifact that, until it was
+//! added, nothing in the toolchain could produce; see [`author`].
 //!
 //! # What this crate will not do
 //!
@@ -23,7 +28,8 @@
 //! - **Nothing here executes an RVF.** Build workers must never run the
 //!   submitted artifact (ADR-283 invariant 2, ADR-290 §1). Inspection reads
 //!   64-byte segment headers and byte ranges; the only time an executable
-//!   segment's payload is touched at all is to hash it.
+//!   segment's payload is touched at all is to hash it. Authoring is held to
+//!   the same line: it writes payload bytes without interpreting them.
 //! - **Unsigned executable segments are refused by default.** ADR-283
 //!   invariant 3 and the RVM loading requirements §4.3. The single opt-out,
 //!   [`VerifyOptions::allow_unsigned_executable`], exists for the unsigned
@@ -92,6 +98,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod author;
 pub mod canonical;
 pub mod capability;
 pub mod checksums;
@@ -104,6 +111,7 @@ pub mod target;
 pub mod testkit;
 pub mod verify;
 
+pub use author::{AuthoredContainer, ContainerBuilder, DEFAULT_CHECKSUM_ALGO};
 pub use canonical::{canonical_sha256_hex, hex_lower, to_canonical_json};
 pub use capability::{CapabilityClass, CapabilityGrant, CapabilityPolicy};
 pub use checksums::{
@@ -124,6 +132,9 @@ pub use provenance::{
     provenance, BuilderIdentity, BuilderKind, ProvenanceInputs, ProvenanceRecord, SigningIdentity,
     SigningPosture, PROVENANCE_SCHEMA,
 };
+/// The segment type discriminator, re-exported so callers of
+/// [`author::ContainerBuilder`] need not depend on `rvf-types` directly.
+pub use rvf_types::SegmentType;
 pub use target::Target;
 pub use verify::{
     verify, verify_bytes, CheckKind, Outcome, VerificationRecord, VerificationReport,

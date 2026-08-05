@@ -1,18 +1,31 @@
 //! Synthetic RVF construction, for tests and fixtures.
 //!
-//! Forge never writes RVF files in production — it consumes them — so nothing
-//! here is part of the packaging path. It exists so that a test can build a
-//! container byte by byte and then tamper with it, which is the only way to
-//! test that verification actually refuses a tampered artifact.
+//! Production authoring lives in [`crate::author`]; this module is the
+//! tamper-friendly counterpart. It builds *partial* containers — a lone
+//! segment, a segment stream with no root manifest page — so that a test can
+//! corrupt one field and confirm verification refuses the result. `author`
+//! deliberately cannot produce those shapes, which is why both exist.
 //!
-//! The segment layout written here is the one [`crate::container`] reads:
+//! The segment encoder is shared rather than reimplemented: everything here
+//! calls [`crate::author::write_segment_bytes`], so a change to the wire layout
+//! cannot leave fixtures describing a format nothing else writes.
+//!
+//! The segment layout is the one [`crate::container`] reads:
 //!
 //! ```text
 //! [ 64-byte header ][ payload ][ signature footer, if SIGNED ][ zero pad to 64 ]
 //! ```
 
+use crate::author::write_segment_bytes;
 use ed25519_dalek::SigningKey;
-use rvf_types::{SegmentFlags, SegmentType, SEGMENT_ALIGNMENT, SEGMENT_HEADER_SIZE};
+use rvf_types::SegmentType;
+
+/// Content-hash algorithm the fixtures use: XXH3-128, the format default.
+///
+/// Authored containers use SHAKE-256 instead (see
+/// [`crate::author::DEFAULT_CHECKSUM_ALGO`]). Fixtures keep the default so
+/// that the reader is exercised against both algorithms.
+const FIXTURE_CHECKSUM_ALGO: u8 = 1;
 
 /// An Ed25519 keypair derived deterministically from a seed, so that a test
 /// that signs a fixture produces the same bytes on every run.
@@ -33,52 +46,9 @@ impl TestKeypair {
     }
 }
 
-/// Serialize a 64-byte segment header.
-fn header_bytes(
-    seg_type: u8,
-    payload: &[u8],
-    flags: SegmentFlags,
-    segment_id: u64,
-    alignment_pad: u32,
-) -> [u8; SEGMENT_HEADER_SIZE] {
-    const CHECKSUM_ALGO: u8 = 1; // XXH3-128, the format default.
-    let content_hash = rvf_wire::hash::compute_content_hash(CHECKSUM_ALGO, payload);
-
-    let mut b = [0u8; SEGMENT_HEADER_SIZE];
-    b[0x00..0x04].copy_from_slice(&rvf_types::SEGMENT_MAGIC.to_le_bytes());
-    b[0x04] = rvf_types::SEGMENT_VERSION;
-    b[0x05] = seg_type;
-    b[0x06..0x08].copy_from_slice(&flags.bits().to_le_bytes());
-    b[0x08..0x10].copy_from_slice(&segment_id.to_le_bytes());
-    b[0x10..0x18].copy_from_slice(&(payload.len() as u64).to_le_bytes());
-    // timestamp_ns stays zero: fixtures must be byte-reproducible.
-    b[0x20] = CHECKSUM_ALGO;
-    b[0x28..0x38].copy_from_slice(&content_hash);
-    b[0x3C..0x40].copy_from_slice(&alignment_pad.to_le_bytes());
-    b
-}
-
-fn pad_to_alignment(buf: &mut Vec<u8>) {
-    let padded = buf.len().div_ceil(SEGMENT_ALIGNMENT) * SEGMENT_ALIGNMENT;
-    buf.resize(padded, 0);
-}
-
 /// Build an unsigned segment.
 pub fn unsigned_segment(seg_type: SegmentType, payload: &[u8], segment_id: u64) -> Vec<u8> {
-    let unpadded = SEGMENT_HEADER_SIZE + payload.len();
-    let pad = unpadded.div_ceil(SEGMENT_ALIGNMENT) * SEGMENT_ALIGNMENT - unpadded;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&header_bytes(
-        seg_type as u8,
-        payload,
-        SegmentFlags::empty(),
-        segment_id,
-        pad as u32,
-    ));
-    out.extend_from_slice(payload);
-    pad_to_alignment(&mut out);
-    out
+    write_segment_bytes(seg_type, payload, segment_id, FIXTURE_CHECKSUM_ALGO, None)
 }
 
 /// Build a segment signed with `keypair`, carrying an Ed25519 signature footer.
@@ -88,21 +58,13 @@ pub fn signed_segment(
     segment_id: u64,
     keypair: &TestKeypair,
 ) -> Vec<u8> {
-    let flags = SegmentFlags::empty().with(SegmentFlags::SIGNED);
-    let footer_len = rvf_types::SignatureFooter::compute_footer_length(64) as usize;
-    let unpadded = SEGMENT_HEADER_SIZE + payload.len() + footer_len;
-    let pad = unpadded.div_ceil(SEGMENT_ALIGNMENT) * SEGMENT_ALIGNMENT - unpadded;
-
-    let head = header_bytes(seg_type as u8, payload, flags, segment_id, pad as u32);
-    let header = rvf_wire::read_segment_header(&head).expect("testkit built a valid header");
-    let footer = rvf_crypto::sign_segment(&header, payload, &keypair.signing);
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&head);
-    out.extend_from_slice(payload);
-    out.extend_from_slice(&rvf_crypto::encode_signature_footer(&footer));
-    pad_to_alignment(&mut out);
-    out
+    write_segment_bytes(
+        seg_type,
+        payload,
+        segment_id,
+        FIXTURE_CHECKSUM_ALGO,
+        Some(&keypair.signing),
+    )
 }
 
 /// Build a minimal but complete container: a `META` segment carrying the given
@@ -117,6 +79,7 @@ pub fn minimal_container(capabilities: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rvf_types::SEGMENT_ALIGNMENT;
 
     #[test]
     fn unsigned_segment_is_aligned_and_parses() {

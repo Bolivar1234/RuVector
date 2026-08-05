@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
-# CLI ↔ Rust registry parity check.
+# CLI ↔ Rust parity check, in two halves.
 #
-# `npm/packages/rvforge` (TypeScript) writes a local registry; `crates/
-# rvforge-registry` (Rust) reads one. Both implement
-# `docs/research/rvf-forge/registry-model.md`, and they were built
-# independently — so "both pass their own tests" says nothing about whether
-# they interoperate.
+# `npm/packages/rvforge` (TypeScript) writes `.rvf` containers and a local
+# registry; `crates/rvf-forge-core` and `crates/rvforge-registry` (Rust) read
+# them. Both sides implement the same specs and were built independently — so
+# "both pass their own tests" says nothing about whether they interoperate.
 #
-# This script closes that gap end to end: it drives the real CLI through
-# init → pack → publish against a synthetic `.rvf`, publishes a *second*
-# release so the run exercises lineage rather than just a single object, then
-# hands the resulting directory to `rvforge-registry-check`, which re-derives
-# every content address, recomputes the Merkle log, re-applies the publication
-# rules, and walks the witness chains using nothing but the Rust crate's
-# public API.
+# **Container parity.** `rvforge create` writes a real, signed `.rvf`, and
+# `rvforge-rvf-check` inspects and verifies it through `rvf-forge-core`'s public
+# API, with the publisher's public key supplied so the Ed25519 signatures are
+# actually checked rather than skipped. Nothing is shared between the two
+# implementations but the format itself: the segment layout, the SHAKE-256
+# content hashes, the signature footers, and the Level-0 root manifest page all
+# have to agree byte for byte or this fails.
 #
-# Prints `PARITY OK` and exits 0 when the Rust reader accepts what the CLI
+# **Registry parity.** The run then drives pack → publish against that same
+# artifact, publishes a *second* release so it exercises lineage rather than a
+# single object, and hands the directory to `rvforge-registry-check`, which
+# re-derives every content address, recomputes the Merkle log, re-applies the
+# publication rules, and walks the witness chains.
+#
+# Prints `PARITY OK` and exits 0 when the Rust readers accept what the CLI
 # wrote; otherwise prints the violation list and exits non-zero.
 #
 # Usage: scripts/rvforge-parity-check.sh [--keep]
@@ -66,6 +71,34 @@ echo "==> rvforge init --keygen"
 (cd "$PROJECT_DIR" && node "$CLI" init --keygen --quiet >/dev/null)
 node "$REPO_ROOT/scripts/rvforge-parity-fixture.cjs" "$CLI_DIR/dist" "$PROJECT_DIR" >/dev/null
 
+echo "==> rvforge create agent.rvf"
+# The fixture no longer ships a synthetic .rvf: the CLI writes the artifact
+# under test. A .wasm payload makes it carry an executable segment, so the
+# run covers the signed-executable path rather than metadata alone.
+mkdir -p "$PROJECT_DIR/payload"
+printf '\0asm\1\0\0\0' > "$PROJECT_DIR/payload/agent.wasm"
+(cd "$PROJECT_DIR" && node "$CLI" create agent.rvf \
+  --from payload --key-file "$KEY_FILE" --quiet >/dev/null)
+
+echo "==> rvforge-rvf-check (Rust reads the container the CLI wrote)"
+# The public key is passed as hex so the Rust side needs no base64 decoder;
+# without it every signature check would record "skipped", which would prove
+# nothing about whether the CLI's signatures verify.
+PUBLIC_KEY_HEX="$(node -e '
+  const { readFileSync } = require("node:fs");
+  const key = JSON.parse(readFileSync(process.argv[1], "utf8"));
+  process.stdout.write(Buffer.from(key.publicKey, "base64").toString("hex"));
+' "$KEY_FILE")"
+
+if ! (cd "$REPO_ROOT" && cargo run --quiet -p rvf-forge-core \
+        --bin rvforge-rvf-check -- "$PROJECT_DIR/agent.rvf" \
+        --public-key "$PUBLIC_KEY_HEX"); then
+  echo
+  echo "PARITY FAILED — crates/rvf-forge-core rejected the .rvf that" >&2
+  echo "npm/packages/rvforge wrote; the two disagree about the RVF format" >&2
+  exit 1
+fi
+
 echo "==> rvforge pack agent.rvf"
 (cd "$PROJECT_DIR" && node "$CLI" pack agent.rvf --quiet >/dev/null)
 
@@ -91,7 +124,9 @@ echo "==> rvforge-registry-check (Rust)"
 if (cd "$REPO_ROOT" && cargo run --quiet -p rvforge-registry \
       --bin rvforge-registry-check -- "$REGISTRY_DIR"); then
   echo
-  echo "PARITY OK — the Rust registry reads everything the CLI wrote"
+  echo "PARITY OK — the Rust side reads everything the CLI wrote:"
+  echo "  container  rvf-forge-core inspected and verified agent.rvf"
+  echo "  registry   rvforge-registry replayed the whole publication log"
   exit 0
 fi
 
