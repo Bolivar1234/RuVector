@@ -7,6 +7,18 @@ macOS, Linux, and RVM, without the agent inside each package ever differing.
 The RVF identity, contents, policies, and signatures are the same in the
 `.dmg` as in the `.msi`.
 
+## Start with the walkthrough
+
+[![The Sandbox Is Not the Boundary — an illustrated RVForge walkthrough](https://ruvnet.github.io/RuVector/rvforge/preview.jpg)](https://ruvnet.github.io/RuVector/rvforge/)
+
+**[The Sandbox Is Not the Boundary →](https://ruvnet.github.io/RuVector/rvforge/)**
+
+An illustrated walkthrough at
+<https://ruvnet.github.io/RuVector/rvforge/>. It explains in plain language
+why process isolation does not bound an agent, then goes command by command
+from authoring a signed artifact to running it under the capability gate —
+ending by flipping one byte to show what the identity check is actually for.
+
 See [ADR-283](../../../docs/adr/ADR-283-rvf-forge-canonical-installer-pipeline.md)
 for the design and `docs/research/rvf-forge/requirements.md` for the full
 requirements.
