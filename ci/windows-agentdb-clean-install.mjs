@@ -6,8 +6,17 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const agentdbEntry = require.resolve('agentdb');
 const wasmEntry = require.resolve('@ruvector/rvf-wasm');
-const agentdbPackage = JSON.parse(fs.readFileSync(path.join(path.dirname(agentdbEntry), '..', 'package.json'), 'utf8'));
-const wasmPackage = JSON.parse(fs.readFileSync(path.join(path.dirname(wasmEntry), '..', 'package.json'), 'utf8'));
+function packageRoot(entry) {
+  let dir = path.dirname(entry);
+  while (dir !== path.dirname(dir)) {
+    const candidate = path.join(dir, 'package.json');
+    if (fs.existsSync(candidate)) return dir;
+    dir = path.dirname(dir);
+  }
+  throw new Error(`package root not found for ${entry}`);
+}
+const agentdbPackage = JSON.parse(fs.readFileSync(path.join(packageRoot(agentdbEntry), 'package.json'), 'utf8'));
+const wasmPackage = JSON.parse(fs.readFileSync(path.join(packageRoot(wasmEntry), 'package.json'), 'utf8'));
 const agentdb = await import('agentdb');
 const backends = await import('agentdb/backends');
 
