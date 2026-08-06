@@ -1,11 +1,11 @@
-# @ruvector/rvf-wasm
+# rvf-wasm-qwntik
 
 RuVector Format (RVF) WASM build for browsers and edge functions. Query vectors directly in the browser with zero backend.
 
 ## Install
 
 ```bash
-npm install @ruvector/rvf-wasm
+npm install rvf-wasm-qwntik
 ```
 
 ## Usage
