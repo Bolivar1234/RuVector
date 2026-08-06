@@ -286,6 +286,35 @@ async function readStdin() {
   });
 }
 
+// Cursor/Claude Code PreToolUse hooks require valid JSON on stdout.
+function writeHookStdout(payload) {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+function emitPreToolUseAllow(extra = {}) {
+  writeHookStdout({
+    suppressOutput: true,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+      ...extra,
+    },
+  });
+}
+
+function emitPreToolUseDeny(reason) {
+  writeHookStdout({
+    decision: 'block',
+    reason,
+    suppressOutput: true,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
+    },
+  });
+}
+
 function claimSideEffectEvent(family, stdinData, event) {
   if (/^(1|true|yes|on)$/i.test(process.env.RUFLO_DISABLE_HOOK_DEDUP || '')) return true;
   try {
@@ -451,11 +480,13 @@ const handlers = {
     const dangerous = ['rm -rf /', 'format c:', 'del /s /q c:\\', ':(){:|:&};:'];
     for (const d of dangerous) {
       if (cmd.includes(d)) {
-        console.error(`[BLOCKED] Dangerous command detected: ${d}`);
-        process.exit(1);
+        const reason = `Dangerous command detected: ${d}`;
+        process.stderr.write(`[BLOCKED] ${reason}\n`);
+        emitPreToolUseDeny(reason);
+        return;
       }
     }
-    console.log('[OK] Command validated');
+    emitPreToolUseAllow();
   },
 
   'post-edit': () => {
