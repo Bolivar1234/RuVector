@@ -1,5 +1,5 @@
 {
-  "name": "rvf-wasm-qwntik",
+  "name": "@ruvector/rvf-wasm",
   "version": "0.1.10",
   "description": "RuVector Format WASM microkernel for browser and edge vector operations",
   "type": "module",
