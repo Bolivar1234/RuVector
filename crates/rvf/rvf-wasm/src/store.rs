@@ -29,6 +29,153 @@ pub struct WasmStore {
     pub entries: Vec<VecEntry>,
 }
 
+/// Parsed contents of an RVF store accepted by the WASM control plane.
+pub(crate) struct ParsedStore {
+    pub dimension: u32,
+    pub entries: Vec<(u64, Vec<f32>)>,
+}
+
+/// Strictly parse the store representation emitted by [`WasmStore::export`].
+///
+/// This is intentionally kept separate from the pointer-based FFI entrypoint so
+/// that malformed-file controls can exercise the same validation on native test
+/// targets without truncating host pointers to `i32`.
+pub(crate) fn parse_store_bytes(buf: &[u8]) -> Option<ParsedStore> {
+    use rvf_types::constants::{SEGMENT_HEADER_SIZE, SEGMENT_MAGIC, SEGMENT_VERSION};
+    use rvf_types::SegmentType;
+
+    let segments = crate::segment::parse_segments(buf);
+    if segments.is_empty() {
+        return None;
+    }
+
+    // RVF stores are a contiguous segment stream. Do not let the scanner's
+    // inspection-oriented ability to skip bytes become an integrity bypass:
+    // any gap or trailing garbage makes the store invalid.
+    let mut cursor = 0usize;
+    for seg in &segments {
+        if seg.offset != cursor {
+            return None;
+        }
+        let payload_start = seg.offset.checked_add(SEGMENT_HEADER_SIZE)?;
+        let payload_len = usize::try_from(seg.payload_length).ok()?;
+        cursor = payload_start.checked_add(payload_len)?;
+    }
+    if cursor != buf.len() {
+        return None;
+    }
+
+    // Every discovered segment must be wholly contained in the input.  The
+    // older scanner intentionally tolerated incomplete trailing bytes for
+    // inspection, but opening a store must fail closed.
+    for seg in &segments {
+        let payload_start = seg.offset.checked_add(SEGMENT_HEADER_SIZE)?;
+        let payload_len = usize::try_from(seg.payload_length).ok()?;
+        let payload_end = payload_start.checked_add(payload_len)?;
+        if payload_end > buf.len() {
+            return None;
+        }
+        if seg.offset + 6 > buf.len()
+            || u32::from_le_bytes(buf[seg.offset..seg.offset + 4].try_into().ok()?) != SEGMENT_MAGIC
+            || buf[seg.offset + 4] != SEGMENT_VERSION
+            || SegmentType::try_from(seg.seg_type).is_err()
+        {
+            return None;
+        }
+    }
+
+    let manifest = segments
+        .iter()
+        .find(|s| s.seg_type == SegmentType::Manifest as u8)?;
+    let manifest_start = manifest.offset.checked_add(SEGMENT_HEADER_SIZE)?;
+    let manifest_len = usize::try_from(manifest.payload_length).ok()?;
+    let manifest_end = manifest_start.checked_add(manifest_len)?;
+    let payload = buf.get(manifest_start..manifest_end)?;
+    if payload.len() < 22 {
+        return None;
+    }
+
+    let dimension = u16::from_le_bytes(payload[4..6].try_into().ok()?) as u32;
+    if dimension == 0 {
+        return None;
+    }
+    let total_vectors = u64::from_le_bytes(payload[6..14].try_into().ok()?);
+    let seg_count = u32::from_le_bytes(payload[14..18].try_into().ok()?) as usize;
+    let dir_end = 22usize.checked_add(seg_count.checked_mul(25)?)?;
+    if dir_end > payload.len() {
+        return None;
+    }
+
+    let mut directory = Vec::with_capacity(seg_count);
+    let mut dir_offset = 22;
+    for _ in 0..seg_count {
+        let entry = &payload[dir_offset..dir_offset + 25];
+        directory.push((
+            u64::from_le_bytes(entry[0..8].try_into().ok()?),
+            u64::from_le_bytes(entry[8..16].try_into().ok()?),
+            u64::from_le_bytes(entry[16..24].try_into().ok()?),
+            entry[24],
+        ));
+        dir_offset += 25;
+    }
+
+    let mut entries = Vec::new();
+    let mut vec_segment_count = 0usize;
+    for seg in segments
+        .iter()
+        .filter(|s| s.seg_type == SegmentType::Vec as u8)
+    {
+        vec_segment_count += 1;
+        let listed = directory.iter().find(|(id, offset, len, kind)| {
+            *id == seg.seg_id
+                && *offset == seg.offset as u64
+                && *len == seg.payload_length
+                && *kind == seg.seg_type
+        })?;
+        let _ = listed;
+
+        let start = seg.offset.checked_add(SEGMENT_HEADER_SIZE)?;
+        let len = usize::try_from(seg.payload_length).ok()?;
+        let end = start.checked_add(len)?;
+        let vec_payload = buf.get(start..end)?;
+        if vec_payload.len() < 6 {
+            return None;
+        }
+        let count = u16::from_le_bytes(vec_payload[0..2].try_into().ok()?) as usize;
+        let seg_dim = u32::from_le_bytes(vec_payload[2..6].try_into().ok()?);
+        if seg_dim == 0 || seg_dim != dimension {
+            return None;
+        }
+        let bytes_per_entry = 8usize.checked_add((seg_dim as usize).checked_mul(4)?)?;
+        let expected_len = 6usize.checked_add(count.checked_mul(bytes_per_entry)?)?;
+        if expected_len != vec_payload.len() {
+            return None;
+        }
+        let mut offset = 6;
+        for _ in 0..count {
+            let id = u64::from_le_bytes(vec_payload[offset..offset + 8].try_into().ok()?);
+            offset += 8;
+            let mut data = Vec::with_capacity(seg_dim as usize);
+            for _ in 0..seg_dim {
+                data.push(f32::from_le_bytes(
+                    vec_payload[offset..offset + 4].try_into().ok()?,
+                ));
+                offset += 4;
+            }
+            entries.push((id, data));
+        }
+    }
+
+    if vec_segment_count == 0
+        || directory.len() != vec_segment_count
+        || entries.len() as u64 != total_vectors
+    {
+        return None;
+    }
+
+    Some(ParsedStore { dimension, entries })
+}
+
 impl WasmStore {
     pub fn new(dimension: u32, metric: u8) -> Self {
         let m = match metric {
@@ -169,7 +316,12 @@ impl WasmStore {
         let vec_payload_len = 2 + 4 + n * (8 + dim * 4);
         // Manifest segment payload: [epoch: u32, dim: u16, total_vecs: u64, profile: u8,
         //   seg_count: u32, (seg_id: u64, offset: u64, payload_len: u64, type: u8)*]
-        let manifest_payload_len = 4 + 2 + 8 + 1 + 4 + 1 * 25; // 1 segment entry
+        if n > u16::MAX as usize || self.dimension > u16::MAX as u32 {
+            return -1;
+        }
+        // Canonical manifest header: epoch(4) + dim(2) + total_vecs(8) +
+        // seg_count(4) + profile(1) + metric(1) + reserved(2).
+        let manifest_payload_len = 22 + 25; // one segment directory entry
 
         let total_size =
             SEGMENT_HEADER_SIZE + vec_payload_len + SEGMENT_HEADER_SIZE + manifest_payload_len;
@@ -233,10 +385,14 @@ impl WasmStore {
             offset += 2;
             write_u64(out_ptr, offset, n as u64); // total_vectors
             offset += 8;
-            *out_ptr.add(offset) = 0; // profile
-            offset += 1;
             write_u32(out_ptr, offset, 1); // seg_count = 1
             offset += 4;
+            *out_ptr.add(offset) = 0; // profile
+            offset += 1;
+            *out_ptr.add(offset) = self.metric as u8; // metric
+            offset += 1;
+            write_u16_at(out_ptr, offset, 0); // reserved
+            offset += 2;
             // segment entry
             write_u64(out_ptr, offset, 1); // seg_id
             offset += 8;
@@ -393,5 +549,58 @@ pub fn registry() -> &'static mut StoreRegistry {
             REGISTRY = Some(StoreRegistry::new());
         }
         REGISTRY.as_mut().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn exported_store() -> Vec<u8> {
+        let mut store = WasmStore::new(3, 0);
+        let vectors = [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let ids = [11_u64, 22_u64];
+        assert_eq!(store.ingest(vectors.as_ptr(), ids.as_ptr(), 2), 2);
+
+        let mut bytes = vec![0_u8; 1024];
+        let written = store.export(bytes.as_mut_ptr(), bytes.len() as u32);
+        assert!(written > 0);
+        bytes.truncate(written as usize);
+        bytes
+    }
+
+    #[test]
+    fn export_round_trip_preserves_count_dimension_and_ids() {
+        let bytes = exported_store();
+        let parsed = parse_store_bytes(&bytes).expect("exported store must be valid");
+        assert_eq!(parsed.dimension, 3);
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.entries[0].0, 11);
+        assert_eq!(parsed.entries[1].0, 22);
+        assert_eq!(parsed.entries[0].1, vec![1.0, 2.0, 3.0]);
+        assert_eq!(parsed.entries[1].1, vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn random_bytes_are_not_an_empty_store() {
+        let random = (0..2304)
+            .map(|i| (i as u8).wrapping_mul(31))
+            .collect::<Vec<_>>();
+        assert!(parse_store_bytes(&random).is_none());
+    }
+
+    #[test]
+    fn truncated_store_is_rejected() {
+        let mut bytes = exported_store();
+        bytes.pop();
+        assert!(parse_store_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn trailing_garbage_is_rejected() {
+        let mut bytes = exported_store();
+        bytes.extend_from_slice(&[0xA5, 0x5A, 0x00, 0xFF]);
+        assert!(parse_store_bytes(&bytes).is_none());
     }
 }

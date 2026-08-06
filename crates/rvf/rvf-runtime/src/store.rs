@@ -59,6 +59,11 @@ const MAX_MEMBERSHIP_FILTER_BYTES: u64 = 64 * 1024 * 1024;
 /// headroom for the torn-generation fallback in `restore_metadata`.
 const META_SNAPSHOT_INTERVAL: u64 = 32;
 
+/// Fixed portion of a WITNESS_SEG payload before the variable action bytes
+/// and terminal previous-hash field: type (1) + timestamp (8) + action
+/// length (4) + previous hash (32).
+const WITNESS_PAYLOAD_FIXED_SIZE: usize = 1 + 8 + 4 + 32;
+
 /// Position of the committed metadata chain, rolled back as a unit when a
 /// mutation fails after appending its `META_SEG`.
 #[derive(Clone, Copy, Default)]
@@ -3179,6 +3184,59 @@ impl RvfStore {
         Ok(())
     }
 
+    /// Restore and validate the terminal witness hash from persisted segments.
+    ///
+    /// `last_witness_hash` is runtime state while a store is open, so reopen
+    /// must rebuild it from the append-only witness records. Each record stores
+    /// its predecessor hash as the final 32 payload bytes; hashing the full
+    /// payload produces the predecessor for the next record.
+    fn restore_witness_chain(&mut self) -> Result<(), RvfError> {
+        let witness_segments: Vec<(u64, u64, u64, u8)> = self
+            .segment_dir
+            .iter()
+            .copied()
+            .filter(|&(_, _, _, segment_type)| segment_type == SegmentType::Witness as u8)
+            .collect();
+
+        let mut expected_prev = [0u8; 32];
+        for (_, offset, _, _) in witness_segments {
+            let payload = {
+                let mut reader = BufReader::new(&self.file);
+                read_path::read_segment_payload(&mut reader, offset)
+                    .map_err(|_| err(ErrorCode::InvalidChecksum))?
+                    .1
+            };
+
+            if payload.len() < WITNESS_PAYLOAD_FIXED_SIZE {
+                return Err(err(ErrorCode::TruncatedSegment));
+            }
+
+            let action_len = u32::from_le_bytes(
+                payload[9..13]
+                    .try_into()
+                    .map_err(|_| err(ErrorCode::TruncatedSegment))?,
+            ) as usize;
+            let expected_len = 1usize
+                .checked_add(8)
+                .and_then(|len| len.checked_add(4))
+                .and_then(|len| len.checked_add(action_len))
+                .and_then(|len| len.checked_add(32))
+                .ok_or_else(|| err(ErrorCode::InvalidManifest))?;
+            if payload.len() != expected_len {
+                return Err(err(ErrorCode::TruncatedSegment));
+            }
+
+            let previous_hash = &payload[payload.len() - 32..];
+            if previous_hash != expected_prev {
+                return Err(err(ErrorCode::InvalidChecksum));
+            }
+            expected_prev = simple_shake256_256(&payload);
+        }
+
+        self.last_witness_hash = expected_prev;
+        Ok(())
+    }
+
     fn boot(&mut self) -> Result<(), RvfError> {
         let own_path = fs::canonicalize(&self.path).map_err(|_| err(ErrorCode::InvalidManifest))?;
         let mut ancestry = HashSet::from([own_path]);
@@ -3220,6 +3278,11 @@ impl RvfStore {
             .iter()
             .map(|e| (e.seg_id, e.offset, e.payload_length, e.seg_type))
             .collect();
+
+        // Restore the terminal witness hash before serving the store. This
+        // also validates predecessor links so a successful reopen cannot hide
+        // a broken provenance chain.
+        self.restore_witness_chain()?;
 
         let vec_seg_entries: Vec<_> = manifest
             .segment_dir
@@ -5100,6 +5163,67 @@ mod tests {
         assert_eq!(count_witness_segments(&store), 3);
 
         store.close().unwrap();
+    }
+
+    #[test]
+    fn test_witness_chain_reopens_with_terminal_hash() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("witness_chain_reopen.rvf");
+
+        let options = RvfOptions {
+            dimension: 4,
+            metric: DistanceMetric::L2,
+            ..Default::default()
+        };
+
+        let mut store = RvfStore::create(&path, options).unwrap();
+        let v1 = vec![1.0, 0.0, 0.0, 0.0];
+        let v2 = vec![0.0, 1.0, 0.0, 0.0];
+        store.ingest_batch(&[&v1[..]], &[1], None).unwrap();
+        store.ingest_batch(&[&v2[..]], &[2], None).unwrap();
+        let terminal_hash = *store.last_witness_hash();
+        assert_ne!(terminal_hash, [0u8; 32]);
+        store.close().unwrap();
+
+        let reopened = RvfStore::open(&path).unwrap();
+        assert_eq!(count_witness_segments(&reopened), 2);
+        assert_eq!(*reopened.last_witness_hash(), terminal_hash);
+        reopened.close().unwrap();
+    }
+
+    #[test]
+    fn test_metric_and_witness_survive_reopen_with_discriminating_query() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("metric_witness_reopen.rvf");
+
+        let options = RvfOptions {
+            dimension: 2,
+            metric: DistanceMetric::Cosine,
+            ..Default::default()
+        };
+
+        let mut store = RvfStore::create(&path, options).unwrap();
+        // Cosine ranks the long, collinear vector first; L2 ranks the shorter
+        // diagonal vector first. This makes a metric reset observable.
+        let collinear = vec![10.0, 0.0];
+        let diagonal = vec![0.8, 0.6];
+        store
+            .ingest_batch(&[&collinear[..], &diagonal[..]], &[10, 20], None)
+            .unwrap();
+        let before = store.query(&[1.0, 0.0], 1, &QueryOptions::default()).unwrap();
+        assert_eq!(before[0].id, 10);
+        let terminal_hash = *store.last_witness_hash();
+        assert_ne!(terminal_hash, [0u8; 32]);
+        store.close().unwrap();
+
+        let reopened = RvfStore::open(&path).unwrap();
+        assert_eq!(reopened.metric(), DistanceMetric::Cosine);
+        assert_eq!(*reopened.last_witness_hash(), terminal_hash);
+        let after = reopened
+            .query(&[1.0, 0.0], 1, &QueryOptions::default())
+            .unwrap();
+        assert_eq!(after[0].id, 10);
+        reopened.close().unwrap();
     }
 
     #[test]

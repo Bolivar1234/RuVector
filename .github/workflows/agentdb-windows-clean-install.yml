@@ -1,0 +1,48 @@
+name: AgentDB Windows clean-install proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-clean-install:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      AGENTDB_FORCE_SQLJS: '1'
+      AGENTDB_DISABLE_TRANSFORMERS: '1'
+    steps:
+      - name: Checkout corrected RuVector branch
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.1'
+
+      - name: Pack corrected RVF-WASM
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\artifacts" | Out-Null
+          npm pack --pack-destination "$env:GITHUB_WORKSPACE\artifacts" .\npm\packages\rvf-wasm
+          Get-FileHash "$env:GITHUB_WORKSPACE\artifacts\ruvector-rvf-wasm-0.1.10.tgz" -Algorithm SHA256
+
+      - name: Clean install AgentDB plus corrected RVF-WASM
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\agentdb-clean" | Out-Null
+          Set-Location "$env:RUNNER_TEMP\agentdb-clean"
+          npm init -y | Out-Null
+          npm install --ignore-scripts --omit=optional --no-audit --no-fund `
+            agentdb@3.0.0-alpha.20 `
+            "$env:GITHUB_WORKSPACE\artifacts\ruvector-rvf-wasm-0.1.10.tgz"
+          npm ls agentdb @ruvector/rvf-wasm --all
+
+      - name: Run Windows AgentDB round-trip proof
+        shell: pwsh
+        run: |
+          Copy-Item "$env:GITHUB_WORKSPACE\ci\windows-agentdb-clean-install.mjs" "$env:RUNNER_TEMP\agentdb-clean\verify.mjs"
+          Set-Location "$env:RUNNER_TEMP\agentdb-clean"
+          node .\verify.mjs
