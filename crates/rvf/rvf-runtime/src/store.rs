@@ -5192,6 +5192,41 @@ mod tests {
     }
 
     #[test]
+    fn test_metric_and_witness_survive_reopen_with_discriminating_query() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("metric_witness_reopen.rvf");
+
+        let options = RvfOptions {
+            dimension: 2,
+            metric: DistanceMetric::Cosine,
+            ..Default::default()
+        };
+
+        let mut store = RvfStore::create(&path, options).unwrap();
+        // Cosine ranks the long, collinear vector first; L2 ranks the shorter
+        // diagonal vector first. This makes a metric reset observable.
+        let collinear = vec![10.0, 0.0];
+        let diagonal = vec![0.8, 0.6];
+        store
+            .ingest_batch(&[&collinear[..], &diagonal[..]], &[10, 20], None)
+            .unwrap();
+        let before = store.query(&[1.0, 0.0], 1, &QueryOptions::default()).unwrap();
+        assert_eq!(before[0].id, 10);
+        let terminal_hash = *store.last_witness_hash();
+        assert_ne!(terminal_hash, [0u8; 32]);
+        store.close().unwrap();
+
+        let reopened = RvfStore::open(&path).unwrap();
+        assert_eq!(reopened.metric(), DistanceMetric::Cosine);
+        assert_eq!(*reopened.last_witness_hash(), terminal_hash);
+        let after = reopened
+            .query(&[1.0, 0.0], 1, &QueryOptions::default())
+            .unwrap();
+        assert_eq!(after[0].id, 10);
+        reopened.close().unwrap();
+    }
+
+    #[test]
     fn test_witness_disabled_produces_no_segments() {
         use crate::options::WitnessConfig;
 
