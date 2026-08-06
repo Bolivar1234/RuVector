@@ -38,7 +38,7 @@ const detection = await backends.detectBackends();
 check(detection.sqljsRvf === true, 'sql.js RVF fallback detected');
 check(detection.available !== 'none', 'At least one backend available');
 
-const backend = await backends.createBackend('rvf', { dimensions: 4, metric: 'cosine' });
+const backend = new backends.SqlJsRvfBackend({ dimensions: 4, metric: 'cosine' });
 await backend.initialize();
 await backend.insertAsync('win-alpha', new Float32Array([1, 0, 0, 0]), { platform: 'win32' });
 check(backend.getStats().count === 1, 'Insert on Windows');
