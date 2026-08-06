@@ -75,6 +75,7 @@
 
   body {
     margin: 0;
+    -webkit-text-size-adjust: 100%;
     background: var(--ground);
     color: var(--ink);
     font-family: var(--sans);
@@ -231,8 +232,13 @@
   }
 
   .canvas-wrap { position: relative; background: var(--panel-sunk); }
-  canvas { display: block; width: 100%; touch-action: none; }
-  #manifold { cursor: grab; aspect-ratio: 1 / 1; }
+  canvas { display: block; width: 100%; }
+  /* pan-y, not none: a vertical swipe must still scroll the page, or a
+     full-width plot becomes a scroll trap on a phone. Horizontal drags are
+     ours, and the browser hands them over. */
+  #manifold { cursor: grab; aspect-ratio: 1 / 1; touch-action: pan-y; }
+  #radar { aspect-ratio: 62 / 30; }
+  #track { aspect-ratio: 62 / 22; }
   #manifold:active { cursor: grabbing; }
   #manifold:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
@@ -395,6 +401,44 @@
     color: var(--ink);
   }
 
+  /* ── Touch and small screens ──────────────────────────────────────────── */
+  @media (pointer: coarse) {
+    button { padding: 11px 16px; min-height: 44px; }
+    .key-row { padding: 12px 14px; min-height: 48px; }
+    th, td { padding: 10px 12px; }
+  }
+
+  @media (max-width: 620px) {
+    .shell { padding: 20px 14px 36px; gap: 16px; }
+
+    .masthead { align-items: flex-start; gap: 12px; }
+    /* Stranded in a right-aligned column once stacked; reads better as a row. */
+    .build-tag {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 16px;
+      text-align: left;
+      white-space: normal;
+    }
+    .build-tag br { display: none; }
+
+    .controls { gap: 8px; }
+    .controls .eyebrow { width: 100%; margin: 0; }
+
+    /* Two columns divide the eight descriptors evenly, so no orphan cell, and
+       the figures get room to stay legible. */
+    .readout { grid-template-columns: repeat(2, 1fr); }
+    .cell dd { font-size: 19px; }
+
+    /* A full-height square plot pushes everything below the fold. */
+    #manifold { aspect-ratio: 5 / 4; }
+
+    .legend { font-size: 10px; gap: 8px; }
+    .panel > header { padding: 10px 12px; }
+    .footnote { font-size: 13px; }
+    .status { gap: 6px 16px; font-size: 12px; }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
   }
@@ -442,7 +486,7 @@
         <span id="ramp-lo">0.0 kHz</span>
         <span class="ramp" id="ramp"></span>
         <span id="ramp-hi">16.0 kHz</span>
-        <span style="margin-left:auto">drag to rotate · click a point</span>
+        <span style="margin-left:auto" id="plot-hint">drag to rotate · click a point</span>
       </div>
     </section>
 
@@ -828,6 +872,7 @@ function colourFor(call, mode) {
 }
 
 function drawManifold() {
+  const k = fitCanvas(manifold);
   const w = manifold.width, h = manifold.height;
   const mode = document.getElementById('btn-colour').dataset.mode;
   const lineCol = css('--line-strong');
@@ -839,7 +884,7 @@ function drawManifold() {
   const edges = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
   mctx.strokeStyle = lineCol;
   mctx.globalAlpha = 0.42;
-  mctx.lineWidth = 1;
+  mctx.lineWidth = k;
   edges.forEach(([a, b]) => {
     const pa = projectPoint(corners[a], w, h), pb = projectPoint(corners[b], w, h);
     mctx.beginPath();
@@ -858,29 +903,29 @@ function drawManifold() {
     const dimmed = activeFilter !== null && call.ai !== activeFilter;
     const isSelected = item.i === selected;
     const energy = Math.max(0, Math.min(1, (call.summary[7] + 60) / 50));
-    const radius = (2.6 + energy * 4.0) * item.perspective;
+    const radius = (2.6 + energy * 4.0) * item.perspective * k;
 
     const colour = colourFor(call, mode);
     const depthFade = 0.55 + 0.45 * (1 - Math.min(1, Math.max(0, (item.depth + 1.4) / 2.8)));
     mctx.globalAlpha = dimmed ? 0.10 : 0.42 + 0.5 * depthFade;
     mctx.beginPath();
-    mctx.arc(item.sx, item.sy, Math.max(1.4, radius), 0, TAU);
+    mctx.arc(item.sx, item.sy, Math.max(1.4 * k, radius), 0, TAU);
     mctx.fillStyle = rgb(colour);
     mctx.fill();
 
     if (isSelected && !dimmed) {
       mctx.globalAlpha = 1;
       mctx.strokeStyle = css('--ink');
-      mctx.lineWidth = 1.6;
+      mctx.lineWidth = 1.6 * k;
       mctx.beginPath();
-      mctx.arc(item.sx, item.sy, Math.max(1.4, radius) + 4.0, 0, TAU);
+      mctx.arc(item.sx, item.sy, Math.max(1.4 * k, radius) + 4.0 * k, 0, TAU);
       mctx.stroke();
     } else if (item.i === hovered && !dimmed) {
       mctx.globalAlpha = 1;
       mctx.strokeStyle = css('--accent');
-      mctx.lineWidth = 1.3;
+      mctx.lineWidth = 1.3 * k;
       mctx.beginPath();
-      mctx.arc(item.sx, item.sy, Math.max(1.4, radius) + 3.0, 0, TAU);
+      mctx.arc(item.sx, item.sy, Math.max(1.4 * k, radius) + 3.0 * k, 0, TAU);
       mctx.stroke();
     }
   }
@@ -892,7 +937,8 @@ function pickPoint(clientX, clientY) {
   const x = (clientX - rect.left) * (manifold.width / rect.width);
   const y = (clientY - rect.top) * (manifold.height / rect.height);
 
-  let best = -1, bestDist = 15 * 15;
+  const tolerance = 16 * Math.min(2, window.devicePixelRatio || 1);
+  let best = -1, bestDist = tolerance * tolerance;
   projection.forEach((p, i) => {
     if (activeFilter !== null && corpus[i].ai !== activeFilter) return;
     const q = projectPoint(p, manifold.width, manifold.height);
@@ -920,19 +966,39 @@ const RADAR_AXES = [
   { label: 'voiced',    get: s => s[8] }
 ];
 
+/* Sizes a canvas's backing store to its displayed box at device resolution.
+   Without this the store keeps its authored dimensions, so any CSS that
+   changes the element's aspect ratio -- as the mobile layout does -- stretches
+   everything drawn into it. Returns the scale factor, which drawing code
+   applies to fonts, radii, and line widths so they stay constant in CSS
+   pixels. */
+function fitCanvas(canvas) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width) return dpr;
+  const w = Math.round(rect.width * dpr);
+  const h = Math.round(rect.height * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  return dpr;
+}
+
 function drawRadar(call) {
+  const k = fitCanvas(radar);
   const w = radar.width, h = radar.height;
   rctx.clearRect(0, 0, w, h);
   if (!call) return;
 
-  const cx = w / 2, cy = h / 2 + 6;
-  const R = Math.min(w, h) * 0.36;
+  const cx = w / 2, cy = h / 2 + 6 * k;
+  const R = Math.min(w, h) * 0.34;
   const n = RADAR_AXES.length;
 
   rctx.strokeStyle = css('--line');
   rctx.fillStyle = css('--ink-faint');
-  rctx.lineWidth = 1;
-  rctx.font = '10px ' + css('--mono');
+  rctx.lineWidth = k;
+  rctx.font = `${(10 * k).toFixed(1)}px ` + css('--mono');
   rctx.textAlign = 'center';
   rctx.textBaseline = 'middle';
 
@@ -953,7 +1019,7 @@ function drawRadar(call) {
     rctx.moveTo(cx, cy);
     rctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
     rctx.stroke();
-    rctx.fillText(axis.label, cx + Math.cos(a) * (R + 22), cy + Math.sin(a) * (R + 14));
+    rctx.fillText(axis.label, cx + Math.cos(a) * (R + 24 * k), cy + Math.sin(a) * (R + 15 * k));
   });
 
   const values = RADAR_AXES.map(ax => Math.max(0, Math.min(1, ax.get(call.summary) || 0)));
@@ -972,13 +1038,13 @@ function drawRadar(call) {
   rctx.fill();
   rctx.globalAlpha = 1;
   rctx.strokeStyle = accent;
-  rctx.lineWidth = 1.7;
+  rctx.lineWidth = 1.7 * k;
   rctx.stroke();
 
   values.forEach((v, i) => {
     const a = (i / n) * TAU - Math.PI / 2;
     rctx.beginPath();
-    rctx.arc(cx + Math.cos(a) * R * v, cy + Math.sin(a) * R * v, 2.4, 0, TAU);
+    rctx.arc(cx + Math.cos(a) * R * v, cy + Math.sin(a) * R * v, 2.4 * k, 0, TAU);
     rctx.fillStyle = accent;
     rctx.fill();
   });
@@ -989,6 +1055,7 @@ const track = document.getElementById('track');
 const tctx = track.getContext('2d');
 
 function drawTrack(call) {
+  const k = fitCanvas(track);
   const w = track.width, h = track.height;
   tctx.clearRect(0, 0, w, h);
   if (!call) return;
@@ -996,15 +1063,15 @@ function drawTrack(call) {
   const frames = framesFor(call);
   if (!frames.length) return;
 
-  const pad = { l: 44, r: 10, t: 12, b: 24 };
+  const pad = { l: 44 * k, r: 10 * k, t: 12 * k, b: 24 * k };
   const plotW = w - pad.l - pad.r, plotH = h - pad.t - pad.b;
   const maxHz = 12000;
   const tMax = frames[frames.length - 1].timeMs;
 
   tctx.strokeStyle = css('--line');
   tctx.fillStyle = css('--ink-faint');
-  tctx.font = '10px ' + css('--mono');
-  tctx.lineWidth = 1;
+  tctx.font = `${(10 * k).toFixed(1)}px ` + css('--mono');
+  tctx.lineWidth = k;
   tctx.textAlign = 'right';
   tctx.textBaseline = 'middle';
 
@@ -1014,7 +1081,7 @@ function drawTrack(call) {
     tctx.moveTo(pad.l, y);
     tctx.lineTo(w - pad.r, y);
     tctx.stroke();
-    tctx.fillText(khz + 'k', pad.l - 6, y);
+    tctx.fillText(khz + 'k', pad.l - 6 * k, y);
   }
 
   // Voiced frames only: an unvoiced centroid is the noise floor's centroid,
@@ -1036,14 +1103,14 @@ function drawTrack(call) {
     tctx.globalAlpha = 1;
   };
 
-  drawSeries(f => f.dominant, css('--warm'), 1.1, 0.5);
-  drawSeries(f => f.centroid, css('--accent'), 1.9, 1);
+  drawSeries(f => f.dominant, css('--warm'), 1.1 * k, 0.5);
+  drawSeries(f => f.centroid, css('--accent'), 1.9 * k, 1);
 
   tctx.textAlign = 'left';
   tctx.fillStyle = css('--ink-faint');
-  tctx.fillText('0 ms', pad.l, h - 10);
+  tctx.fillText('0 ms', pad.l, h - 10 * k);
   tctx.textAlign = 'right';
-  tctx.fillText(Math.round(tMax) + ' ms', w - pad.r, h - 10);
+  tctx.fillText(Math.round(tMax) + ' ms', w - pad.r, h - 10 * k);
 }
 
 /* ── Panels ────────────────────────────────────────────────────────────── */
@@ -1224,6 +1291,14 @@ document.getElementById('btn-run').addEventListener('click', () => {
   }, 16);
 });
 
+let resizeTimer = null;
+addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (corpus.length) { drawRadar(corpus[selected]); drawTrack(corpus[selected]); drawManifold(); }
+  }, 120);
+});
+
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 function tick() {
   if (spinning && !dragging && !reduceMotion.matches) {
@@ -1249,6 +1324,9 @@ boot().then(() => {
   document.getElementById('tag-version').textContent =
     `v${Math.floor(v / 10000)}.${Math.floor(v / 100) % 100}.${v % 100}`;
   document.getElementById('tag-size').textContent = `${(wasmBytes / 1024).toFixed(0)} KB`;
+  if (matchMedia('(pointer: coarse)').matches) {
+    document.getElementById('plot-hint').textContent = 'swipe across to spin \u00b7 tap a point';
+  }
   run(20260806);
   if (reduceMotion.matches) {
     spinning = false;
