@@ -1182,6 +1182,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "napi-build"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5282704fbe8d49b0cf8b08e3f33233416a528658f205c7e5ace63b582de0b11c"
+
+[[package]]
 name = "napi-derive"
 version = "2.16.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1758,6 +1764,7 @@ name = "rvf-node"
 version = "0.1.0"
 dependencies = [
  "napi",
+ "napi-build",
  "napi-derive",
  "rvf-runtime",
  "rvf-types",

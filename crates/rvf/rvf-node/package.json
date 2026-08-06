@@ -2,11 +2,12 @@
   "name": "@ruvector/rvf-node",
   "version": "0.2.3",
   "description": "RuVector Format Node.js native bindings",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "rvf-node-local-loader.cjs",
+  "types": "rvf-node-local.d.ts",
   "files": [
-    "index.js",
-    "index.d.ts",
+    "rvf-node-local-loader.cjs",
+    "rvf-node-local.d.ts",
+    "rvf-node.*.node",
     "README.md",
     "package.json"
   ],
