@@ -49,21 +49,32 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod application;
-pub mod domain;
 pub mod features;
-pub mod infrastructure;
-pub mod spectrogram;
 pub mod streaming;
+
+/// Domain entities. Requires the `full` feature.
+#[cfg(feature = "full")]
+pub mod domain;
+/// File decoding, resampling, and offline segmentation. Requires `full`.
+#[cfg(feature = "full")]
+pub mod infrastructure;
+/// Mel spectrograms for model input. Requires the `full` feature.
+#[cfg(feature = "full")]
+pub mod spectrogram;
 
 // Re-export main types
 pub use application::error::{AudioError, AudioResult};
+#[cfg(feature = "full")]
 pub use application::services::AudioIngestionService;
+#[cfg(feature = "full")]
 pub use domain::entities::{CallSegment, Recording, SignalQuality};
+#[cfg(feature = "full")]
 pub use domain::repository::RecordingRepository;
 pub use features::{
     AcousticFeatures, FeatureConfig, FeatureExtractor, FeatureSummary, ModulationFeatures,
     SpectralFrame,
 };
+#[cfg(feature = "full")]
 pub use spectrogram::{MelSpectrogram, SpectrogramConfig};
 pub use streaming::{
     AnalysisWindow, AudioSource, MemorySource, RingBuffer, StreamConfig, StreamPipeline,

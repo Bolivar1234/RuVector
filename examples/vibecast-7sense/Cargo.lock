@@ -3239,6 +3239,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sevensense-wasm"
+version = "0.1.0"
+dependencies = [
+ "sevensense-audio",
+ "sevensense-vector",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,1263 @@
+<title>7sense — Acoustic Manifold</title>
+
+<style>
+  /* ── Tokens ────────────────────────────────────────────────────────────
+     Neutrals carry a slight olive bias so they sit with the accent rather
+     than reading as default grey. Viridis (the data ramp) is semantic and
+     deliberately separate from the accent hue. */
+  :root {
+    color-scheme: light dark;
+
+    --ground:      #EFF0EA;
+    --panel:       #FAFAF6;
+    --panel-sunk:  #E4E6DC;
+    --line:        #D3D7C8;
+    --line-strong: #B4BAA6;
+    --ink:         #191D15;
+    --ink-soft:    #5B6353;
+    --ink-faint:   #868D7C;
+
+    --accent:      #5F7D34;
+    --accent-lift: #7A9E44;
+    --warm:        #B25F27;
+
+    --good:        #46764F;
+    --warn:        #9A7418;
+    --crit:        #A33B2A;
+
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans:  ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:  ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+    --r: 3px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:      #12150E;
+      --panel:       #1A1E15;
+      --panel-sunk:  #0D100A;
+      --line:        #2C3223;
+      --line-strong: #434B36;
+      --ink:         #E6E9DD;
+      --ink-soft:    #A2AB94;
+      --ink-faint:   #6E7663;
+
+      --accent:      #9BBF5E;
+      --accent-lift: #B4D677;
+      --warm:        #D98A47;
+
+      --good:        #7BAE7F;
+      --warn:        #D0A93F;
+      --crit:        #D97056;
+    }
+  }
+
+  /* The viewer's toggle stamps data-theme on the root and must win over the
+     media query in both directions. */
+  :root[data-theme="light"] {
+    --ground: #EFF0EA; --panel: #FAFAF6; --panel-sunk: #E4E6DC;
+    --line: #D3D7C8; --line-strong: #B4BAA6;
+    --ink: #191D15; --ink-soft: #5B6353; --ink-faint: #868D7C;
+    --accent: #5F7D34; --accent-lift: #7A9E44; --warm: #B25F27;
+    --good: #46764F; --warn: #9A7418; --crit: #A33B2A;
+  }
+  :root[data-theme="dark"] {
+    --ground: #12150E; --panel: #1A1E15; --panel-sunk: #0D100A;
+    --line: #2C3223; --line-strong: #434B36;
+    --ink: #E6E9DD; --ink-soft: #A2AB94; --ink-faint: #6E7663;
+    --accent: #9BBF5E; --accent-lift: #B4D677; --warm: #D98A47;
+    --good: #7BAE7F; --warn: #D0A93F; --crit: #D97056;
+  }
+
+  /* ── Base ─────────────────────────────────────────────────────────────── */
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    max-width: 1240px;
+    margin: 0 auto;
+    padding: 28px 20px 48px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* ── Masthead ─────────────────────────────────────────────────────────── */
+  .masthead {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px 24px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid var(--line-strong);
+  }
+
+  .wordmark {
+    font-family: var(--serif);
+    font-size: clamp(30px, 4.4vw, 44px);
+    line-height: 1;
+    margin: 0;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+  .wordmark em {
+    font-style: italic;
+    color: var(--accent);
+  }
+
+  .standfirst {
+    margin: 8px 0 0;
+    max-width: 60ch;
+    color: var(--ink-soft);
+    font-size: 14.5px;
+  }
+
+  .build-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    text-align: right;
+    line-height: 1.7;
+    white-space: nowrap;
+  }
+  .build-tag b { color: var(--accent); font-weight: 600; }
+
+  /* ── Controls ─────────────────────────────────────────────────────────── */
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-right: 2px;
+  }
+
+  button {
+    font: inherit;
+    font-size: 13.5px;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r);
+    padding: 7px 14px;
+    cursor: pointer;
+    transition: background .13s, border-color .13s, color .13s;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--ground);
+    font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) {
+    background: var(--accent-lift);
+    border-color: var(--accent-lift);
+    color: var(--ground);
+  }
+
+  button[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--ground);
+  }
+
+  /* ── Layout ───────────────────────────────────────────────────────────── */
+  .stage {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+  }
+  @media (max-width: 940px) {
+    .stage { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    overflow: hidden;
+  }
+
+  .panel > header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel-sunk);
+  }
+
+  .panel h2 {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .panel .note {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    letter-spacing: 0.04em;
+  }
+
+  .canvas-wrap { position: relative; background: var(--panel-sunk); }
+  canvas { display: block; width: 100%; touch-action: none; }
+  #manifold { cursor: grab; aspect-ratio: 1 / 1; }
+  #manifold:active { cursor: grabbing; }
+  #manifold:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  .col { display: flex; flex-direction: column; gap: 18px; }
+
+  /* ── Readouts ─────────────────────────────────────────────────────────── */
+  .readout {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    gap: 1px;
+    background: var(--line);
+  }
+  .cell { background: var(--panel); padding: 10px 12px; }
+  .cell dt {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 3px;
+  }
+  .cell dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 17px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+  .cell dd small {
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    margin-left: 2px;
+  }
+
+  /* ── Legend ───────────────────────────────────────────────────────────── */
+  .legend {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    letter-spacing: 0.05em;
+    flex-wrap: wrap;
+  }
+  .ramp {
+    flex: 1 1 120px;
+    min-width: 90px;
+    height: 8px;
+    border-radius: 1px;
+    border: 1px solid var(--line-strong);
+  }
+
+  /* ── Archetype key ────────────────────────────────────────────────────── */
+  .key { display: flex; flex-direction: column; }
+  .key-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+    text-align: left;
+    background: none;
+    border-left: 0; border-right: 0; border-top: 0;
+    border-radius: 0;
+    width: 100%;
+    cursor: pointer;
+  }
+  .key-row:last-child { border-bottom: 0; }
+  .key-row:hover { background: var(--panel-sunk); color: var(--ink); border-color: var(--line); }
+  .key-row[aria-pressed="true"] {
+    background: var(--panel-sunk);
+    color: var(--ink);
+    border-color: var(--line);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .swatch { width: 9px; height: 9px; border-radius: 50%; }
+  .key-name { font-family: var(--serif); font-style: italic; font-size: 14.5px; }
+  .key-count {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-faint);
+  }
+
+  /* ── Segments table ───────────────────────────────────────────────────── */
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td {
+    padding: 6px 12px;
+    text-align: right;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  th {
+    font-size: 9.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 600;
+  }
+  th:first-child, td:first-child { text-align: left; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  .pill {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .pill.ok    { background: color-mix(in srgb, var(--good) 18%, transparent); color: var(--good); }
+  .pill.trunc { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+
+  /* ── Status strip ─────────────────────────────────────────────────────── */
+  .status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 22px;
+    padding: 11px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: var(--panel);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    font-variant-numeric: tabular-nums;
+  }
+  .status b { color: var(--ink); font-weight: 600; }
+  .status .dot {
+    display: inline-block; width: 6px; height: 6px;
+    border-radius: 50%; background: var(--good); margin-right: 6px;
+    vertical-align: middle;
+  }
+  .status .dot.err { background: var(--crit); }
+
+  .footnote {
+    font-size: 12.5px;
+    color: var(--ink-faint);
+    max-width: 78ch;
+    margin: 0;
+  }
+  .footnote code {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+  }
+
+  .selected-title {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 15px;
+    color: var(--ink);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="shell">
+
+  <header class="masthead">
+    <div>
+      <h1 class="wordmark">7sense <em>acoustic manifold</em></h1>
+      <p class="standfirst">
+        Synthesised vocalisations are analysed by the real Rust pipeline compiled to
+        WebAssembly — spectral descriptors, incremental segmentation, and a PCA
+        projection all run in this page. Nothing is precomputed.
+      </p>
+    </div>
+    <div class="build-tag">
+      engine <b id="tag-version">—</b><br>
+      module <b id="tag-size">—</b><br>
+      <span id="tag-timing">—</span>
+    </div>
+  </header>
+
+  <div class="controls">
+    <span class="eyebrow">Corpus</span>
+    <button id="btn-run" class="primary">Regenerate &amp; analyse</button>
+    <button id="btn-spin" aria-pressed="true">Rotation</button>
+    <span class="eyebrow" style="margin-left:auto">Colour</span>
+    <button id="btn-colour" data-mode="centroid">Spectral centroid</button>
+  </div>
+
+  <div class="stage">
+
+    <section class="panel">
+      <header>
+        <h2>Projection</h2>
+        <span class="note" id="variance-note">—</span>
+      </header>
+      <div class="canvas-wrap">
+        <canvas id="manifold" width="880" height="880"
+                tabindex="0" role="img"
+                aria-label="Three-dimensional scatter of analysed calls, rotatable by dragging"></canvas>
+      </div>
+      <div class="legend">
+        <span id="ramp-lo">0.0 kHz</span>
+        <span class="ramp" id="ramp"></span>
+        <span id="ramp-hi">16.0 kHz</span>
+        <span style="margin-left:auto">drag to rotate · click a point</span>
+      </div>
+    </section>
+
+    <div class="col">
+
+      <section class="panel">
+        <header>
+          <h2>Corpus</h2>
+          <span class="note">filter</span>
+        </header>
+        <div class="key" id="key"></div>
+      </section>
+
+      <section class="panel">
+        <header>
+          <h2>Selected call</h2>
+          <span class="note selected-title" id="sel-name">—</span>
+        </header>
+        <dl class="readout" id="sel-readout"></dl>
+        <div class="canvas-wrap">
+          <canvas id="radar" width="620" height="300"
+                  role="img" aria-label="Radar plot of eight normalised acoustic descriptors"></canvas>
+        </div>
+      </section>
+
+      <section class="panel">
+        <header>
+          <h2>Frequency track</h2>
+          <span class="note">centroid · dominant</span>
+        </header>
+        <div class="canvas-wrap">
+          <canvas id="track" width="620" height="220"
+                  role="img" aria-label="Spectral centroid and dominant frequency over time"></canvas>
+        </div>
+      </section>
+
+      <section class="panel">
+        <header>
+          <h2>Segments</h2>
+          <span class="note">streaming segmenter</span>
+        </header>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr><th>#</th><th>Start</th><th>End</th><th>Peak</th><th>SNR</th><th>State</th></tr>
+            </thead>
+            <tbody id="seg-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <div class="status" id="status">
+    <span><span class="dot"></span><b id="st-state">initialising</b></span>
+    <span>calls <b id="st-calls">—</b></span>
+    <span>frames <b id="st-frames">—</b></span>
+    <span>segments <b id="st-segments">—</b></span>
+    <span>windows <b id="st-windows">—</b></span>
+    <span>dropped <b id="st-dropped">—</b></span>
+  </div>
+
+  <p class="footnote">
+    Each call is synthesised at 32 kHz, then handed to
+    <code>analyze_summary</code> for a twelve-dimensional descriptor vector,
+    <code>detect_segments</code> for onset and offset boundaries, and
+    <code>project_pca</code> to place it in three dimensions. Position therefore
+    reflects measured acoustic structure rather than the label — archetypes
+    separate because they genuinely differ, not because they were told to.
+    Explained variance is reported above the plot: three components never capture
+    everything, and the figure says how much they miss.
+  </p>
+
+</div>
+
+<script type="module">
+'use strict';
+
+/* ══ WebAssembly module, inlined as a data URI ═══════════════════════════
+   A strict CSP blocks every external request, so the compiled pipeline
+   travels with the page rather than being fetched. */
+const WASM_BASE64 = "%%WASM_BASE64%%";
+
+const SR = 32000;
+const FRAME_STRIDE = 10;
+const SEG_STRIDE = 6;
+
+/* ── Boot ──────────────────────────────────────────────────────────────── */
+function decodeBase64(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+let wasm = null;
+let wasmBytes = 0;
+
+async function boot() {
+  const bytes = decodeBase64(WASM_BASE64);
+  wasmBytes = bytes.length;
+  const { instance } = await WebAssembly.instantiate(bytes, {});
+  wasm = instance.exports;
+}
+
+/* Reads the module's packed output buffer. A fresh view is taken every time
+   because growing the heap detaches any previously created one. */
+function readOut() {
+  return new Float32Array(wasm.memory.buffer, wasm.out_ptr(), wasm.out_len()).slice();
+}
+
+function withSamples(samples, fn) {
+  const ptr = wasm.alloc_f32(samples.length);
+  new Float32Array(wasm.memory.buffer, ptr, samples.length).set(samples);
+  try {
+    return fn(ptr, samples.length);
+  } finally {
+    wasm.dealloc_f32(ptr, samples.length);
+  }
+}
+
+/* ── Signal synthesis ──────────────────────────────────────────────────────
+   Five archetypes with genuinely different acoustic structure, so the
+   projection has something real to separate. Parameters jitter per call. */
+const TAU = Math.PI * 2;
+
+function mulberry(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const ARCHETYPES = [
+  {
+    id: 'pipit', name: 'Anthus trivialis', label: 'Tree pipit',
+    /* Descending trill: a falling carrier with a fast amplitude trill. */
+    build: (rnd) => {
+      const f0 = 6200 + rnd() * 900, f1 = 3100 + rnd() * 500;
+      const trill = 26 + rnd() * 10, dur = 1.5 + rnd() * 0.5;
+      return (t, T) => {
+        const p = t / T;
+        const f = f0 + (f1 - f0) * p;
+        const am = 0.5 + 0.5 * Math.sin(TAU * trill * t);
+        return { f, a: am * (1 - 0.25 * p), dur };
+      };
+    },
+    dur: () => 1.7
+  },
+  {
+    id: 'whistle', name: 'Pure whistle', label: 'Whistle',
+    build: (rnd) => {
+      const f0 = 3400 + rnd() * 1400, vib = 5 + rnd() * 4;
+      return (t) => ({ f: f0 + 90 * Math.sin(TAU * vib * t), a: 1, dur: 1.2 });
+    },
+    dur: () => 1.2
+  },
+  {
+    id: 'trill', name: 'Rapid trill', label: 'Trill',
+    build: (rnd) => {
+      const f0 = 4200 + rnd() * 1600, rate = 34 + rnd() * 14;
+      return (t) => ({ f: f0, a: Math.max(0, Math.sin(TAU * rate * t)) ** 0.6, dur: 1.3 });
+    },
+    dur: () => 1.3
+  },
+  {
+    id: 'sweep', name: 'Rising sweep', label: 'Sweep',
+    build: (rnd) => {
+      const f0 = 1900 + rnd() * 600, f1 = 8600 + rnd() * 1600;
+      return (t, T) => ({ f: f0 + (f1 - f0) * (t / T), a: 1, dur: 1.0 });
+    },
+    dur: () => 1.0
+  },
+  {
+    id: 'buzz', name: 'Broadband buzz', label: 'Buzz',
+    build: (rnd) => {
+      const centre = 5200 + rnd() * 1800, spread = 1500 + rnd() * 900;
+      return (t, T, noise) => ({ f: centre + spread * noise, a: 1, dur: 0.9 });
+    },
+    dur: () => 0.9
+  }
+];
+
+/* Renders one call: leading silence, the vocalisation, trailing silence.
+   The silence matters — it is what the segmenter's noise floor adapts to. */
+function synthesise(archetype, seed) {
+  const rnd = mulberry(seed);
+  const shape = archetype.build(rnd);
+  const body = archetype.dur();
+  const lead = 0.35, tail = 0.45;
+  const total = lead + body + tail;
+  const n = Math.round(total * SR);
+  const out = new Float32Array(n);
+
+  const gain = 0.34 + rnd() * 0.16;
+  let phase = 0;
+  let noiseState = rnd() * 1000;
+
+  for (let i = 0; i < n; i++) {
+    const t = i / SR - lead;
+    if (t < 0 || t > body) {
+      out[i] = (rnd() - 0.5) * 0.0016;   // faint room tone
+      continue;
+    }
+    noiseState = (noiseState * 16807) % 2147483647;
+    const noise = (noiseState / 2147483647) * 2 - 1;
+    const { f, a } = shape(t, body, noise);
+
+    phase += (TAU * f) / SR;
+    if (phase > TAU) phase -= TAU;
+
+    // Raised-cosine edges, so onsets are not clicks.
+    const edge = 0.05;
+    let env = 1;
+    if (t < edge) env = 0.5 * (1 - Math.cos((Math.PI * t) / edge));
+    else if (t > body - edge) env = 0.5 * (1 - Math.cos((Math.PI * (body - t)) / edge));
+
+    out[i] = gain * a * env * Math.sin(phase) + (rnd() - 0.5) * 0.004;
+  }
+  return out;
+}
+
+/* ── Analysis ──────────────────────────────────────────────────────────── */
+const CALLS_PER_ARCHETYPE = 22;
+let corpus = [];
+let projection = [];
+let variance = [0, 0, 0];
+let selected = 0;
+let activeFilter = null;
+
+function analyseCorpus(baseSeed) {
+  const started = performance.now();
+  corpus = [];
+
+  ARCHETYPES.forEach((archetype, ai) => {
+    for (let k = 0; k < CALLS_PER_ARCHETYPE; k++) {
+      const samples = synthesise(archetype, baseSeed + ai * 977 + k * 31);
+
+      const summary = withSamples(samples, (ptr, len) => {
+        if (wasm.analyze_summary(ptr, len, SR) < 0) return null;
+        return readOut();
+      });
+      if (!summary) continue;
+
+      const segments = withSamples(samples, (ptr, len) => {
+        const count = wasm.detect_segments(ptr, len, SR);
+        if (count <= 0) return [];
+        const raw = readOut();
+        const list = [];
+        for (let s = 0; s < count; s++) {
+          const o = s * SEG_STRIDE;
+          list.push({
+            startMs: raw[o], endMs: raw[o + 1], peak: raw[o + 2],
+            rms: raw[o + 3], snr: raw[o + 4], truncated: raw[o + 5] > 0.5
+          });
+        }
+        return list;
+      });
+
+      corpus.push({ archetype, ai, samples, summary, segments });
+    }
+  });
+
+  // Project the descriptor vectors. The trailing record holds explained
+  // variance, so it is stripped before the coordinates are used.
+  const dim = corpus[0].summary.length;
+  const flat = new Float32Array(corpus.length * dim);
+  corpus.forEach((c, i) => flat.set(c.summary, i * dim));
+
+  const ptr = wasm.alloc_f32(flat.length);
+  new Float32Array(wasm.memory.buffer, ptr, flat.length).set(flat);
+  const records = wasm.project_pca(ptr, corpus.length, dim, 3, 42);
+  const raw = readOut();
+  wasm.dealloc_f32(ptr, flat.length);
+
+  if (records > 0) {
+    projection = corpus.map((_, i) => [raw[i * 3], raw[i * 3 + 1], raw[i * 3 + 2]]);
+    variance = [raw[corpus.length * 3], raw[corpus.length * 3 + 1], raw[corpus.length * 3 + 2]];
+  }
+
+  return performance.now() - started;
+}
+
+/* Per-frame descriptors, computed lazily for the selected call only. */
+function framesFor(call) {
+  if (call._frames) return call._frames;
+  const frames = withSamples(call.samples, (ptr, len) => {
+    const count = wasm.analyze_features(ptr, len, SR);
+    if (count <= 0) return [];
+    const raw = readOut();
+    const list = [];
+    for (let f = 0; f < count; f++) {
+      const o = f * FRAME_STRIDE;
+      list.push({
+        timeMs: raw[o], centroid: raw[o + 1], spread: raw[o + 2], rolloff: raw[o + 3],
+        tonality: raw[o + 4], crest: raw[o + 5], entropy: raw[o + 6],
+        dominant: raw[o + 7], energyDb: raw[o + 8], voiced: raw[o + 9] > 0.5
+      });
+    }
+    return list;
+  });
+  call._frames = frames;
+  return frames;
+}
+
+/* ── Colour ────────────────────────────────────────────────────────────────
+   Viridis: perceptually uniform and colourblind-safe, unlike the
+   blue-green-red ramp a naive HSV mapping produces. */
+const VIRIDIS = [
+  [68, 1, 84], [72, 40, 120], [62, 74, 137], [49, 104, 142],
+  [38, 130, 142], [31, 158, 137], [53, 183, 121], [110, 206, 88],
+  [181, 222, 43], [253, 231, 37]
+];
+
+function viridis(t) {
+  t = Math.max(0, Math.min(1, t));
+  const x = t * (VIRIDIS.length - 1);
+  const i = Math.min(Math.floor(x), VIRIDIS.length - 2);
+  const f = x - i;
+  const a = VIRIDIS[i], b = VIRIDIS[i + 1];
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * f),
+    Math.round(a[1] + (b[1] - a[1]) * f),
+    Math.round(a[2] + (b[2] - a[2]) * f)
+  ];
+}
+const rgb = (c, alpha = 1) => `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
+
+/* ── 3D scatter ────────────────────────────────────────────────────────────
+   Hand-written projection with a painter's-algorithm depth sort. A CDN is
+   unreachable under the artifact CSP, and for a few hundred instanced points
+   a 2D canvas is entirely sufficient. */
+const manifold = document.getElementById('manifold');
+const mctx = manifold.getContext('2d');
+let yaw = 0.6, pitch = -0.34, spinning = true, dragging = false, lastPointer = null;
+let hovered = -1;
+
+function css(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function projectPoint(p, w, h) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  let [x, y, z] = p;
+  // yaw about Y, then pitch about X
+  let x1 = x * cy - z * sy;
+  let z1 = x * sy + z * cy;
+  let y1 = y * cp - z1 * sp;
+  let z2 = y * sp + z1 * cp;
+
+  const dist = 3.4;
+  const scale = (Math.min(w, h) * 0.62) / (dist + z2 * 0.55);
+  // Perspective normalised to 1.0 at the origin. Radii are expressed in
+  // pixels and scaled by this, so they do not track the projection's own
+  // pixel scale -- which is ~80 and would produce blobs.
+  const perspective = dist / (dist + z2 * 0.55);
+  return { sx: w / 2 + x1 * scale, sy: h / 2 + y1 * scale, depth: z2, perspective };
+}
+
+const COLOUR_FIELD = { centroid: 0, tonality: 3, energy: 7 };
+let colourRange = { lo: 0, hi: 1 };
+
+function measureColourRange(mode) {
+  const field = COLOUR_FIELD[mode];
+  let lo = Infinity, hi = -Infinity;
+  for (const call of corpus) {
+    const v = call.summary[field];
+    if (!Number.isFinite(v)) continue;
+    lo = Math.min(lo, v);
+    hi = Math.max(hi, v);
+  }
+  if (!Number.isFinite(lo) || hi - lo < 1e-6) { lo = 0; hi = 1; }
+  colourRange = { lo, hi };
+}
+
+function colourFor(call, mode) {
+  const v = call.summary[COLOUR_FIELD[mode]];
+  return viridis((v - colourRange.lo) / (colourRange.hi - colourRange.lo));
+}
+
+function drawManifold() {
+  const w = manifold.width, h = manifold.height;
+  const mode = document.getElementById('btn-colour').dataset.mode;
+  const lineCol = css('--line-strong');
+
+  mctx.clearRect(0, 0, w, h);
+
+  // Reference cage: a faint unit box, so rotation is legible.
+  const corners = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];
+  const edges = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  mctx.strokeStyle = lineCol;
+  mctx.globalAlpha = 0.42;
+  mctx.lineWidth = 1;
+  edges.forEach(([a, b]) => {
+    const pa = projectPoint(corners[a], w, h), pb = projectPoint(corners[b], w, h);
+    mctx.beginPath();
+    mctx.moveTo(pa.sx, pa.sy);
+    mctx.lineTo(pb.sx, pb.sy);
+    mctx.stroke();
+  });
+  mctx.globalAlpha = 1;
+
+  const order = projection
+    .map((p, i) => ({ i, ...projectPoint(p, w, h) }))
+    .sort((a, b) => b.depth - a.depth);
+
+  for (const item of order) {
+    const call = corpus[item.i];
+    const dimmed = activeFilter !== null && call.ai !== activeFilter;
+    const isSelected = item.i === selected;
+    const energy = Math.max(0, Math.min(1, (call.summary[7] + 60) / 50));
+    const radius = (2.6 + energy * 4.0) * item.perspective;
+
+    const colour = colourFor(call, mode);
+    const depthFade = 0.55 + 0.45 * (1 - Math.min(1, Math.max(0, (item.depth + 1.4) / 2.8)));
+    mctx.globalAlpha = dimmed ? 0.10 : 0.42 + 0.5 * depthFade;
+    mctx.beginPath();
+    mctx.arc(item.sx, item.sy, Math.max(1.4, radius), 0, TAU);
+    mctx.fillStyle = rgb(colour);
+    mctx.fill();
+
+    if (isSelected && !dimmed) {
+      mctx.globalAlpha = 1;
+      mctx.strokeStyle = css('--ink');
+      mctx.lineWidth = 1.6;
+      mctx.beginPath();
+      mctx.arc(item.sx, item.sy, Math.max(1.4, radius) + 4.0, 0, TAU);
+      mctx.stroke();
+    } else if (item.i === hovered && !dimmed) {
+      mctx.globalAlpha = 1;
+      mctx.strokeStyle = css('--accent');
+      mctx.lineWidth = 1.3;
+      mctx.beginPath();
+      mctx.arc(item.sx, item.sy, Math.max(1.4, radius) + 3.0, 0, TAU);
+      mctx.stroke();
+    }
+  }
+  mctx.globalAlpha = 1;
+}
+
+function pickPoint(clientX, clientY) {
+  const rect = manifold.getBoundingClientRect();
+  const x = (clientX - rect.left) * (manifold.width / rect.width);
+  const y = (clientY - rect.top) * (manifold.height / rect.height);
+
+  let best = -1, bestDist = 15 * 15;
+  projection.forEach((p, i) => {
+    if (activeFilter !== null && corpus[i].ai !== activeFilter) return;
+    const q = projectPoint(p, manifold.width, manifold.height);
+    const d = (q.sx - x) ** 2 + (q.sy - y) ** 2;
+    if (d < bestDist) { bestDist = d; best = i; }
+  });
+  return best;
+}
+
+/* ── Radar ─────────────────────────────────────────────────────────────────
+   Eight descriptors on shared normalised axes. The normalisation lives in the
+   Rust layer precisely so these can share a plot without per-axis rescaling
+   hiding cross-feature structure. */
+const radar = document.getElementById('radar');
+const rctx = radar.getContext('2d');
+
+const RADAR_AXES = [
+  { label: 'centroid',  get: s => s[0] / 12000 },
+  { label: 'spread',    get: s => s[2] / 6000 },
+  { label: 'tonality',  get: s => s[3] },
+  { label: 'crest',     get: s => s[4] },
+  { label: 'entropy',   get: s => s[5] },
+  { label: 'AM depth',  get: s => s[10] },
+  { label: 'FM extent', get: s => s[11] / 3000 },
+  { label: 'voiced',    get: s => s[8] }
+];
+
+function drawRadar(call) {
+  const w = radar.width, h = radar.height;
+  rctx.clearRect(0, 0, w, h);
+  if (!call) return;
+
+  const cx = w / 2, cy = h / 2 + 6;
+  const R = Math.min(w, h) * 0.36;
+  const n = RADAR_AXES.length;
+
+  rctx.strokeStyle = css('--line');
+  rctx.fillStyle = css('--ink-faint');
+  rctx.lineWidth = 1;
+  rctx.font = '10px ' + css('--mono');
+  rctx.textAlign = 'center';
+  rctx.textBaseline = 'middle';
+
+  for (const ring of [0.25, 0.5, 0.75, 1]) {
+    rctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * TAU - Math.PI / 2;
+      const px = cx + Math.cos(a) * R * ring;
+      const py = cy + Math.sin(a) * R * ring;
+      i === 0 ? rctx.moveTo(px, py) : rctx.lineTo(px, py);
+    }
+    rctx.stroke();
+  }
+
+  RADAR_AXES.forEach((axis, i) => {
+    const a = (i / n) * TAU - Math.PI / 2;
+    rctx.beginPath();
+    rctx.moveTo(cx, cy);
+    rctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
+    rctx.stroke();
+    rctx.fillText(axis.label, cx + Math.cos(a) * (R + 22), cy + Math.sin(a) * (R + 14));
+  });
+
+  const values = RADAR_AXES.map(ax => Math.max(0, Math.min(1, ax.get(call.summary) || 0)));
+  const accent = css('--accent');
+
+  rctx.beginPath();
+  values.forEach((v, i) => {
+    const a = (i / n) * TAU - Math.PI / 2;
+    const px = cx + Math.cos(a) * R * v;
+    const py = cy + Math.sin(a) * R * v;
+    i === 0 ? rctx.moveTo(px, py) : rctx.lineTo(px, py);
+  });
+  rctx.closePath();
+  rctx.fillStyle = accent;
+  rctx.globalAlpha = 0.19;
+  rctx.fill();
+  rctx.globalAlpha = 1;
+  rctx.strokeStyle = accent;
+  rctx.lineWidth = 1.7;
+  rctx.stroke();
+
+  values.forEach((v, i) => {
+    const a = (i / n) * TAU - Math.PI / 2;
+    rctx.beginPath();
+    rctx.arc(cx + Math.cos(a) * R * v, cy + Math.sin(a) * R * v, 2.4, 0, TAU);
+    rctx.fillStyle = accent;
+    rctx.fill();
+  });
+}
+
+/* ── Frequency track ───────────────────────────────────────────────────── */
+const track = document.getElementById('track');
+const tctx = track.getContext('2d');
+
+function drawTrack(call) {
+  const w = track.width, h = track.height;
+  tctx.clearRect(0, 0, w, h);
+  if (!call) return;
+
+  const frames = framesFor(call);
+  if (!frames.length) return;
+
+  const pad = { l: 44, r: 10, t: 12, b: 24 };
+  const plotW = w - pad.l - pad.r, plotH = h - pad.t - pad.b;
+  const maxHz = 12000;
+  const tMax = frames[frames.length - 1].timeMs;
+
+  tctx.strokeStyle = css('--line');
+  tctx.fillStyle = css('--ink-faint');
+  tctx.font = '10px ' + css('--mono');
+  tctx.lineWidth = 1;
+  tctx.textAlign = 'right';
+  tctx.textBaseline = 'middle';
+
+  for (let khz = 0; khz <= 12; khz += 3) {
+    const y = pad.t + plotH * (1 - (khz * 1000) / maxHz);
+    tctx.beginPath();
+    tctx.moveTo(pad.l, y);
+    tctx.lineTo(w - pad.r, y);
+    tctx.stroke();
+    tctx.fillText(khz + 'k', pad.l - 6, y);
+  }
+
+  // Voiced frames only: an unvoiced centroid is the noise floor's centroid,
+  // not the call's, and drawing it would imply a signal that is not there.
+  const drawSeries = (accessor, colour, width, alpha) => {
+    tctx.strokeStyle = colour;
+    tctx.lineWidth = width;
+    tctx.globalAlpha = alpha;
+    tctx.beginPath();
+    let pen = false;
+    frames.forEach(fr => {
+      if (!fr.voiced) { pen = false; return; }
+      const x = pad.l + plotW * (fr.timeMs / tMax);
+      const y = pad.t + plotH * (1 - Math.min(1, accessor(fr) / maxHz));
+      pen ? tctx.lineTo(x, y) : tctx.moveTo(x, y);
+      pen = true;
+    });
+    tctx.stroke();
+    tctx.globalAlpha = 1;
+  };
+
+  drawSeries(f => f.dominant, css('--warm'), 1.1, 0.5);
+  drawSeries(f => f.centroid, css('--accent'), 1.9, 1);
+
+  tctx.textAlign = 'left';
+  tctx.fillStyle = css('--ink-faint');
+  tctx.fillText('0 ms', pad.l, h - 10);
+  tctx.textAlign = 'right';
+  tctx.fillText(Math.round(tMax) + ' ms', w - pad.r, h - 10);
+}
+
+/* ── Panels ────────────────────────────────────────────────────────────── */
+const fmt = (v, d = 1) => Number.isFinite(v) ? v.toFixed(d) : '—';
+
+function renderSelection() {
+  const call = corpus[selected];
+  if (!call) return;
+  const s = call.summary;
+
+  document.getElementById('sel-name').textContent = call.archetype.name;
+
+  document.getElementById('sel-readout').innerHTML = [
+    ['centroid', fmt(s[0] / 1000, 2), 'kHz'],
+    ['spread',   fmt(s[2] / 1000, 2), 'kHz'],
+    ['tonality', fmt(s[3], 2), ''],
+    ['entropy',  fmt(s[5], 2), ''],
+    ['AM rate',  fmt(s[9], 1), 'Hz'],
+    ['FM extent',fmt(s[11], 0), 'Hz'],
+    ['energy',   fmt(s[7], 1), 'dB'],
+    ['voiced',   fmt(s[8] * 100, 0), '%']
+  ].map(([k, v, u]) =>
+    `<div class="cell"><dt>${k}</dt><dd>${v}<small>${u}</small></dd></div>`
+  ).join('');
+
+  const rows = call.segments.map((seg, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${Math.round(seg.startMs)}</td>
+      <td>${Math.round(seg.endMs)}</td>
+      <td>${fmt(seg.peak, 2)}</td>
+      <td>${fmt(seg.snr, 0)} dB</td>
+      <td><span class="pill ${seg.truncated ? 'trunc' : 'ok'}">${seg.truncated ? 'truncated' : 'closed'}</span></td>
+    </tr>`).join('');
+  document.getElementById('seg-body').innerHTML = rows ||
+    '<tr><td colspan="6" style="color:var(--ink-faint)">no segment above the noise floor</td></tr>';
+
+  drawRadar(call);
+  drawTrack(call);
+  drawManifold();
+}
+
+function renderKey() {
+  const counts = ARCHETYPES.map((_, ai) => corpus.filter(c => c.ai === ai).length);
+  document.getElementById('key').innerHTML = ARCHETYPES.map((a, ai) => {
+    const mean = corpus.filter(c => c.ai === ai)
+      .reduce((acc, c) => acc + c.summary[0], 0) / Math.max(1, counts[ai]);
+    const colour = rgb(viridis((mean - colourRange.lo) / (colourRange.hi - colourRange.lo)));
+    return `<button class="key-row" data-ai="${ai}" aria-pressed="${activeFilter === ai}">
+      <span class="swatch" style="background:${colour}"></span>
+      <span><span class="key-name">${a.name}</span> · ${a.label}</span>
+      <span class="key-count">${counts[ai]}</span>
+    </button>`;
+  }).join('');
+
+  document.querySelectorAll('.key-row').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ai = Number(btn.dataset.ai);
+      activeFilter = activeFilter === ai ? null : ai;
+      if (activeFilter !== null && corpus[selected].ai !== activeFilter) {
+        selected = corpus.findIndex(c => c.ai === activeFilter);
+        renderSelection();
+      }
+      renderKey();
+      drawManifold();
+    });
+  });
+}
+
+function renderStatus(elapsedMs) {
+  const totalFrames = corpus.reduce((a, c) => a + Math.round(c.samples.length / 320), 0);
+  const totalSegments = corpus.reduce((a, c) => a + c.segments.length, 0);
+
+  document.getElementById('st-state').textContent = 'ready';
+  document.getElementById('st-calls').textContent = corpus.length;
+  document.getElementById('st-frames').textContent = totalFrames.toLocaleString();
+  document.getElementById('st-segments').textContent = totalSegments;
+
+  const stats = withSamples(corpus[selected].samples, (ptr, len) => {
+    if (wasm.pipeline_stats(ptr, len, SR) < 0) return null;
+    return readOut();
+  });
+  document.getElementById('st-windows').textContent = stats ? stats[0] : '—';
+  document.getElementById('st-dropped').textContent = stats ? stats[4] : '—';
+
+  document.getElementById('variance-note').textContent =
+    `PC1 ${(variance[0] * 100).toFixed(0)}% · PC2 ${(variance[1] * 100).toFixed(0)}% · PC3 ${(variance[2] * 100).toFixed(0)}%`;
+  document.getElementById('tag-timing').textContent = `${elapsedMs.toFixed(0)} ms analysis`;
+}
+
+function renderRamp() {
+  const mode = document.getElementById('btn-colour').dataset.mode;
+  const stops = Array.from({ length: 10 }, (_, i) => rgb(viridis(i / 9))).join(',');
+  document.getElementById('ramp').style.background = `linear-gradient(90deg, ${stops})`;
+
+  // Labels report the corpus's measured range, so the ramp describes the data
+  // in front of the viewer rather than a nominal scale it may barely occupy.
+  measureColourRange(mode);
+  const format = {
+    centroid: v => (v / 1000).toFixed(1) + ' kHz',
+    tonality: v => v.toFixed(2),
+    energy:   v => v.toFixed(0) + ' dB'
+  }[mode];
+  document.getElementById('ramp-lo').textContent = format(colourRange.lo);
+  document.getElementById('ramp-hi').textContent = format(colourRange.hi);
+}
+
+/* ── Interaction ───────────────────────────────────────────────────────── */
+manifold.addEventListener('pointerdown', (e) => {
+  dragging = true;
+  lastPointer = { x: e.clientX, y: e.clientY, moved: false };
+  manifold.setPointerCapture(e.pointerId);
+});
+
+manifold.addEventListener('pointermove', (e) => {
+  if (dragging && lastPointer) {
+    const dx = e.clientX - lastPointer.x;
+    const dy = e.clientY - lastPointer.y;
+    if (Math.abs(dx) + Math.abs(dy) > 2) lastPointer.moved = true;
+    yaw += dx * 0.008;
+    pitch = Math.max(-1.35, Math.min(1.35, pitch + dy * 0.008));
+    lastPointer.x = e.clientX;
+    lastPointer.y = e.clientY;
+    drawManifold();
+  } else {
+    const hit = pickPoint(e.clientX, e.clientY);
+    if (hit !== hovered) { hovered = hit; drawManifold(); }
+  }
+});
+
+manifold.addEventListener('pointerup', (e) => {
+  if (lastPointer && !lastPointer.moved) {
+    const hit = pickPoint(e.clientX, e.clientY);
+    if (hit >= 0) { selected = hit; renderSelection(); }
+  }
+  dragging = false;
+  lastPointer = null;
+});
+
+manifold.addEventListener('pointerleave', () => { hovered = -1; drawManifold(); });
+
+manifold.addEventListener('keydown', (e) => {
+  const step = e.shiftKey ? 0.24 : 0.08;
+  if (e.key === 'ArrowLeft')  { yaw -= step; drawManifold(); e.preventDefault(); }
+  if (e.key === 'ArrowRight') { yaw += step; drawManifold(); e.preventDefault(); }
+  if (e.key === 'ArrowUp')    { pitch = Math.max(-1.35, pitch - step); drawManifold(); e.preventDefault(); }
+  if (e.key === 'ArrowDown')  { pitch = Math.min(1.35, pitch + step); drawManifold(); e.preventDefault(); }
+  if (e.key === 'Enter' || e.key === ' ') {
+    selected = (selected + 1) % corpus.length;
+    renderSelection();
+    e.preventDefault();
+  }
+});
+
+document.getElementById('btn-spin').addEventListener('click', (e) => {
+  spinning = !spinning;
+  e.currentTarget.setAttribute('aria-pressed', String(spinning));
+});
+
+document.getElementById('btn-colour').addEventListener('click', (e) => {
+  const modes = ['centroid', 'tonality', 'energy'];
+  const labels = { centroid: 'Spectral centroid', tonality: 'Tonality', energy: 'Energy' };
+  const next = modes[(modes.indexOf(e.currentTarget.dataset.mode) + 1) % modes.length];
+  e.currentTarget.dataset.mode = next;
+  e.currentTarget.textContent = labels[next];
+  renderRamp();
+  drawManifold();
+});
+
+document.getElementById('btn-run').addEventListener('click', () => {
+  const btn = document.getElementById('btn-run');
+  btn.disabled = true;
+  document.getElementById('st-state').textContent = 'analysing';
+  // Yield once so the disabled state paints before the synchronous work.
+  setTimeout(() => {
+    run(Math.floor(Math.random() * 100000));
+    btn.disabled = false;
+  }, 16);
+});
+
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+function tick() {
+  if (spinning && !dragging && !reduceMotion.matches) {
+    yaw += 0.0022;
+    drawManifold();
+  }
+  requestAnimationFrame(tick);
+}
+
+/* ── Run ───────────────────────────────────────────────────────────────── */
+function run(seed) {
+  const elapsed = analyseCorpus(seed);
+  selected = 0;
+  activeFilter = null;
+  renderRamp();
+  renderKey();
+  renderSelection();
+  renderStatus(elapsed);
+}
+
+boot().then(() => {
+  const v = wasm.pipeline_version();
+  document.getElementById('tag-version').textContent =
+    `v${Math.floor(v / 10000)}.${Math.floor(v / 100) % 100}.${v % 100}`;
+  document.getElementById('tag-size').textContent = `${(wasmBytes / 1024).toFixed(0)} KB`;
+  run(20260806);
+  if (reduceMotion.matches) {
+    spinning = false;
+    document.getElementById('btn-spin').setAttribute('aria-pressed', 'false');
+  }
+  tick();
+}).catch((err) => {
+  document.getElementById('st-state').textContent = 'engine failed to start';
+  document.querySelector('#status .dot').classList.add('err');
+  console.error(err);
+});
+</script>
