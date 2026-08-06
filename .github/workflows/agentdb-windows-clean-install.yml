@@ -35,7 +35,7 @@ jobs:
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\agentdb-clean" | Out-Null
           Set-Location "$env:RUNNER_TEMP\agentdb-clean"
           npm init -y | Out-Null
-          npm install --ignore-scripts --omit=optional --no-audit --no-fund `
+          npm install --ignore-scripts --no-audit --no-fund `
             agentdb@3.0.0-alpha.20 `
             "$env:GITHUB_WORKSPACE\artifacts\ruvector-rvf-wasm-0.1.10.tgz"
           npm ls agentdb @ruvector/rvf-wasm --all
