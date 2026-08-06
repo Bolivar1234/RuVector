@@ -66,6 +66,7 @@ pub mod infrastructure;
 
 mod distance;
 mod hyperbolic;
+pub mod projection;
 
 // Re-export commonly used types
 pub use application::services::{Neighbor, SearchOptions, VectorSpaceService};
@@ -75,6 +76,9 @@ pub use domain::entities::{
 };
 pub use domain::repository::{GraphEdgeRepository, VectorIndexRepository};
 pub use hyperbolic::{exp_map, log_map, mobius_add, poincare_distance};
+pub use projection::{
+    normalize_coordinates, to_poincare_ball, PcaProjection, ProjectionError, ProjectionMethod,
+};
 pub use infrastructure::hnsw_index::HnswIndex;
 
 /// Error types for vector operations
