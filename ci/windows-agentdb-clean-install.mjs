@@ -4,8 +4,10 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const agentdbPackage = require('agentdb/package.json');
-const wasmPackage = require('@ruvector/rvf-wasm/package.json');
+const agentdbEntry = require.resolve('agentdb');
+const wasmEntry = require.resolve('@ruvector/rvf-wasm');
+const agentdbPackage = JSON.parse(fs.readFileSync(path.join(path.dirname(agentdbEntry), '..', 'package.json'), 'utf8'));
+const wasmPackage = JSON.parse(fs.readFileSync(path.join(path.dirname(wasmEntry), '..', 'package.json'), 'utf8'));
 const agentdb = await import('agentdb');
 const backends = await import('agentdb/backends');
 
