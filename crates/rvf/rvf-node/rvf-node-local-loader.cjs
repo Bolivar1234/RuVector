@@ -15,4 +15,9 @@ if (!filename) {
   throw new Error(`The local rvf-node fork has no binary for ${key}`)
 }
 
-module.exports = require(join(__dirname, filename))
+const native = require(join(__dirname, filename))
+module.exports = native
+// Keep the CJS loader compatible with ESM named imports used by the SDK and
+// the AgentDB staging probe. Node's CJS lexer recognizes explicit properties;
+// assigning the native object wholesale alone is not sufficient.
+module.exports.RvfDatabase = native.RvfDatabase
