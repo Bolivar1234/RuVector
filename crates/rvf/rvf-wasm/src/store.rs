@@ -49,6 +49,22 @@ pub(crate) fn parse_store_bytes(buf: &[u8]) -> Option<ParsedStore> {
         return None;
     }
 
+    // RVF stores are a contiguous segment stream. Do not let the scanner's
+    // inspection-oriented ability to skip bytes become an integrity bypass:
+    // any gap or trailing garbage makes the store invalid.
+    let mut cursor = 0usize;
+    for seg in &segments {
+        if seg.offset != cursor {
+            return None;
+        }
+        let payload_start = seg.offset.checked_add(SEGMENT_HEADER_SIZE)?;
+        let payload_len = usize::try_from(seg.payload_length).ok()?;
+        cursor = payload_start.checked_add(payload_len)?;
+    }
+    if cursor != buf.len() {
+        return None;
+    }
+
     // Every discovered segment must be wholly contained in the input.  The
     // older scanner intentionally tolerated incomplete trailing bytes for
     // inspection, but opening a store must fail closed.
@@ -578,6 +594,13 @@ mod tests {
     fn truncated_store_is_rejected() {
         let mut bytes = exported_store();
         bytes.pop();
+        assert!(parse_store_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn trailing_garbage_is_rejected() {
+        let mut bytes = exported_store();
+        bytes.extend_from_slice(&[0xA5, 0x5A, 0x00, 0xFF]);
         assert!(parse_store_bytes(&bytes).is_none());
     }
 }
