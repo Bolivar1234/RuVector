@@ -489,6 +489,11 @@ const handlers = {
     emitPreToolUseAllow();
   },
 
+  'pre-edit': () => {
+    // PreToolUse gate for Write/Edit/MultiEdit — Cursor requires valid JSON stdout.
+    emitPreToolUseAllow();
+  },
+
   'post-edit': () => {
     // Record edit for session metrics
     if (session && session.metric) {
@@ -606,11 +611,18 @@ const handlers = {
       await Promise.resolve(handlers[command]());
     } catch (e) {
       // Hooks should never crash Claude Code - fail silently
-      console.log(`[WARN] Hook ${command} encountered an error: ${e.message}`);
+      process.stderr.write(`[WARN] Hook ${command} encountered an error: ${e.message}\n`);
+      if (command === 'pre-bash' || command === 'pre-edit' || /^pre-/.test(command)) {
+        emitPreToolUseAllow();
+      }
     }
   } else if (command) {
-    // Unknown command - pass through without error
-    console.log(`[OK] Hook: ${command}`);
+    // Unknown PreToolUse hooks (e.g. pre-edit typos) must emit JSON or Cursor blocks the tool.
+    if (/^pre-/.test(command)) {
+      emitPreToolUseAllow();
+    } else {
+      console.log(`[OK] Hook: ${command}`);
+    }
   } else {
     console.log('Usage: hook-handler.cjs <route|pre-bash|post-edit|session-restore|session-end|pre-task|post-task|stats>');
   }
