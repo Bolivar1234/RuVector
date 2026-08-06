@@ -455,7 +455,7 @@ pub extern "C" fn rvf_store_open(buf_ptr: i32, buf_len: i32) -> i32 {
     };
 
     let reg = store::registry();
-    let handle = reg.create(parsed.dimension, 0);
+    let handle = reg.create(parsed.dimension, parsed.metric);
     if handle <= 0 {
         return handle;
     }

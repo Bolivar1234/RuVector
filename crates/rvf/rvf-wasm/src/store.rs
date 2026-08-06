@@ -32,6 +32,9 @@ pub struct WasmStore {
 /// Parsed contents of an RVF store accepted by the WASM control plane.
 pub(crate) struct ParsedStore {
     pub dimension: u32,
+    /// Distance metric from the manifest (`payload[19]`), matching native
+    /// `parse_manifest_payload`. Unknown / zero values mean L2.
+    pub metric: u8,
     pub entries: Vec<(u64, Vec<f32>)>,
 }
 
@@ -101,6 +104,9 @@ pub(crate) fn parse_store_bytes(buf: &[u8]) -> Option<ParsedStore> {
     }
     let total_vectors = u64::from_le_bytes(payload[6..14].try_into().ok()?);
     let seg_count = u32::from_le_bytes(payload[14..18].try_into().ok()?) as usize;
+    // Byte 19 is the distance metric (profile is byte 18); same layout as
+    // native `read_path::parse_manifest_payload`.
+    let metric = payload[19];
     let dir_end = 22usize.checked_add(seg_count.checked_mul(25)?)?;
     if dir_end > payload.len() {
         return None;
@@ -173,7 +179,11 @@ pub(crate) fn parse_store_bytes(buf: &[u8]) -> Option<ParsedStore> {
         return None;
     }
 
-    Some(ParsedStore { dimension, entries })
+    Some(ParsedStore {
+        dimension,
+        metric,
+        entries,
+    })
 }
 
 impl WasmStore {
@@ -575,11 +585,33 @@ mod tests {
         let bytes = exported_store();
         let parsed = parse_store_bytes(&bytes).expect("exported store must be valid");
         assert_eq!(parsed.dimension, 3);
+        assert_eq!(parsed.metric, 0);
         assert_eq!(parsed.entries.len(), 2);
         assert_eq!(parsed.entries[0].0, 11);
         assert_eq!(parsed.entries[1].0, 22);
         assert_eq!(parsed.entries[0].1, vec![1.0, 2.0, 3.0]);
         assert_eq!(parsed.entries[1].1, vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn export_round_trip_preserves_cosine_metric() {
+        let mut store = WasmStore::new(2, 2); // cosine
+        let vectors = [10.0_f32, 0.0, 0.8, 0.6];
+        let ids = [10_u64, 20_u64];
+        assert_eq!(store.ingest(vectors.as_ptr(), ids.as_ptr(), 2), 2);
+
+        let mut bytes = vec![0_u8; 1024];
+        let written = store.export(bytes.as_mut_ptr(), bytes.len() as u32);
+        assert!(written > 0);
+        bytes.truncate(written as usize);
+
+        let parsed = parse_store_bytes(&bytes).expect("exported cosine store must be valid");
+        assert_eq!(parsed.metric, 2);
+        assert_eq!(parsed.dimension, 2);
+        assert_eq!(parsed.entries.len(), 2);
+
+        let reopened = WasmStore::new(parsed.dimension, parsed.metric);
+        assert_eq!(reopened.metric as u8, Metric::Cosine as u8);
     }
 
     #[test]

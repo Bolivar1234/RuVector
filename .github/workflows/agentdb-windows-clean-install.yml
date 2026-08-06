@@ -9,7 +9,7 @@ permissions:
 jobs:
   windows-clean-install:
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       AGENTDB_FORCE_SQLJS: '1'
       AGENTDB_DISABLE_TRANSFORMERS: '1'
@@ -21,6 +21,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22.23.1'
+
+      - name: Setup Rust (wasm32)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build RVF-WASM from checked-out sources
+        shell: pwsh
+        run: |
+          cargo build --release --target wasm32-unknown-unknown --manifest-path .\crates\rvf\rvf-wasm\Cargo.toml
+          Copy-Item -Force `
+            .\crates\rvf\target\wasm32-unknown-unknown\release\rvf_wasm.wasm `
+            .\npm\packages\rvf-wasm\pkg\rvf_wasm_bg.wasm
 
       - name: Pack corrected RVF-WASM
         shell: pwsh
