@@ -53,6 +53,7 @@ pub mod domain;
 pub mod features;
 pub mod infrastructure;
 pub mod spectrogram;
+pub mod streaming;
 
 // Re-export main types
 pub use application::error::{AudioError, AudioResult};
@@ -64,6 +65,10 @@ pub use features::{
     SpectralFrame,
 };
 pub use spectrogram::{MelSpectrogram, SpectrogramConfig};
+pub use streaming::{
+    AnalysisWindow, AudioSource, MemorySource, RingBuffer, StreamConfig, StreamPipeline,
+    StreamSegment, StreamSegmenter, StreamStats,
+};
 
 /// Standard target sample rate for all processing (32 kHz).
 pub const TARGET_SAMPLE_RATE: u32 = 32_000;
