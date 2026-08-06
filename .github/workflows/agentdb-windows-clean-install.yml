@@ -17,15 +17,24 @@ jobs:
       - name: Checkout corrected RuVector branch
         uses: actions/checkout@v4
 
+      - name: Setup Rust (wasm32)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          targets: wasm32-unknown-unknown
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22.23.1'
 
-      - name: Pack corrected RVF-WASM
+      - name: Build and pack corrected RVF-WASM
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\artifacts" | Out-Null
+          npm install -g wasm-opt
+          Push-Location "$env:GITHUB_WORKSPACE\npm\packages\rvf-wasm"
+          npm run build
+          Pop-Location
           npm pack --pack-destination "$env:GITHUB_WORKSPACE\artifacts" .\npm\packages\rvf-wasm
           Get-FileHash "$env:GITHUB_WORKSPACE\artifacts\ruvector-rvf-wasm-0.1.10.tgz" -Algorithm SHA256
 
