@@ -5210,7 +5210,9 @@ mod tests {
         store
             .ingest_batch(&[&collinear[..], &diagonal[..]], &[10, 20], None)
             .unwrap();
-        let before = store.query(&[1.0, 0.0], 1, &QueryOptions::default()).unwrap();
+        let before = store
+            .query(&[1.0, 0.0], 1, &QueryOptions::default())
+            .unwrap();
         assert_eq!(before[0].id, 10);
         let terminal_hash = *store.last_witness_hash();
         assert_ne!(terminal_hash, [0u8; 32]);
